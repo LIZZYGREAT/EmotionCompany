@@ -1,0 +1,25 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Dataset
+data/train/
+data/val/
+data/processed/
+
+# Training artifacts
+outputs/
+models/
+checkpoints/
+runs/
+
+# Model weights
+*.safetensors
+*.pt
+*.pth
+*.gguf
+
+# Local settings
+.env
