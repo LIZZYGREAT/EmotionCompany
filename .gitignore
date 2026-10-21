@@ -23,3 +23,5 @@ runs/
 
 # Local settings
 .env
+
+.ua/
