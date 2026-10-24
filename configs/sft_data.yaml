@@ -30,3 +30,5 @@ validation:
   assert_inputs_unchanged: true
   verify_every_sample: true
   batch_sizes: [1, 2, 4]
+  unit_test_command: python -m pytest tests/test_sft_dataset.py -q
+  full_regression_command: python -m pytest tests -q

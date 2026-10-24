@@ -19,6 +19,7 @@ from src.data.sft_dataset import (
     parse_args,
 )
 from src.data.sft_collator import SFTDataCollator, validate_dataset_batches
+from src.data.sft_trainer_validation import validate_trainer_data_path
 from src.shared.prompting import (
     build_messages,
     encode_full_training_sequence,
@@ -339,4 +340,47 @@ def test_s10_padding_rounding_refuses_to_truncate_or_exceed_s():
     too_small = SFTDataCollator(0, pad_to_multiple_of=8, max_sequence_length=7)
     with pytest.raises(ValueError, match="would exceed max_sequence_length"):
         too_small([feature])
+
+
+def test_s15_pinned_trl_trainer_dataloader_preserves_prebuilt_labels(tmp_path, sft_context):
+    tokenizer, _, _, _, _ = sft_context
+    for split in ("train", "dev"):
+        rows = []
+        for index, response in enumerate(("短回复。", "不同长度的回复。" * 12)):
+            sample = _sample(split, response=response)
+            sample["sample_id"] = f"{'val' if split == 'val' else 'train'}:train_conv_{index + 20:06d}:pp0"
+            sample["conversation_id"] = f"train_conv_{index + 20:06d}"
+            item, excluded, _ = _build(sample, (1280, 2048), sft_context)
+            assert excluded is None and item is not None
+            rows.append(item)
+        (tmp_path / f"{split}.jsonl").write_text(
+            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+
+    result = validate_trainer_data_path(
+        tmp_path,
+        tokenizer=tokenizer,
+        pad_token_id=int(tokenizer.pad_token_id),
+        eos_token_id=int(tokenizer.eos_token_id),
+        max_sequence_length=2048,
+        batch_size=2,
+    )
+    assert result["status"] == "passed"
+    assert result["trainer"] == "trl.SFTTrainer"
+    assert result["versions"] == {
+        "transformers": "5.20.2",
+        "trl": "1.14.2",
+        "datasets": "5.1.0",
+        "torch": "2.10.0+cu128",
+    }
+    assert result["dataset_processing_skipped"] is True
+    assert result["max_length"] is None
+    assert result["packing"] is False and result["padding_free"] is False
+    assert result["train_labels_equal_custom_collator"] is True
+    assert result["dev_labels_equal_custom_collator"] is True
+    assert result["no_sample_metadata_passed_to_model"] is True
+    assert result["model"]["forward_calls"] == 0
+    assert result["model"]["training_loop_called"] is False
+    assert result["model"]["weights_sha256_before"] == result["model"]["weights_sha256_after"]
 

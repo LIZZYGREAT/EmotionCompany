@@ -10,6 +10,7 @@ import json
 import os
 import platform
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -23,7 +24,8 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from participant.run_inference import load_runtime_tokenizer
-from src.data.sft_collator import validate_dataset_batches
+from src.data.sft_collator import SFTDataCollator, validate_dataset_batches
+from src.data.sft_trainer_validation import validate_trainer_data_path
 from src.shared.prompting import (
     build_messages,
     encode_full_training_sequence,
@@ -109,6 +111,8 @@ def load_config(path: Path) -> dict[str, Any]:
         not isinstance(size, int) or isinstance(size, bool) or size <= 0 for size in batch_sizes
     ):
         raise ValueError("validation.batch_sizes must contain positive integers")
+    if 2 not in batch_sizes:
+        raise ValueError("validation.batch_sizes must include 2 for the Trainer data-path check")
     required_inputs = {
         "normalized_dir", "d03_manifest", "d042_manifest", "d042_budget_rows",
         "train_schema", "prompt_path", "tokenizer_config", "runner_config",
@@ -438,6 +442,145 @@ def _git_facts(root: Path) -> dict[str, Any]:
     }
 
 
+def _run_configured_test(root: Path, command: str) -> dict[str, Any]:
+    parts = shlex.split(command)
+    if len(parts) < 4 or parts[:3] != ["python", "-m", "pytest"]:
+        raise ValueError("validation test commands must start with `python -m pytest`")
+    args = [sys.executable, "-m", "pytest", *parts[3:]]
+    result = subprocess.run(args, cwd=root, capture_output=True, text=True, check=False)
+    output = (result.stdout + "\n" + result.stderr).strip()
+    summary = next(
+        (
+            line.strip()
+            for line in reversed(output.splitlines())
+            if " passed" in line or " failed" in line or " error" in line
+        ),
+        output[-500:],
+    )
+    return {
+        "configured_command": command,
+        "executed_command": f"{Path(sys.executable).name} -m pytest {' '.join(parts[3:])}",
+        "exit_code": result.returncode,
+        "summary": summary,
+        "status": "passed" if result.returncode == 0 else "failed",
+    }
+
+
+def _run_validation_suite(root: Path, config: dict[str, Any]) -> list[dict[str, Any]]:
+    results = []
+    validation = config["validation"]
+    for key in ("unit_test_command", "full_regression_command"):
+        command = validation.get(key)
+        if not isinstance(command, str) or not command.strip():
+            raise ValueError(f"validation.{key} must be configured")
+        result = _run_configured_test(root, command)
+        results.append(result)
+        if result["exit_code"] != 0:
+            raise RuntimeError(f"{key} failed: {result['summary']}")
+    return results
+
+
+def _render_report(
+    summary: dict[str, Any],
+    manifest: dict[str, Any],
+    batch_validation: dict[str, Any],
+    trainer_validation: dict[str, Any],
+) -> str:
+    profile = summary["profile"]
+    tokenizer = summary["tokenizer"]
+    rows = [
+        "# D0.4.3 监督数据构建与训练 Batch 验收报告",
+        "",
+        f"> Profile `{profile['name']}`：S={profile['max_train_seq_length']}、P={profile['max_prompt_tokens']}，是验收候选，不是最终 E01 超参数。未运行 QLoRA 训练。",
+        "",
+        "## 1. 输入与冻结协议",
+        "",
+        f"- D0.3 Manifest SHA-256：`{manifest['d03_manifest_sha256']}`。Train/Dev/Val 输入 SHA-256：`{summary['d03_input_hashes']['train']}` / `{summary['d03_input_hashes']['dev']}` / `{summary['d03_input_hashes']['val']}`。构建前后输入哈希一致。",
+        f"- P0 SHA-256：`{summary['locked_p0_sha256']}`。Tokenizer：`{tokenizer['model_id']}` revision `{tokenizer['revision']}`；签名 `{tokenizer['signature_sha256']}`；Chat Template `{tokenizer['template_sha256']}`；EOS ID `{tokenizer['eos_token_id']}`。",
+        "- 使用共享 `build_messages`、T1 `select_recent_complete_suffix`、`serialize_completion` 和 `encode_full_training_sequence`；不构造第二套模板，不将 `sample_id` 放进模型输入。",
+        "- Completion 是完整紧凑 JSON + 模板结束边界，按 A0 输出 `memory_refs=[]`；D0.3 Target 保持不变。G/K 不参与本阶段筛样，最终 S/P/G/K 未冻结。",
+        "",
+        "## 2. 样本与预算账本",
+        "",
+        "| Split | 输入数 | full_fit | trimmed_fit | Prompt floor 排除 | Completion 超 S 排除 | 不可用数(占比) | SFT 输出 | D0.4.2 逐样本匹配 |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for split in ("train", "dev", "val"):
+        item = summary["split_summary"][split]
+        counts = item["outcomes"]
+        rows.append(
+            f"| {split} | {item['input_count']:,} | {counts['full_fit']:,} | {counts['trimmed_fit']:,} | "
+            f"{counts['prompt_floor_exceeds_cap']:,} | {counts['completion_overflows_train_budget']:,} | "
+            f"{item['excluded_count']:,} ({item['excluded_rate']:.2%}) | {item['output_count']:,} | "
+            f"{item['d042_rows_compared']:,}/{item['input_count']:,} |"
+        )
+    rows.extend([
+        "",
+        "Train/Dev 有效样本写入 SFT 数据；Val 仅用于与 D0.4.2 交叉核对，不生成训练文件。Train 和 Dev 分别满足 `input = full_fit + trimmed_fit + 两类排除`。D0.4.2 的 outcome、Prompt/Completion/Full Token 数、保留历史数量及 source 均逐样本匹配。",
+        "",
+        "D0.4.2 全量样本长度统计（未按 SFT 可用子集筛选；完整长度按审计口径统计）：",
+        "",
+        "| Split | Prompt P50/P90/P95/P99/Max | Completion P50/P90/P95/P99/Max | Full Sequence P50/P90/P95/P99/Max |",
+        "|---|---|---|---|",
+    ])
+    for split in ("train", "dev", "val"):
+        metrics = summary["d042_original_length_statistics"][split]
+        def audit_values(name: str) -> str:
+            dist = metrics[name]
+            return "/".join(str(dist[key]) for key in ("p50", "p90", "p95", "p99", "max"))
+        rows.append(
+            f"| {split} | {audit_values('prompt_tokens_full')} | {audit_values('completion_tokens_full')} | "
+            f"{audit_values('train_sequence_tokens_full')} |"
+        )
+    rows.extend([
+        "",
+        "有效 SFT 样本 Token 长度分布（nearest-rank；仅统计完整可用样本）：",
+        "",
+        "| Split | Prompt P50/P90/P95/P99/Max | Completion P50/P90/P95/P99/Max | Full P50/P90/P95/P99/Max |",
+        "|---|---|---|---|",
+    ])
+    for split in ("train", "dev"):
+        item = summary["split_summary"][split]
+        def values(name: str) -> str:
+            dist = item[f"{name}_length_tokens"]
+            return "/".join(str(dist[key]) for key in ("p50", "p90", "p95", "p99", "max"))
+        rows.append(f"| {split} | {values('prompt')} | {values('completion')} | {values('full')} |")
+    rows.extend([
+        "",
+        "## 3. Labels 与 EOS 边界",
+        "",
+        "每条 `input_ids` 是 `Prompt IDs + 完整 Completion IDs`；`labels` 与其等长，Prompt 段为全 `-100`，Completion 首 Token、JSON、模板 EOS 及模板要求的尾随空白 Token 保持原 ID。未做手工 shift；Causal LM 负责 next-token shifting。当前有效样本无全 `-100` Labels，无标准 JSON 截断。",
+        "",
+        "## 4. 动态 Batch 验收",
+        "",
+        f"- 实际 Qwen Tokenizer：pad ID `{batch_validation['pad_token_id']}`，EOS ID `{batch_validation['eos_token_id']}`；实际两者是否相同：`{batch_validation['pad_token_equals_eos']}`。Collator 只按右侧新填位置设置 Attention Mask 和 `-100`。",
+        "- Train/Dev 均用真实 SFT Token 记录检查 Batch size 1、2、4；逐元素核对原序列和 labels，右侧 padding 的 input/mask/label 值均正确，真实 EOS 仍参与监督。合成 PAD=EOS 边界用例也由 `tests/test_sft_dataset.py` 覆盖。",
+        "- 合成边界示例（EOS=99、PAD=0）：A=`input [10,11,20,21,99] / labels [-100,-100,20,21,99] / mask [1,1,1,1,1]`；B=`input [30,40,99,0,0] / labels [-100,40,99,-100,-100] / mask [1,1,1,0,0]`。B 的真实 EOS 参与监督，新增 PAD 位置才填 `-100`。",
+        "",
+        "## 5. Trainer 数据入口（不训练）",
+        "",
+        f"- 真实安装版本：Transformers {trainer_validation['versions']['transformers']}、TRL {trainer_validation['versions']['trl']}、Datasets {trainer_validation['versions']['datasets']}、Torch {trainer_validation['versions']['torch']}。",
+        "- 以预编码 Train/Dev JSONL 创建 `datasets.Dataset`，TRL `SFTTrainer` 使用 `dataset_kwargs.skip_prepare_dataset=true`、`max_length=None`、Packing/ padding-free 关闭，并传入专用 Collator。实际 train/eval DataLoader 的 `input_ids`、`labels`、`attention_mask` 与 Collator 输出逐元素相同；仅三个模型字段进入 Batch。",
+        f"- 使用 {trainer_validation['model']['type']} 完成数据通路验收；`forward_calls={trainer_validation['model']['forward_calls']}`、训练循环未调用、权重 SHA 前后相同。结论：**{trainer_validation['status']}**。",
+        "",
+        "## 6. 回归、复现与产物",
+        "",
+        "构建入口（先运行定向测试与全仓回归，再逐样本构建和 Trainer DataLoader 验收）：",
+        "",
+        "```bash",
+        "python -m pytest tests/test_sft_dataset.py -q",
+        "python -m pytest tests -q",
+        "python -m src.data.sft_dataset --config configs/sft_data.yaml",
+        "```",
+        "",
+        f"- 定向测试：`{manifest['validation']['tests'][0]['summary']}`；全仓回归：`{manifest['validation']['tests'][1]['summary']}`。",
+        f"- 有效预编码数据：`{manifest['outputs']['dataset_dir']}/{{train,dev}}.jsonl`；排除账本及摘要位于 `{manifest['outputs']['artifacts_dir']}`；文件 SHA-256 记录在本地 `manifest.json`。大型 Token JSONL 与 Manifest 不纳入 Git。",
+        "- 未完成：真实 Qwen 权重的 forward/backward 与显存测量、Adapter 更新、E00/E01 质量评测，以及 vLLM 服务端 Token 等价和最终 G/K 部署验收。",
+        "",
+    ])
+    return "\n".join(rows)
+
+
 def _publish_directories(items: list[tuple[Path, Path]]) -> None:
     backups: list[tuple[Path, Path]] = []
     installed: list[Path] = []
@@ -565,8 +708,17 @@ def build_sft_data(root: Path, config: dict[str, Any]) -> dict[str, Any]:
                 split_summary[split] = {
                     "input_count": seen_split,
                     "outcomes": {outcome: outcome_counts[outcome] for outcome in sorted(EXPECTED_OUTCOMES)},
+                    "outcome_rates": {
+                        outcome: outcome_counts[outcome] / seen_split
+                        for outcome in sorted(EXPECTED_OUTCOMES)
+                    },
                     "sft_usable_count": usable_count,
+                    "sft_usable_rate": usable_count / seen_split,
                     "excluded_count": outcome_counts["prompt_floor_exceeds_cap"] + outcome_counts["completion_overflows_train_budget"],
+                    "excluded_rate": (
+                        outcome_counts["prompt_floor_exceeds_cap"]
+                        + outcome_counts["completion_overflows_train_budget"]
+                    ) / seen_split,
                     "output_count": output_counts[split] if split in TRAIN_SPLITS else 0,
                     "included_length_scope": "SFT-usable samples only" if split in TRAIN_SPLITS else "audit-only; Val not emitted",
                     "prompt_length_tokens": _length_summary(included_lengths["prompt"]),
@@ -595,6 +747,22 @@ def build_sft_data(root: Path, config: dict[str, Any]) -> dict[str, Any]:
             max_sequence_length=seq,
             pad_to_multiple_of=profile.get("pad_to_multiple_of"),
         )
+        trainer_collator = SFTDataCollator(
+            int(tokenizer.pad_token_id),
+            pad_to_multiple_of=profile.get("pad_to_multiple_of"),
+            max_sequence_length=seq,
+        )
+        trainer_validation = validate_trainer_data_path(
+            stage_dataset,
+            tokenizer=tokenizer,
+            pad_token_id=int(tokenizer.pad_token_id),
+            eos_token_id=int(tokenizer.eos_token_id),
+            max_sequence_length=seq,
+            collator=trainer_collator,
+            batch_size=2,
+            root=root,
+        )
+        batch_validation["trainer_data_path"] = trainer_validation
 
         input_hashes_after = {name: sha256_file(path) for name, path in paths.items()}
         if context["input_hashes"] != input_hashes_after:
@@ -613,6 +781,10 @@ def build_sft_data(root: Path, config: dict[str, Any]) -> dict[str, Any]:
             "d042_candidate": candidate_key,
             "d042_rows_compared": len(budget_rows),
             "d042_rows_match": len(budget_rows) == expected_total,
+            "d042_original_length_statistics": {
+                split: context["d042_stats"]["length_statistics"]["by_split"][split]["metrics"]
+                for split in ALL_SPLITS
+            },
             "d03_input_hashes": {
                 split: context["input_hashes"][f"normalized_{split}"] for split in ALL_SPLITS
             },
@@ -620,6 +792,23 @@ def build_sft_data(root: Path, config: dict[str, Any]) -> dict[str, Any]:
             "tokenizer": context["tokenizer_facts"],
             "schema_sha256": context["input_hashes"]["train_schema"],
             "count_conservation": all(item["counts_conserve"] for item in split_summary.values()),
+            "supervision_contract": {
+                "prompt_labels_all_ignore_index": True,
+                "completion_tokens_supervised_verbatim": True,
+                "terminal_eos_supervised": True,
+                "manual_label_shift": False,
+                "sequence_truncation": False,
+                "val_used_for_training": False,
+            },
+            "environment": {
+                "python": platform.python_version(),
+                "transformers": importlib.metadata.version("transformers"),
+                "trl": importlib.metadata.version("trl"),
+                "datasets": importlib.metadata.version("datasets"),
+                "torch": importlib.metadata.version("torch"),
+            },
+            "tests": copy.deepcopy(config.get("_test_results", [])),
+            "trainer_validation": trainer_validation,
             "batch_validation": batch_validation,
         }
         (stage_artifacts / "summary.json").write_bytes(_json_bytes(summary, pretty=True))
@@ -667,18 +856,30 @@ def build_sft_data(root: Path, config: dict[str, Any]) -> dict[str, Any]:
                     name: {"path": str((output_dir / name).relative_to(root)) if name.endswith(".jsonl") and name in {"train.jsonl", "dev.jsonl"} else str((artifact_dir / name).relative_to(root)), "sha256": digest}
                     for name, digest in hashes.items()
                 },
+                "report": str(report_path.relative_to(root)),
             },
             "validation": {
                 "input_hashes_unchanged": True,
                 "all_d03_rows_have_one_d042_match": len(budget_rows) == expected_total,
                 "all_splits_conserve_counts": summary["count_conservation"],
-                "trainer_batch_path": "pending_C_D_validation",
+                "trainer_batch_path": trainer_validation,
+                "tests": copy.deepcopy(config.get("_test_results", [])),
+                "test_counts": {
+                    "passed": sum(result["status"] == "passed" for result in config.get("_test_results", [])),
+                    "failed": sum(result["status"] == "failed" for result in config.get("_test_results", [])),
+                    "blocked": sum(result["status"] == "blocked" for result in config.get("_test_results", [])),
+                },
             },
         }
-        (stage_artifacts / "manifest.json").write_bytes(_json_bytes(manifest, pretty=True))
+        report_bytes = _render_report(summary, manifest, batch_validation, trainer_validation).encode("utf-8")
         report_path.parent.mkdir(parents=True, exist_ok=True)
+        staged_report = stage_root / "D0.4.3_监督数据构建与Batch验收报告.md"
+        staged_report.write_bytes(report_bytes)
+        manifest["outputs"]["report_sha256"] = hashlib.sha256(report_bytes).hexdigest()
+        (stage_artifacts / "manifest.json").write_bytes(_json_bytes(manifest, pretty=True))
 
         _publish_directories([(stage_dataset, output_dir), (stage_artifacts, artifact_dir)])
+        os.replace(staged_report, report_path)
         report = {
             "dataset_dir": str(output_dir),
             "artifacts_dir": str(artifact_dir),
@@ -739,6 +940,7 @@ def main(argv: list[str] | None = None) -> int:
         config["_config_path"] = str(config_path.relative_to(PROJECT_ROOT))
         config["_config_sha256"] = sha256_file(config_path)
         config = _apply_overrides(config, args)
+        config["_test_results"] = _run_validation_suite(PROJECT_ROOT, config)
         result = build_sft_data(PROJECT_ROOT, config)
     except Exception as exc:
         print(f"D0.4.3 SFT build failed: {type(exc).__name__}: {exc}", file=sys.stderr)
@@ -750,6 +952,8 @@ def main(argv: list[str] | None = None) -> int:
         "dev_output_count": result["summary"]["dev_output_count"],
         "d042_rows_compared": result["summary"]["d042_rows_compared"],
         "d042_rows_match": result["summary"]["d042_rows_match"],
+        "trainer_validation": result["summary"]["trainer_validation"]["status"],
+        "tests": [item["summary"] for item in result["summary"]["tests"]],
         "counts": result["summary"]["input_counts"],
         "dataset_content_sha256": result["manifest"]["outputs"]["dataset_content_sha256"],
     }, ensure_ascii=False, indent=2))
