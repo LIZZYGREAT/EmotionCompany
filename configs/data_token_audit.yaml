@@ -55,4 +55,4 @@ outputs:
 
 validation:
   assert_inputs_unchanged: true
-  unit_test_command: python -m pytest tests/test_data_audit.py tests/test_data_pipeline.py tests/test_prompting.py tests/test_token_stats.py -q
+  unit_test_command: python -m pytest tests/test_data_audit.py tests/test_data_pipeline.py tests/test_prompting.py tests/test_token_stats.py tests/test_inference_protocol.py -q

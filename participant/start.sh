@@ -14,7 +14,8 @@ API_KEY="${VLLM_API_KEY:-}"
 START_TIMEOUT="${VLLM_START_TIMEOUT:-600}"
 PYTHON_CMD="${PYTHON_BIN:-python3}"
 VLLM_BIN="${VLLM_BIN:-vllm}"
-VLLM_ARGS=(--tensor-parallel-size 2) # 例如：VLLM_ARGS=(--tensor-parallel-size 2)
+TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
+VLLM_ARGS=(--tensor-parallel-size "$TENSOR_PARALLEL_SIZE")
 
 if [[ $# -ne 2 ]]; then
   echo "用法: $0 TEST_FILE RESULT_DIR" >&2
@@ -53,6 +54,33 @@ fi
 if [[ "$BACKEND" != "openai_compatible" ]]; then
   echo "ERROR: backend 必须为 transformers 或 openai_compatible: $BACKEND" >&2
   exit 1
+fi
+
+[[ "$TENSOR_PARALLEL_SIZE" =~ ^[1-9][0-9]*$ ]] || {
+  echo "ERROR: VLLM_TENSOR_PARALLEL_SIZE 必须为正整数" >&2
+  exit 1
+}
+
+read -r PROMPT_LIMIT GENERATION_LIMIT CONTEXT_LIMIT < <("$PYTHON_CMD" -c \
+  'import json, os, sys; c=json.load(open(sys.argv[1], encoding="utf-8")); x=c.get("context", {}); g=c.get("generation", {}); p=os.environ.get("EVALUATION_MAX_PROMPT_TOKENS", x.get("max_prompt_tokens")); k=os.environ.get("EVALUATION_SERVING_CONTEXT_LIMIT", x.get("serving_context_limit")); print(p or "", g.get("max_new_tokens", ""), k or "")' \
+  "$CONFIG_FILE")
+[[ "$PROMPT_LIMIT" =~ ^[1-9][0-9]*$ && "$GENERATION_LIMIT" =~ ^[1-9][0-9]*$ ]] || {
+  echo "ERROR: 配置必须显式提供正整数 P 和 G" >&2
+  exit 1
+}
+if [[ -n "$CONTEXT_LIMIT" ]]; then
+  [[ "$CONTEXT_LIMIT" =~ ^[1-9][0-9]*$ ]] || {
+    echo "ERROR: EVALUATION_SERVING_CONTEXT_LIMIT 必须为正整数或留空" >&2
+    exit 1
+  }
+  ((PROMPT_LIMIT + GENERATION_LIMIT <= CONTEXT_LIMIT)) || {
+    echo "ERROR: 部署预算不兼容：P($PROMPT_LIMIT) + G($GENERATION_LIMIT) > K($CONTEXT_LIMIT)" >&2
+    exit 1
+  }
+  VLLM_ARGS+=(--max-model-len "$CONTEXT_LIMIT")
+  echo "部署预算预检通过：P=$PROMPT_LIMIT, G=$GENERATION_LIMIT, K=$CONTEXT_LIMIT"
+else
+  echo "部署预算：P=$PROMPT_LIMIT, G=$GENERATION_LIMIT, K 未配置；服务上下文能力 not_verified"
 fi
 
 CONFIG_MODEL_PATH="$("$PYTHON_CMD" -c \
@@ -113,6 +141,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 echo "启动 vLLM: $MODEL_DIR -> $BASE_URL"
+echo "vLLM tensor parallel size: $TENSOR_PARALLEL_SIZE"
 echo "vLLM 日志: $LOG_FILE"
 "${COMMAND[@]}" >"$LOG_FILE" 2>&1 &
 VLLM_PID=$!

@@ -11,40 +11,41 @@ import json
 import os
 import re
 import statistics
+import sys
 import time
 import urllib.error
 import urllib.request
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from jsonschema import Draft202012Validator
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "configs" / "inference_config.json"
-EMOTIONS = {
-    "joy", "gratitude", "relaxed", "care", "pride", "neutral", "surprise",
-    "mixed", "sadness", "loneliness", "anxiety", "anger", "fear", "disgust",
-    "shame", "helplessness",
-}
-PROFILE_LABELS = {
-    "personality_traits": {"extroverted", "introverted", "open", "conservative", "high_conscientiousness", "casual", "agreeable", "assertive", "emotionally_stable", "sensitive"},
-    "interests": {"study_exam", "programming_technology", "reading_writing", "film_animation", "music", "games", "sports_fitness", "travel_outdoor", "pets", "social", "career_development", "art_design"},
-    "style": {"brief", "detailed", "colloquial", "formal", "direct", "indirect", "humorous", "rational", "high_emotional_expression", "low_emotional_expression", "emoji_user"},
-}
-MEMORY_RE = re.compile(r"^mem_[0-9]{6}$")
-SYSTEM_PROMPT = """你正在参加数字情感陪伴比赛。根据截止到最新用户消息的对话历史，完成下一轮 Assistant 回复预测。
 
-只输出一个 JSON object，不要输出 Markdown 或解释。object 必须且只能包含：
-- response_text: 非空中文回复，应自然、贴合上下文和用户偏好；
-- emotion_label: 最新用户消息的情绪，只能从 {emotions} 中选择；
-- user_profile: object，包含 personality_traits、interests、style 三个字符串数组；
-- memory_refs: 固定输出 []，因为测试集没有公开 memory bank。
 
-画像标签只能使用以下枚举；没有充分证据时宁可输出空数组：
-personality_traits: {personality}
-interests: {interests}
-style: {styles}
-"""
+def _find_workspace_root(start: Path) -> Path:
+    for candidate in (start, *start.parents):
+        if (candidate / "configs/prompts/p0.txt").is_file() and (candidate / "src/shared/prompting.py").is_file():
+            return candidate
+    raise RuntimeError(
+        "项目运行包缺少 configs/prompts/p0.txt 或 src/shared/prompting.py；"
+        "部署目录必须包含仓库共享协议文件"
+    )
+
+
+WORKSPACE_ROOT = _find_workspace_root(ROOT)
+if str(WORKSPACE_ROOT) not in sys.path:
+    sys.path.insert(0, str(WORKSPACE_ROOT))
+
+from src.shared.prompting import (  # noqa: E402
+    build_messages,
+    select_recent_complete_suffix,
+    tokenizer_signature,
+    validate_prompt_enum_order,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -105,8 +106,17 @@ def load_config() -> dict[str, Any]:
         config["model_path"] = os.environ["EVALUATION_MODEL_PATH"]
     if os.environ.get("EVALUATION_HARDWARE_LABEL"):
         config["hardware_label"] = os.environ["EVALUATION_HARDWARE_LABEL"]
+    if os.environ.get("EVALUATION_TOKENIZER_PATH"):
+        config.setdefault("tokenizer", {})["local_path"] = os.environ["EVALUATION_TOKENIZER_PATH"]
+    if os.environ.get("EVALUATION_MAX_PROMPT_TOKENS"):
+        config.setdefault("context", {})["max_prompt_tokens"] = int(os.environ["EVALUATION_MAX_PROMPT_TOKENS"])
+    if os.environ.get("EVALUATION_PROMPT_BUDGET_PROFILE"):
+        config.setdefault("context", {})["budget_profile"] = os.environ["EVALUATION_PROMPT_BUDGET_PROFILE"]
+    if "EVALUATION_SERVING_CONTEXT_LIMIT" in os.environ:
+        value = os.environ["EVALUATION_SERVING_CONTEXT_LIMIT"].strip()
+        config.setdefault("context", {})["serving_context_limit"] = int(value) if value else None
     config.setdefault("backend", "transformers")
-    required = {"backend", "generation", "performance_rounds", "hardware_label"}
+    required = {"backend", "generation", "performance_rounds", "hardware_label", "prompt", "tokenizer", "context"}
     if not required <= set(config):
         raise ValueError(f"推理配置缺少字段: {sorted(required - set(config))}")
     if config["backend"] not in {"transformers", "openai_compatible"}:
@@ -125,6 +135,31 @@ def load_config() -> dict[str, Any]:
             raise ValueError("api_options 必须为 JSON object")
     if not isinstance(config["performance_rounds"], int) or config["performance_rounds"] <= 0:
         raise ValueError("performance_rounds 必须为正整数")
+    context = config["context"]
+    prompt_cap = context.get("max_prompt_tokens")
+    if not isinstance(prompt_cap, int) or isinstance(prompt_cap, bool) or prompt_cap <= 0:
+        raise ValueError("context.max_prompt_tokens 必须是显式正整数")
+    if not isinstance(context.get("budget_profile"), str) or not context["budget_profile"].strip():
+        raise ValueError("context.budget_profile 必须显式命名")
+    serving_limit = context.get("serving_context_limit")
+    if serving_limit is not None and (
+        not isinstance(serving_limit, int) or isinstance(serving_limit, bool) or serving_limit <= 0
+    ):
+        raise ValueError("context.serving_context_limit 必须为正整数或 null")
+    generation_cap = config["generation"].get("max_new_tokens")
+    if not isinstance(generation_cap, int) or isinstance(generation_cap, bool) or generation_cap <= 0:
+        raise ValueError("generation.max_new_tokens 必须为正整数")
+    if serving_limit is not None and prompt_cap + generation_cap > serving_limit:
+        raise ValueError(
+            f"部署预算不兼容：P({prompt_cap}) + G({generation_cap}) = "
+            f"{prompt_cap + generation_cap} > K({serving_limit})"
+        )
+    tokenizer_config = config["tokenizer"]
+    for key in ("model_id", "revision", "expected_signature_sha256", "expected_template_sha256", "files_sha256"):
+        if key not in tokenizer_config:
+            raise ValueError(f"tokenizer.{key} 缺失；必须锁定审计 Tokenizer")
+    if tokenizer_config.get("local_files_only") is not True:
+        raise ValueError("tokenizer.local_files_only 必须为 true，禁止运行时隐式下载")
     return config
 
 
@@ -134,6 +169,133 @@ def model_path(config: dict[str, Any]) -> Path:
     if not resolved.exists():
         raise FileNotFoundError(f"本地模型目录不存在: {resolved}")
     return resolved.resolve()
+
+
+@lru_cache(maxsize=1)
+def load_submission_schema() -> dict[str, Any]:
+    schema_path = ROOT / "templates" / "submission_schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    Draft202012Validator.check_schema(schema)
+    return schema
+
+
+def submission_enums(schema: dict[str, Any] | None = None) -> dict[str, list[str]]:
+    schema = schema or load_submission_schema()
+    properties = schema["properties"]
+    profile_properties = properties["user_profile"]["properties"]
+    emotions = [value for value in properties["emotion_label"]["enum"] if value]
+    return {
+        "emotion_label": emotions,
+        **{
+            dimension: list(profile_properties[dimension]["items"]["enum"])
+            for dimension in ("personality_traits", "interests", "style")
+        },
+    }
+
+
+def load_runtime_protocol(config: dict[str, Any]) -> tuple[str, dict[str, Any], dict[str, list[str]], dict[str, Any]]:
+    prompt_cfg = config["prompt"]
+    prompt_path = (WORKSPACE_ROOT / prompt_cfg["path"]).resolve()
+    if not prompt_path.is_relative_to(WORKSPACE_ROOT) or not prompt_path.is_file():
+        raise FileNotFoundError(f"P0 文本缺失或路径越界: {prompt_path}")
+    prompt_bytes = prompt_path.read_bytes()
+    prompt_text = prompt_bytes.decode("utf-8")
+    prompt_sha = hashlib.sha256(prompt_bytes).hexdigest()
+    if prompt_sha != prompt_cfg["sha256"]:
+        raise RuntimeError(f"P0 SHA-256 与冻结协议不一致: {prompt_sha}")
+
+    schema = load_submission_schema()
+    enums = submission_enums(schema)
+    official_prompt_schema = {
+        "$defs": {
+            "emotion": {"enum": enums["emotion_label"]},
+            "profile": {
+                "properties": {
+                    dimension: {"items": {"enum": enums[dimension]}}
+                    for dimension in ("personality_traits", "interests", "style")
+                }
+            },
+        }
+    }
+    validate_prompt_enum_order(prompt_text, official_prompt_schema)
+    return prompt_text, schema, enums, {
+        "path": str(prompt_path),
+        "version": prompt_cfg["version"],
+        "sha256": prompt_sha,
+        "tokenizer_id": config["tokenizer"]["model_id"],
+        "tokenizer_revision": config["tokenizer"]["revision"],
+    }
+
+
+def _tokenizer_files_for_path(path: Path, expected_files: dict[str, str]) -> dict[str, str]:
+    actual = {}
+    for name in expected_files:
+        file_path = path / name
+        if file_path.is_file():
+            actual[name] = sha256(file_path)
+    return actual
+
+
+def load_runtime_tokenizer(config: dict[str, Any], local_source: Path | None = None) -> tuple[Any, dict[str, Any]]:
+    from transformers import AutoTokenizer
+
+    tokenizer_config = config["tokenizer"]
+    model_id = tokenizer_config["model_id"]
+    revision = tokenizer_config["revision"]
+    local_path_value = tokenizer_config.get("local_path")
+    source_path = Path(local_path_value).expanduser() if local_path_value else local_source
+    if source_path is not None and not source_path.is_absolute():
+        source_path = ROOT / source_path
+    if source_path is not None:
+        source_path = source_path.resolve()
+        if not source_path.is_dir():
+            raise FileNotFoundError(f"Tokenizer 本地目录不存在: {source_path}")
+        tokenizer = AutoTokenizer.from_pretrained(
+            str(source_path), local_files_only=True, trust_remote_code=False
+        )
+        file_hashes = _tokenizer_files_for_path(source_path, tokenizer_config["files_sha256"])
+        if file_hashes != tokenizer_config["files_sha256"]:
+            raise RuntimeError("本地模型 Tokenizer 文件指纹与 D0.4.2 锁定版本不一致")
+        source_label = str(source_path)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_id,
+            revision=revision,
+            local_files_only=True,
+            trust_remote_code=False,
+        )
+        try:
+            from huggingface_hub import hf_hub_download
+            file_hashes = {
+                name: sha256(Path(hf_hub_download(
+                    repo_id=model_id,
+                    filename=name,
+                    revision=revision,
+                    local_files_only=True,
+                )))
+                for name in tokenizer_config["files_sha256"]
+            }
+        except Exception as exc:
+            raise RuntimeError(
+                f"无法从本地缓存逐文件核验锁定 Tokenizer: {type(exc).__name__}: {exc}"
+            ) from exc
+        source_label = f"{model_id}@{revision} (local cache only)"
+
+    signature = tokenizer_signature(
+        tokenizer,
+        model_id=model_id,
+        revision=revision,
+        tokenizer_files=file_hashes,
+    )
+    if signature["template_sha256"] != tokenizer_config["expected_template_sha256"]:
+        raise RuntimeError("Tokenizer Chat Template SHA-256 与 D0.4.2 锁定版本不一致")
+    if signature["signature_sha256"] != tokenizer_config["expected_signature_sha256"]:
+        raise RuntimeError("Tokenizer 文件/模板签名与 D0.4.2 锁定版本不一致")
+    if getattr(tokenizer, "eos_token_id", None) != tokenizer_config.get("eos_token_id"):
+        raise RuntimeError("Tokenizer EOS Token ID 与 D0.4.2 锁定版本不一致")
+    signature["source"] = source_label
+    signature["local_files_only"] = True
+    return tokenizer, signature
 
 
 def api_endpoint(base_url: str) -> str:
@@ -163,6 +325,55 @@ def api_generation_options(generation: dict[str, Any]) -> dict[str, Any]:
     return options
 
 
+class TemplateEquivalenceError(RuntimeError):
+    pass
+
+
+def api_message_payload(messages: list[dict[str, str]], config: dict[str, Any]) -> list[dict[str, str]]:
+    api_config = config.get("openai_compatible", {})
+    allow_reasoning_field = bool(api_config.get("pass_reasoning_content_field", False))
+    payload_messages = []
+    for message in messages:
+        api_message = {"role": message["role"], "content": message["content"]}
+        if message["role"] == "assistant" and "reasoning_content" in message:
+            if "</think>" in message["content"] and not allow_reasoning_field:
+                raise TemplateEquivalenceError(
+                    "assistant history contains literal </think>; API protocol does not permit "
+                    "the Qwen reasoning_content control field, so server rendering is unverified"
+                )
+            if allow_reasoning_field:
+                # This is a vLLM/Qwen template extension, not a portable OpenAI field.
+                api_message["reasoning_content"] = message["reasoning_content"]
+        payload_messages.append(api_message)
+    return payload_messages
+
+
+def build_api_payload(
+    config: dict[str, Any],
+    messages: list[dict[str, str]],
+    generation: dict[str, Any],
+) -> dict[str, Any]:
+    api_options = dict(config.get("api_options", {}))
+    reserved = {"model", "messages", "max_tokens", "chat_template_kwargs"}
+    conflicts = reserved & set(api_options)
+    if conflicts:
+        expected_kwargs = {"enable_thinking": False}
+        if conflicts == {"chat_template_kwargs"} and api_options["chat_template_kwargs"] == expected_kwargs:
+            api_options.pop("chat_template_kwargs")
+        else:
+            raise ValueError(f"api_options 不得覆盖协议字段: {sorted(conflicts)}")
+    payload = {
+        "model": config["api_model"],
+        "messages": api_message_payload(messages, config),
+        **api_generation_options(generation),
+        **api_options,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    if payload.get("max_tokens") != generation.get("max_new_tokens"):
+        raise ValueError("API max_tokens 必须与 generation.max_new_tokens 一致")
+    return payload
+
+
 def response_content(payload: Any) -> str:
     try:
         choice = payload["choices"][0]
@@ -183,21 +394,12 @@ def response_content(payload: Any) -> str:
     raise ValueError("API 响应的 message.content 必须为字符串或文本片段数组")
 
 
-def request_chat_completion(
+def _request_chat_completion_details(
     config: dict[str, Any],
     messages: list[dict[str, str]],
     generation: dict[str, Any],
-) -> str:
-    reserved = {"model", "messages"}
-    api_options = dict(config.get("api_options", {}))
-    if reserved & set(api_options):
-        raise ValueError(f"api_options 不得覆盖字段: {sorted(reserved & set(api_options))}")
-    payload = {
-        "model": config["api_model"],
-        "messages": messages,
-        **api_generation_options(generation),
-        **api_options,
-    }
+) -> tuple[str, dict[str, Any]]:
+    payload = build_api_payload(config, messages, generation)
     headers = {"Content-Type": "application/json"}
     api_key = config.get("api_key", "")
     if api_key:
@@ -220,18 +422,26 @@ def request_chat_completion(
     except urllib.error.URLError as exc:
         raise RuntimeError(f"无法连接本地 Base URL: {exc.reason}") from exc
     try:
-        return response_content(json.loads(raw_response))
+        response_payload = json.loads(raw_response)
+        choice = response_payload.get("choices", [{}])[0]
+        usage = response_payload.get("usage", {})
+        details = {
+            "server_prompt_tokens": usage.get("prompt_tokens") if isinstance(usage, dict) else None,
+            "server_completion_tokens": usage.get("completion_tokens") if isinstance(usage, dict) else None,
+            "finish_reason": choice.get("finish_reason") if isinstance(choice, dict) else None,
+        }
+        return response_content(response_payload), details
     except json.JSONDecodeError as exc:
         raise ValueError("API 响应不是有效 JSON") from exc
 
 
-def conversation_text(sample: dict[str, Any]) -> str:
-    rendered = []
-    for turn in sample["history"]:
-        if not isinstance(turn, dict) or turn.get("role") not in {"user", "assistant"} or not isinstance(turn.get("content"), str):
-            raise ValueError(f"样本 {sample['id']} 的 history 格式无效")
-        rendered.append(f"{turn['role']}: {turn['content']}")
-    return "样本 ID: " + sample["id"] + "\n对话历史:\n" + "\n".join(rendered)
+def request_chat_completion(
+    config: dict[str, Any],
+    messages: list[dict[str, str]],
+    generation: dict[str, Any],
+) -> str:
+    """Compatibility wrapper retaining the original content-only helper API."""
+    return _request_chat_completion_details(config, messages, generation)[0]
 
 
 def extract_object(text: str) -> dict[str, Any]:
@@ -268,16 +478,40 @@ def recover_response_text(text: str) -> str:
     return cleaned
 
 
-def normalize_prediction(sample_id: str, raw: dict[str, Any]) -> dict[str, Any]:
+def has_invalid_label(raw: dict[str, Any], enums: dict[str, list[str]]) -> bool:
+    emotion = raw.get("emotion_label")
+    if not isinstance(emotion, str) or emotion not in enums["emotion_label"]:
+        return True
+    profile = raw.get("user_profile")
+    if not isinstance(profile, dict):
+        return True
+    for dimension in ("personality_traits", "interests", "style"):
+        values = profile.get(dimension)
+        if (
+            not isinstance(values, list)
+            or any(not isinstance(value, str) for value in values)
+            or len(values) != len(set(values))
+            or not set(values) <= set(enums[dimension])
+        ):
+            return True
+    return False
+
+
+def normalize_prediction(
+    sample_id: str,
+    raw: dict[str, Any],
+    enums: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    enums = enums or submission_enums()
     response = raw.get("response_text")
     emotion = raw.get("emotion_label")
     profile = raw.get("user_profile")
-    memories = raw.get("memory_refs")
     clean_response = response.strip() if isinstance(response, str) else ""
-    clean_emotion = emotion if isinstance(emotion, str) and emotion in EMOTIONS else ""
+    clean_emotion = emotion if isinstance(emotion, str) and emotion in enums["emotion_label"] else ""
     profile = profile if isinstance(profile, dict) else {}
     clean_profile: dict[str, list[str]] = {}
-    for name, allowed in PROFILE_LABELS.items():
+    for name in ("personality_traits", "interests", "style"):
+        allowed = set(enums[name])
         values = profile.get(name)
         valid = (
             isinstance(values, list)
@@ -286,21 +520,21 @@ def normalize_prediction(sample_id: str, raw: dict[str, Any]) -> dict[str, Any]:
             and set(values) <= allowed
         )
         clean_profile[name] = values if valid else []
-    valid_memories = (
-        isinstance(memories, list)
-        and all(isinstance(value, str) and MEMORY_RE.fullmatch(value) for value in memories)
-        and len(memories) == len(set(memories))
-    )
     return {
         "id": sample_id,
         "response_text": clean_response,
         "emotion_label": clean_emotion,
         "user_profile": clean_profile,
-        "memory_refs": memories if valid_memories else [],
+        "memory_refs": [],
     }
 
 
-def parse_prediction(sample_id: str, decoded: str) -> tuple[dict[str, Any], bool]:
+def parse_prediction(
+    sample_id: str,
+    decoded: str,
+    enums: dict[str, list[str]] | None = None,
+) -> tuple[dict[str, Any], bool, bool]:
+    enums = enums or submission_enums()
     try:
         raw_prediction = extract_object(decoded)
         parse_failed = False
@@ -312,7 +546,17 @@ def parse_prediction(sample_id: str, decoded: str) -> tuple[dict[str, Any], bool
             "memory_refs": [],
         }
         parse_failed = True
-    return normalize_prediction(sample_id, raw_prediction), parse_failed
+    invalid_label = not parse_failed and has_invalid_label(raw_prediction, enums)
+    return normalize_prediction(sample_id, raw_prediction, enums), parse_failed, invalid_label
+
+
+def empty_prediction(sample_id: str, enums: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    return normalize_prediction(sample_id, {
+        "response_text": "",
+        "emotion_label": "",
+        "user_profile": {},
+        "memory_refs": [],
+    }, enums)
 
 
 def synchronize(torch_module: Any) -> None:
@@ -333,6 +577,63 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def prepare_sample_messages(
+    sample: dict[str, Any],
+    prompt_text: str,
+    tokenizer: Any,
+    prompt_cap: int,
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    history = sample.get("history")
+    if not isinstance(history, list) or not history:
+        raise ValueError(f"样本 {sample.get('id', '<missing-id>')} 的 history 必须为非空数组")
+    selection = select_recent_complete_suffix(history, prompt_text, prompt_cap, tokenizer)
+    messages = build_messages(selection["selected_history"], prompt_text)
+    return selection, messages
+
+
+def generate_transformers_sample(
+    model: Any,
+    torch_module: Any,
+    tokenizer: Any,
+    prompt_ids: list[int],
+    generation: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    if not prompt_ids:
+        raise ValueError("Transformers Prompt Token IDs 不能为空")
+    if hasattr(model, "get_input_embeddings"):
+        input_device = model.get_input_embeddings().weight.device
+    else:
+        input_device = next(model.parameters()).device
+    input_ids = torch_module.tensor([prompt_ids], dtype=torch_module.long, device=input_device)
+    attention_mask = torch_module.ones_like(input_ids)
+    with torch_module.inference_mode():
+        output_ids = model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            **generation,
+        )
+    new_ids = output_ids[0, input_ids.shape[1]:]
+    decoded = tokenizer.decode(new_ids, skip_special_tokens=True)
+    eos_id = getattr(tokenizer, "eos_token_id", None)
+    contains_eos = False
+    if eos_id is not None:
+        contains_eos = bool((new_ids == eos_id).any().item())
+    details = {
+        "generated_tokens": int(new_ids.shape[-1]),
+        "stop_reason": "eos" if contains_eos else "generation_limit_or_other",
+    }
+    return decoded, details
+
+
+def validate_submission_prediction(prediction: dict[str, Any], schema: dict[str, Any] | None = None) -> None:
+    schema = schema or load_submission_schema()
+    Draft202012Validator(schema).validate(prediction)
+
+
+def _prediction_status_counts(statuses: list[str]) -> dict[str, int]:
+    return {status: statuses.count(status) for status in sorted(set(statuses))}
+
+
 def main() -> None:
     args = parse_args()
     test_file = validate_test_file(args.test_file.resolve())
@@ -340,7 +641,16 @@ def main() -> None:
     prepare_result_dir(result_dir)
     config = load_config()
     backend = config["backend"]
-    backend_report: dict[str, Any]
+    samples = read_jsonl(test_file)
+    prompt_text, submission_schema, enums, prompt_facts = load_runtime_protocol(config)
+    context = config["context"]
+    prompt_cap = context["max_prompt_tokens"]
+    generation = dict(config["generation"])
+    serving_limit = context.get("serving_context_limit")
+    budget_status = (
+        "not_verified" if serving_limit is None
+        else "configured_preflight_pass_not_server_verified"
+    )
 
     if backend == "transformers":
         local_model = model_path(config)
@@ -369,7 +679,7 @@ def main() -> None:
             if model_config.model_type in MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
             else AutoModelForCausalLM
         )
-        tokenizer = AutoTokenizer.from_pretrained(local_model, trust_remote_code=trust_remote_code, local_files_only=True)
+        tokenizer, tokenizer_facts = load_runtime_tokenizer(config, local_model)
         model = model_loader.from_pretrained(
             local_model,
             trust_remote_code=trust_remote_code,
@@ -379,63 +689,121 @@ def main() -> None:
         )
         model.eval()
         backend_report = {
-            "version": "transformers_inference_v2",
+            "version": "transformers_p0_f2_t1_v3",
             "timing_scope": "tokenize+generate+decode+parse+validate; model loading excluded",
             "model_path_name": local_model.name,
             "model_type": model_config.model_type,
             "model_loader": model_loader.__name__,
+            "template_equivalence": "local_input_ids_are_the_shared_encode_inference_prompt_result",
         }
     else:
+        local_tokenizer_source = None
+        configured_tokenizer_path = config["tokenizer"].get("local_path")
+        if configured_tokenizer_path:
+            local_tokenizer_source = Path(configured_tokenizer_path).expanduser()
+            if not local_tokenizer_source.is_absolute():
+                local_tokenizer_source = ROOT / local_tokenizer_source
+        tokenizer, tokenizer_facts = load_runtime_tokenizer(config, local_tokenizer_source)
         backend_report = {
-            "version": "openai_compatible_inference_v2",
+            "version": "openai_compatible_p0_f2_t1_v3",
             "timing_scope": "HTTP request+server inference+response decode+parse+validate; server startup excluded",
             "api_model": config["api_model"],
             "base_url": config["base_url"],
+            "template_equivalence": "BLOCKED_NOT_RUN_exact_server_token_ids_not_observable",
         }
 
-    samples = read_jsonl(test_file)
     submission_path = result_dir / "submission.jsonl"
-    submission_path.write_text("", encoding="utf-8")
     latencies: list[float] = []
-    predictions: list[dict[str, Any]] = []
+    prediction_count = 0
     parse_failure_ids: list[str] = []
-    generation = dict(config["generation"])
+    invalid_label_ids: list[str] = []
+    prompt_overflow_ids: list[str] = []
+    template_equivalence_failure_ids: list[str] = []
+    server_prompt_token_mismatch_ids: list[str] = []
+    sample_diagnostics: list[dict[str, Any]] = []
+    statuses: list[str] = []
 
-    system_prompt = SYSTEM_PROMPT.format(
-        emotions=", ".join(EMOTIONS),
-        personality=", ".join(sorted(PROFILE_LABELS["personality_traits"])),
-        interests=", ".join(sorted(PROFILE_LABELS["interests"])),
-        styles=", ".join(sorted(PROFILE_LABELS["style"])),
-    )
+    with submission_path.open("w", encoding="utf-8", newline="\n") as submission_handle:
+        for index, sample in enumerate(samples, 1):
+            if backend == "transformers":
+                synchronize(torch)
+            started = time.perf_counter()
+            selection, messages = prepare_sample_messages(sample, prompt_text, tokenizer, prompt_cap)
+            prompt_tokens = selection["prompt_tokens"]
+            removed_messages = len(sample["history"]) - len(selection["selected_history"])
+            server_details: dict[str, Any] = {
+                "server_prompt_tokens": None,
+                "server_completion_tokens": None,
+                "finish_reason": None,
+            }
+            generated_tokens = 0
+            stop_reason = "not_generated"
 
-    for index, sample in enumerate(samples, 1):
-        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": conversation_text(sample)}]
-        if backend == "transformers":
-            prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            synchronize(torch)
-            started = time.perf_counter()
-            inputs = tokenizer(prompt, return_tensors="pt")
-            input_device = next(model.parameters()).device
-            inputs = {name: tensor.to(input_device) for name, tensor in inputs.items()}
-            with torch.inference_mode():
-                output_ids = model.generate(**inputs, **generation)
-            generated = output_ids[0, inputs["input_ids"].shape[1]:]
-            decoded = tokenizer.decode(generated, skip_special_tokens=True)
-        else:
-            started = time.perf_counter()
-            decoded = request_chat_completion(config, messages, generation)
-        prediction, parse_failed = parse_prediction(sample["id"], decoded)
-        if parse_failed:
-            parse_failure_ids.append(sample["id"])
-        if backend == "transformers":
-            synchronize(torch)
-        elapsed_ms = (time.perf_counter() - started) * 1000
-        if index <= config["performance_rounds"]:
-            latencies.append(elapsed_ms)
-        predictions.append(prediction)
-        with submission_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(prediction, ensure_ascii=False, separators=(",", ":")) + "\n")
-        print(f"[{index}/{len(samples)}] {sample['id']}: {elapsed_ms:.3f} ms", flush=True)
+            if selection["floor_exceeds_cap"]:
+                prediction = empty_prediction(sample["id"], enums)
+                status = "prompt_floor_exceeds_cap"
+                prompt_overflow_ids.append(sample["id"])
+                stop_reason = "not_generated_prompt_floor_exceeds_cap"
+            else:
+                try:
+                    if backend == "transformers":
+                        decoded, generation_details = generate_transformers_sample(
+                            model, torch, tokenizer, selection["prompt_ids"], generation
+                        )
+                        generated_tokens = generation_details["generated_tokens"]
+                        stop_reason = generation_details["stop_reason"]
+                    else:
+                        decoded, server_details = _request_chat_completion_details(config, messages, generation)
+                        generated_tokens = server_details.get("server_completion_tokens") or 0
+                        stop_reason = server_details.get("finish_reason") or "server_finish_reason_unreported"
+                        server_prompt_tokens = server_details.get("server_prompt_tokens")
+                        if isinstance(server_prompt_tokens, int) and server_prompt_tokens != prompt_tokens:
+                            prediction = empty_prediction(sample["id"], enums)
+                            status = "server_prompt_token_mismatch"
+                            server_prompt_token_mismatch_ids.append(sample["id"])
+                            decoded = None
+                        else:
+                            decoded = decoded
+                except TemplateEquivalenceError:
+                    prediction = empty_prediction(sample["id"], enums)
+                    status = "template_equivalence_failure"
+                    template_equivalence_failure_ids.append(sample["id"])
+                    decoded = None
+
+                if decoded is not None:
+                    prediction, parse_failed, invalid_label = parse_prediction(sample["id"], decoded, enums)
+                    if parse_failed:
+                        parse_failure_ids.append(sample["id"])
+                    if invalid_label:
+                        invalid_label_ids.append(sample["id"])
+                    status = "parse_failure" if parse_failed else ("invalid_label" if invalid_label else "success")
+
+            validate_submission_prediction(prediction, submission_schema)
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            if backend == "transformers":
+                synchronize(torch)
+            if index <= config["performance_rounds"]:
+                latencies.append(elapsed_ms)
+            prediction_count += 1
+            statuses.append(status)
+            sample_diagnostics.append({
+                "id": sample["id"],
+                "status": status,
+                "client_prompt_tokens": prompt_tokens,
+                "prompt_cap": prompt_cap,
+                "original_history_messages": len(sample["history"]),
+                "retained_history_messages": len(selection["selected_history"]),
+                "removed_history_messages": removed_messages,
+                "generated_tokens": generated_tokens,
+                "stop_reason": stop_reason,
+                "server_prompt_tokens": server_details.get("server_prompt_tokens"),
+                "server_completion_tokens": server_details.get("server_completion_tokens"),
+            })
+            submission_handle.write(json.dumps(prediction, ensure_ascii=False, separators=(",", ":")) + "\n")
+            print(f"[{index}/{len(samples)}] {sample['id']}: {elapsed_ms:.3f} ms ({status})", flush=True)
+
+    if prediction_count != len(samples):
+        raise RuntimeError(f"提交行数不守恒: input={len(samples)}, output={prediction_count}")
 
     report = {
         **backend_report,
@@ -452,9 +820,56 @@ def main() -> None:
         "hardware_label": config["hardware_label"],
         "test_file_sha256": sha256(test_file),
         "submission_sha256": sha256(submission_path),
-        "samples": len(predictions),
+        "samples": prediction_count,
+        "submission_rows": prediction_count,
+        "submission_schema_validated": True,
+        "protocol": {
+            "prompt": prompt_facts,
+            "tokenizer": tokenizer_facts,
+            "history_strategy": "T1_recent_contiguous_complete_message_suffix",
+            "history_messages_are_native": True,
+            "id_in_prompt": False,
+            "completion_field_order": ["emotion_label", "user_profile", "response_text", "memory_refs"],
+            "submission_key_order_is_scoring_semantics": False,
+            "memory_refs_policy": "always_empty_array",
+        },
+        "budget": {
+            "P_max_prompt_tokens": prompt_cap,
+            "P_profile": context["budget_profile"],
+            "P_source": context.get("budget_profile_source"),
+            "G_max_new_tokens": generation["max_new_tokens"],
+            "G_is_final": False,
+            "K_serving_context_limit": serving_limit,
+            "P_plus_G": prompt_cap + generation["max_new_tokens"],
+            "compatibility_status": budget_status,
+            "K_must_be_verified_against_actual_server": True,
+        },
+        "success_count": statuses.count("success"),
+        "failure_counts": _prediction_status_counts(statuses),
         "parse_failure_count": len(parse_failure_ids),
         "parse_failure_ids": parse_failure_ids,
+        "invalid_label_count": len(invalid_label_ids),
+        "invalid_label_ids": invalid_label_ids,
+        "prompt_overflow_count": len(prompt_overflow_ids),
+        "prompt_floor_exceeds_cap_count": len(prompt_overflow_ids),
+        "prompt_floor_exceeds_cap_ids": prompt_overflow_ids,
+        "template_equivalence_failure_count": len(template_equivalence_failure_ids),
+        "template_equivalence_failure_ids": template_equivalence_failure_ids,
+        "server_prompt_token_mismatch_count": len(server_prompt_token_mismatch_ids),
+        "server_prompt_token_mismatch_ids": server_prompt_token_mismatch_ids,
+        "server_prompt_token_usage_reported_count": sum(
+            item["server_prompt_tokens"] is not None for item in sample_diagnostics
+        ),
+        "server_prompt_token_counts_match_client_count": sum(
+            item["server_prompt_tokens"] == item["client_prompt_tokens"]
+            for item in sample_diagnostics if item["server_prompt_tokens"] is not None
+        ),
+        "server_exact_token_id_equivalence": (
+            "not_applicable_local_transformers_exact_ids_used"
+            if backend == "transformers" else "BLOCKED_NOT_RUN_no_pinned_vllm_token_id_diagnostic"
+        ),
+        "api_reasoning_content_field_enabled": bool(config.get("openai_compatible", {}).get("pass_reasoning_content_field", False)),
+        "sample_diagnostics": sample_diagnostics,
     }
     (result_dir / "performance_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"PASS: {submission_path}")
