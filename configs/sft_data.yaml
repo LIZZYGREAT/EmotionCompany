@@ -1,0 +1,31 @@
+version: D0.4.3-v1
+
+inputs:
+  normalized_dir: data/processed/v1
+  d03_manifest: outputs/data_pipeline/v1/manifest.json
+  d042_manifest: outputs/token_audit/v1/manifest.json
+  d042_budget_rows: outputs/token_audit/v1/budget_simulations.jsonl
+  train_schema: data/train/train_public.schema.json
+  prompt_path: configs/prompts/p0.txt
+  tokenizer_config: participant/configs/inference_config.json
+
+profile:
+  name: local_smoke_S2048_P1280
+  max_train_seq_length: 2048
+  max_prompt_tokens: 1280
+  history_policy: T1_recent_contiguous_complete_message_suffix
+  completion_policy: complete_or_exclude
+  packing: false
+  padding_side: right
+  pad_to_multiple_of: null
+
+outputs:
+  dataset_dir: data/processed/sft/v1
+  artifacts_dir: outputs/sft_data/v1
+  report: docs/data/D0.4.3_监督数据构建与Batch验收报告.md
+
+validation:
+  compare_with_d042_budget_rows: true
+  assert_inputs_unchanged: true
+  verify_every_sample: true
+  batch_sizes: [1, 2, 4]
