@@ -178,6 +178,42 @@ def encode_inference_prompt(tokenizer: Any, messages: list[dict[str, str]]) -> l
     return _extract_ids(encoded)
 
 
+def select_recent_complete_suffix(
+    history: Sequence[dict[str, Any]],
+    prompt_text: str,
+    prompt_cap: int,
+    tokenizer: Any,
+) -> dict[str, Any]:
+    """Select the longest exact-token, recent contiguous history suffix (T1)."""
+    if not isinstance(prompt_cap, int) or isinstance(prompt_cap, bool) or prompt_cap <= 0:
+        raise ValueError("prompt_cap must be a positive integer")
+    if not history or history[-1].get("role") != "user":
+        raise ValueError("T1 history must end with the current user message")
+
+    selected_start = len(history) - 1
+    selected_history = list(history[selected_start:])
+    prompt_ids = encode_inference_prompt(tokenizer, build_messages(selected_history, prompt_text))
+    floor_exceeds = len(prompt_ids) > prompt_cap
+    if not floor_exceeds:
+        for candidate_start in range(len(history) - 2, -1, -1):
+            candidate_history = list(history[candidate_start:])
+            candidate_ids = encode_inference_prompt(tokenizer, build_messages(candidate_history, prompt_text))
+            if len(candidate_ids) > prompt_cap:
+                break
+            selected_start = candidate_start
+            selected_history = candidate_history
+            prompt_ids = candidate_ids
+
+    return {
+        "selected_start_index": selected_start,
+        "selected_history": selected_history,
+        "prompt_ids": prompt_ids,
+        "prompt_tokens": len(prompt_ids),
+        "floor_exceeds_cap": floor_exceeds,
+        "status": "prompt_floor_exceeds_cap" if floor_exceeds else "ok",
+    }
+
+
 def encode_full_training_sequence(
     tokenizer: Any,
     messages: list[dict[str, str]],

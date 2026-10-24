@@ -24,6 +24,7 @@ from src.shared.prompting import (
     build_messages,
     encode_full_training_sequence,
     encode_inference_prompt,
+    select_recent_complete_suffix as shared_select_recent_complete_suffix,
 )
 
 
@@ -197,6 +198,7 @@ def test_t03_t04_t05_t06_t08_t14_t1_suffix_is_contiguous_cached_and_target_indep
     assert current_len < middle_pair_len < complete_len
 
     full = select_recent_complete_suffix(history, P0, complete_len, qwen_tokenizer)
+    assert select_recent_complete_suffix is shared_select_recent_complete_suffix
     assert full["selected_history"] == history and not full["floor_exceeds_cap"]
     trimmed = select_recent_complete_suffix(history, P0, middle_pair_len, qwen_tokenizer)
     assert trimmed["selected_history"] == history[1:]
@@ -248,6 +250,16 @@ def test_t09_t10_t11_t12_full_audit_conserves_groups_is_deterministic_and_read_o
     assert budget_summary["n_trimmed_fit"] >= 2
     assert budget_summary["n_prompt_floor_exceeds_cap"] >= 1
     assert budget_summary["n_completion_overflows_train_budget"] >= 1
+    simulations = [json.loads(line) for line in jsonls_first["budget_simulations.jsonl"].splitlines()]
+    for split in ("train", "dev", "val"):
+        split_rows = [row for row in simulations if row["split"] == split]
+        part = budget_summary["by_split"][split]
+        assert part["n_total"] == len(split_rows)
+        assert sum(part[field] for field in (
+            "n_full_fit", "n_trimmed_fit", "n_prompt_floor_exceeds_cap", "n_completion_overflows_train_budget"
+        )) == len(split_rows)
+        expected_truncation_rate = sum(row["removed_history_message_count"] > 0 for row in split_rows) / len(split_rows)
+        assert part["truncation_rate"] == expected_truncation_rate
     assert "surprise" in json.loads(stats_first)["length_statistics"]["by_group"]["emotion_label"]
     assert "true" in json.loads(stats_first)["length_statistics"]["by_group"]["profile_all_empty"]
     assert report.count("P50/P90/P95/P99/Max") >= 1

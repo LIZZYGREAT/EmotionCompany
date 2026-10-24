@@ -32,6 +32,7 @@ from src.shared.prompting import (
     encode_full_training_sequence,
     encode_inference_prompt,
     serialize_completion,
+    select_recent_complete_suffix,
     tokenizer_signature,
     validate_prompt_enum_order,
 )
@@ -620,43 +621,6 @@ def _measure_baseline(
     }
 
 
-def select_recent_complete_suffix(
-    history: list[dict[str, str]],
-    prompt_text: str,
-    prompt_cap: int,
-    tokenizer: Any,
-) -> dict[str, Any]:
-    """Direct T1 implementation for tests and auditing the optimized cache path."""
-    if prompt_cap <= 0:
-        raise ValueError("prompt_cap must be a positive integer")
-    if not history or history[-1].get("role") != "user":
-        raise ValueError("T1 history must end with the current user message")
-    selected_start = len(history) - 1
-    selected = history[selected_start:]
-    prompt_tokens = len(encode_inference_prompt(tokenizer, build_messages(selected, prompt_text)))
-    if prompt_tokens > prompt_cap:
-        return {
-            "selected_start_index": selected_start,
-            "selected_history": selected,
-            "prompt_tokens": prompt_tokens,
-            "floor_exceeds_cap": True,
-        }
-    for candidate_start in range(len(history) - 2, -1, -1):
-        candidate = history[candidate_start:]
-        candidate_tokens = len(encode_inference_prompt(tokenizer, build_messages(candidate, prompt_text)))
-        if candidate_tokens > prompt_cap:
-            break
-        selected_start = candidate_start
-        selected = candidate
-        prompt_tokens = candidate_tokens
-    return {
-        "selected_start_index": selected_start,
-        "selected_history": selected,
-        "prompt_tokens": prompt_tokens,
-        "floor_exceeds_cap": False,
-    }
-
-
 def _plan_t1_selections(
     records: list[dict[str, Any]],
     prompt_text: str,
@@ -1014,6 +978,30 @@ def _classify_budget_rows(
             "failure_groups": _failure_groups(rows),
             "counts_conserve": sum(count_by_outcome.values()) == n,
         }
+        by_split = {}
+        for split in SPLITS:
+            split_rows = [row for row in rows if row["split"] == split]
+            split_counts = Counter(row["outcome"] for row in split_rows)
+            split_n = len(split_rows)
+            split_usable = split_counts["full_fit"] + split_counts["trimmed_fit"]
+            split_raw_fit = sum(row["raw_full_fit"] for row in split_rows)
+            split_truncated = sum(row["removed_history_message_count"] > 0 for row in split_rows)
+            by_split[split] = {
+                "n_total": split_n,
+                "n_full_fit": split_counts["full_fit"],
+                "n_trimmed_fit": split_counts["trimmed_fit"],
+                "n_prompt_floor_exceeds_cap": split_counts["prompt_floor_exceeds_cap"],
+                "n_completion_overflows_train_budget": split_counts["completion_overflows_train_budget"],
+                "raw_full_fit_count": split_raw_fit,
+                "raw_full_fit_rate": split_raw_fit / split_n if split_n else None,
+                "usable_rate": split_usable / split_n if split_n else None,
+                "truncation_rate": split_truncated / split_n if split_n else None,
+                "unusable_rate": (split_n - split_usable) / split_n if split_n else None,
+                "mean_message_retention_ratio_proxy": round(statistics.mean([row["message_retention_ratio"] for row in split_rows]), 6) if split_rows else None,
+                "mean_text_character_retention_ratio_proxy": round(statistics.mean([row["text_character_retention_ratio"] for row in split_rows if row["text_character_retention_ratio"] is not None]), 6) if any(row["text_character_retention_ratio"] is not None for row in split_rows) else None,
+                "counts_conserve": sum(split_counts.values()) == split_n,
+            }
+        summary[key]["by_split"] = by_split
     return simulation_rows, exceptions, summary
 
 
@@ -1255,7 +1243,48 @@ def _report_markdown(
         lines.append(
             f"| {entry['max_train_seq_length']} | {entry['max_prompt_tokens']} | {entry['n_full_fit']:,} | {entry['n_trimmed_fit']:,} | {entry['n_prompt_floor_exceeds_cap']:,} | {entry['n_completion_overflows_train_budget']:,} | {entry['raw_full_fit_rate']:.2%} | {entry['usable_rate']:.2%} | {entry['truncation_rate']:.2%} | {entry['unusable_rate']:.2%} | {entry['mean_message_retention_ratio_proxy']:.2%} | {entry['mean_text_character_retention_ratio_proxy'] if entry['mean_text_character_retention_ratio_proxy'] is not None else 0:.2%} |"
         )
-    lines.extend(["", "历史消息数与正文字符保留率是代理指标，不等于 Token 保留率；Completion 从不裁剪，失败样本和源定位见 `length_exceptions.jsonl`。按情绪标签与空/非空画像分层的失败数量、比例及小样本警示写入 `token_stats.json`。", ""])
+    lines.extend([
+        "",
+        "### 按 Split 的候选统计",
+        "",
+        "下表各行独立以该 Split 的全部样本为 N；四类数量之和必须为 N。",
+        "",
+        "| Split | S | P | N | full_fit | trimmed_fit | Prompt floor 超限 | Completion 超 S | raw-fit | 可用率 | 截断率 | 不可用率 | 平均消息保留代理 |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ])
+    for entry in budget_summary.values():
+        for split in SPLITS:
+            part = entry["by_split"][split]
+            lines.append(
+                f"| {split} | {entry['max_train_seq_length']} | {entry['max_prompt_tokens']} | {part['n_total']:,} | {part['n_full_fit']:,} | {part['n_trimmed_fit']:,} | {part['n_prompt_floor_exceeds_cap']:,} | {part['n_completion_overflows_train_budget']:,} | {part['raw_full_fit_rate']:.2%} | {part['usable_rate']:.2%} | {part['truncation_rate']:.2%} | {part['unusable_rate']:.2%} | {part['mean_message_retention_ratio_proxy']:.2%} |"
+            )
+    lines.extend([
+        "",
+        "指标分母统一为对应 Split（overall 时为全部样本）N：`usable_rate=(full_fit+trimmed_fit)/N`；`unusable_rate=(prompt_floor_exceeds_cap+completion_overflows_train_budget)/N`；`raw_full_fit_rate=n_raw_full_fit/N`；`truncation_rate=count(removed_history_message_count>0)/N`。最后一项包含不可用但已删除历史的样本，不等同于 `n_trimmed_fit/N`。",
+        "",
+        "历史消息数与正文字符保留率是代理指标，不等于 Token 保留率；Completion 从不裁剪，失败样本和源定位见 `length_exceptions.jsonl`。按情绪标签与空/非空画像分层的失败数量、比例及小样本警示写入 `token_stats.json`。",
+        "",
+        "### 候选权衡（非最终配置）",
+        "",
+        "| S/P | overall 可用率 | 平均消息保留代理 | 候选定位 |",
+        "|---|---:|---:|---|",
+    ])
+    candidate_notes = {
+        "S2048_P1024": "监督覆盖较高，较长历史裁剪更多",
+        "S2048_P1280": "本地折中候选，可优先做后续训练可行性验证",
+        "S2048_P1536": "更重视历史保留，可用率略低",
+        "S4096_P2048": "更长训练序列候选，显存/延迟未测",
+        "S4096_P3072": "更高历史保留候选，需检查 P+G 与 K",
+    }
+    for key, note in candidate_notes.items():
+        entry = budget_summary.get(key)
+        if entry:
+            lines.append(f"| {entry['max_train_seq_length']}/{entry['max_prompt_tokens']} | {entry['usable_rate']:.2%} | {entry['mean_message_retention_ratio_proxy']:.2%} | {note} |")
+    lines.extend([
+        "",
+        "假设示例（不是实际服务验证）：若 K=4096 且参考 G=1200，则 P=1280、2048 满足 P+G≤K，P=3072、3584 不满足；最终 K 必须从实际服务配置并经部署验证确认。",
+        "",
+    ])
     lines.extend([
         "## 4. 关键比较与限制", "",
         "- 默认探索前沿 S2048/P1536 与 S4096/P3584 同时改变了 S 和 P，只能作为联合预算对照，不可解释成 S 的单独因果效应。",
