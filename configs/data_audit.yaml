@@ -1,0 +1,20 @@
+inputs:
+  train: data/train/train_public.jsonl
+  val: data/val/val_public.jsonl
+
+output:
+  directory: outputs/data_audit/d0_1
+  report: docs/data/D0.1_数据质量审计报告.md
+
+checks:
+  schema: true
+  turn_references: true
+  duplicates: true
+  cross_split: true
+  distributions: true
+
+thresholds:
+  short_response_chars: 5
+  long_response_chars: 2000
+  long_message_chars: 4000
+  short_cross_split_chars: 100
