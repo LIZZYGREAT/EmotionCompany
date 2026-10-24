@@ -54,6 +54,30 @@ The command first runs the configured D0.1/D0.3/D0.4 regression suite, then load
 
 D0.4.2 is a measurement stage only. It does not select final S/P/G/K values, truncate completions, rewrite D0.3 data, or start training/D0.4.3. Serving K and final generation budget G remain separate deployment decisions.
 
+### Acceptance revision and inference protocol alignment
+
+The participant runner loads the single P0 source and shared F2/T1 implementation. It pins the Qwen3-1.7B tokenizer revision, tokenizer file hashes, template hash, and EOS ID, then uses the exact template-produced input IDs in Transformers. The API branch sends the same native message roles and explicitly sets `chat_template_kwargs.enable_thinking=false`. The test ID is copied to output only and does not enter the prompt.
+
+Reproduce the acceptance checks and full audit from the repository root:
+
+```bash
+sha256sum configs/prompts/p0.txt
+python -m pytest tests/test_inference_protocol.py -q
+python -m pytest tests -q
+python -m src.data.token_stats --config configs/data_token_audit.yaml
+bash -n participant/start.sh
+```
+
+The audit command runs the configured regression list, including `tests/test_inference_protocol.py`, before rebuilding the 20,499-sample token and budget artifacts. The current run records 50 tests passed and unchanged input hashes. Protocol tests use the pinned real local tokenizer plus Mock Generate/HTTP; they do not prove real model generation or server template equivalence.
+
+Run the participant entry point after providing the model and service configuration:
+
+```bash
+bash participant/start.sh TEST_FILE RESULT_DIR
+```
+
+Current defaults are provisional: `P=1280` (`local_smoke_candidate_P1280`), `G=1200` reference, `K=null` (`not_verified`). Set `EVALUATION_MAX_PROMPT_TOKENS`, `EVALUATION_PROMPT_BUDGET_PROFILE`, and `EVALUATION_SERVING_CONTEXT_LIMIT` for a named run. If K is configured, startup and runner both reject `P+G>K`; vLLM then receives `--max-model-len K`. Tensor Parallel defaults to 1 and can be set with `VLLM_TENSOR_PARALLEL_SIZE`. In this workspace there is no `participant/model` directory or `vllm` executable, so real Transformers generation, server prompt/token equivalence, K, and hardware feasibility remain unverified.
+
 ## Regression suite
 
 Run the complete current data and prompt/token audit suite with:
@@ -63,8 +87,11 @@ python -m pytest \
   tests/test_data_audit.py \
   tests/test_data_pipeline.py \
   tests/test_prompting.py \
-  tests/test_token_stats.py -q
+  tests/test_token_stats.py \
+  tests/test_inference_protocol.py -q
 ```
+
+Or run the whole current test tree with `python -m pytest tests -q`.
 
 ## Commit checkpoints
 
