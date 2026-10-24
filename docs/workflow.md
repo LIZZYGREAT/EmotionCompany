@@ -78,6 +78,20 @@ bash participant/start.sh TEST_FILE RESULT_DIR
 
 Current defaults are provisional: `P=1280` (`local_smoke_candidate_P1280`), `G=1200` reference, `K=null` (`not_verified`). Set `EVALUATION_MAX_PROMPT_TOKENS`, `EVALUATION_PROMPT_BUDGET_PROFILE`, and `EVALUATION_SERVING_CONTEXT_LIMIT` for a named run. If K is configured, startup and runner both reject `P+G>K`; vLLM then receives `--max-model-len K`. Tensor Parallel defaults to 1 and can be set with `VLLM_TENSOR_PARALLEL_SIZE`. In this workspace there is no `participant/model` directory or `vllm` executable, so real Transformers generation, server prompt/token equivalence, K, and hardware feasibility remain unverified.
 
+## D0.4.3 — Completion-only SFT data and Trainer Batch acceptance
+
+Build the named candidate from the repository root:
+
+```bash
+python -m pytest tests/test_sft_dataset.py -q
+python -m pytest tests -q
+python -m src.data.sft_dataset --config configs/sft_data.yaml
+```
+
+The build command also runs the two pytest commands configured in `configs/sft_data.yaml` before reading the locked D0.3/D0.4.2 inputs. It then constructs pre-tokenized Train/Dev records with the shared P0/T1/Tokenizer path, checks every sample against the D0.4.2 budget ledger, verifies right-padded Batch sizes 1/2/4, and passes actual candidate rows through the pinned TRL `SFTTrainer` DataLoaders. The tiny GPT-2 structure used for the Trainer check is randomly initialized locally; no model forward, training loop, or weight update runs.
+
+Review `docs/data/D0.4.3_监督数据构建与Batch验收报告.md` and the local `outputs/sft_data/v1/{manifest.json,summary.json,batch_validation.json,excluded_samples.jsonl}`. The pre-tokenized data are local under `data/processed/sft/v1/{train,dev}.jsonl`; Val is cross-checked against D0.4.2 but never emitted as SFT training data. The profile `local_smoke_S2048_P1280` is a data acceptance candidate, not the final E01 S/P/G/K configuration. Do not commit generated JSONL or `outputs/` artifacts.
+
 ## Regression suite
 
 Run the complete current data and prompt/token audit suite with:
