@@ -14,6 +14,7 @@ from transformers import AutoTokenizer
 from src.data.token_stats import (
     _history_key,
     _plan_t1_selections,
+    _validate_completion_suffix,
     _candidate_grid,
     run_audit,
     select_recent_complete_suffix,
@@ -153,6 +154,35 @@ def test_t01_t02_untruncated_counts_equal_direct_template_and_prefix(qwen_tokeni
     assert apply_chat_template_batch(qwen_tokenizer, [[*messages, {"role": "assistant", "content": completion}]], add_generation_prompt=False)[0] == full_ids
     assert full_ids[:len(prompt_ids)] == prompt_ids
     assert len(full_ids) == len(prompt_ids) + len(full_ids[len(prompt_ids):])
+
+
+def test_t02_qwen_thinking_markers_inside_json_are_preserved_as_completion_text(qwen_tokenizer):
+    history = [{"role": "user", "content": "合成问题"}]
+    messages = build_messages(history, P0)
+    completion = (
+        '{"emotion_label":"anxiety","user_profile":{"personality_traits":[],"interests":[],"style":[]},'
+        '"response_text":"字面文本 <think>保留</think> 结束","memory_refs":[]}'
+    )
+    prompt_ids = encode_inference_prompt(qwen_tokenizer, messages)
+    full_ids = encode_full_training_sequence(qwen_tokenizer, messages, completion)
+    assert full_ids[:len(prompt_ids)] == prompt_ids
+    suffix = _validate_completion_suffix(qwen_tokenizer, completion, prompt_ids, full_ids, "synthetic:thinking-markers")
+    assert qwen_tokenizer.decode(suffix, skip_special_tokens=False, clean_up_tokenization_spaces=False).startswith(completion)
+
+
+def test_t01_assistant_history_thinking_markers_are_plain_history_content(qwen_tokenizer):
+    prior_text = "助手曾讨论字面标记 <think>内容</think>，应作为普通历史保留。"
+    messages = build_messages([
+        {"role": "user", "content": "之前的问题"},
+        {"role": "assistant", "content": prior_text},
+        {"role": "user", "content": "当前问题"},
+    ], P0)
+    assert messages[2]["content"] == prior_text
+    assert messages[2]["reasoning_content"] == ""
+    rendered = qwen_tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+    )
+    assert f"assistant\n{prior_text}<|im_end|>" in rendered
 
 
 def test_t03_t04_t05_t06_t08_t14_t1_suffix_is_contiguous_cached_and_target_independent(qwen_tokenizer):

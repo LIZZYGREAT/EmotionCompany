@@ -88,7 +88,12 @@ def build_messages(history: Sequence[dict[str, Any]], prompt_text: str) -> list[
             raise ValueError(f"history[{index}].role must be user or assistant")
         if not isinstance(content, str):
             raise ValueError(f"history[{index}].content must be a string")
-        messages.append({"role": role, "content": content})
+        message = {"role": role, "content": content}
+        if role == "assistant":
+            # Qwen's template parses a literal `</think>` in assistant content as
+            # a control boundary unless reasoning_content is explicitly present.
+            message["reasoning_content"] = ""
+        messages.append(message)
     if messages[-1]["role"] != "user":
         raise ValueError("the last history message must be the current user message")
     return messages
@@ -181,7 +186,12 @@ def encode_full_training_sequence(
     """Encode the same prompt followed by one complete assistant answer message."""
     if not isinstance(completion_json, str) or not completion_json:
         raise ValueError("completion_json must be a non-empty string")
-    full_messages = [*messages, {"role": "assistant", "content": completion_json}]
+    # Qwen's template treats a literal `</think>` inside assistant content as a
+    # thinking boundary. Supply an explicit empty reasoning field so JSON text is
+    # kept verbatim and cannot rewrite the template's assistant prefix.
+    full_messages = [*messages, {
+        "role": "assistant", "content": completion_json, "reasoning_content": "",
+    }]
     encoded = tokenizer.apply_chat_template(
         full_messages,
         tokenize=True,

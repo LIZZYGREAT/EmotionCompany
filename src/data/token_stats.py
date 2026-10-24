@@ -449,7 +449,7 @@ def _measure_full_batch(
         current = batch[offset:offset + batch_size]
         prompt_messages = [messages for messages, _, _ in current]
         full_messages = [
-            [*messages, {"role": "assistant", "content": completion}]
+            [*messages, {"role": "assistant", "content": completion, "reasoning_content": ""}]
             for messages, completion, _ in current
         ]
         prompt_ids_batch = apply_chat_template_batch(
@@ -516,7 +516,7 @@ def _measure_baseline(
         )
         base_full_ids = apply_chat_template_batch(
             tokenizer,
-            [[*entry["messages"], {"role": "assistant", "content": entry["completion_json"]}] for entry in prepared],
+            [[*entry["messages"], {"role": "assistant", "content": entry["completion_json"], "reasoning_content": ""}] for entry in prepared],
             add_generation_prompt=False,
         )
         current_prompt_ids = apply_chat_template_batch(
@@ -526,7 +526,7 @@ def _measure_baseline(
         )
         current_full_ids = apply_chat_template_batch(
             tokenizer,
-            [[*entry["current_messages"], {"role": "assistant", "content": entry["completion_json"]}] for entry in prepared],
+            [[*entry["current_messages"], {"role": "assistant", "content": entry["completion_json"], "reasoning_content": ""}] for entry in prepared],
             add_generation_prompt=False,
         )
         current_user_ids = _batch_text_token_ids(
@@ -1230,6 +1230,7 @@ def _report_markdown(
         f"- P0：`{config['prompt']['version']}`，SHA-256 `{prompt_sha}`；标签枚举与 Train/Val 官方 target schema 及顺序一致。",
         f"- Tokenizer：`{tokenizer_signature_data['model_id']}` revision `{tokenizer_signature_data['resolved_revision']}`，类 `{tokenizer_signature_data['tokenizer_class']}`；Chat Template SHA-256 `{tokenizer_signature_data['template_sha256']}`。",
         f"- 模板参数：F2 原生消息，`enable_thinking=False`；前缀门禁已在逐样本统计和 {config['tokenizer']['verify_batch_with_scalar_samples']} 条标量/批量对照中检查。",
+        "- Qwen 模板会解析 assistant 文本中的字面 `</think>`；历史 assistant 消息和目标 JSON 显式带空 `reasoning_content` 字段，防止模板改写原文，字段本身不进入序列。",
         f"- 数据 Schema 检查：Train/Val 目标枚举一致；提交 Schema 额外允许空情绪哨兵 `{schema_facts['submission_only_emotion_values']}`，P0 仍要求一个实际情绪标签。",
         "- 分位数采用 nearest-rank：排序后索引 `ceil(p*n)-1`；所有长度均为真实 Tokenizer Token 数，字符数只用于明确标注的历史保留代理指标。", "",
         "## 2. 未截断长度分布", "",
@@ -1463,6 +1464,7 @@ def run_audit(
                 "p0_text_tokens_independent_reference": cache_bundle["baseline_facts"]["p0_text_tokens_independent_reference"],
                 "length_fields": LENGTH_FIELDS,
                 "completion_token_boundary": "Exact full_ids prompt prefix; JSON body followed by tokenizer EOS and template whitespace only.",
+                "qwen_literal_thinking_marker_policy": "Assistant history and target messages set reasoning_content to an empty string so literal <think>/</think> text stays ordinary content and is not parsed by the template.",
             },
             "resource_feasibility": "not_measured_no_model_weights_or_training_loaded",
         }
