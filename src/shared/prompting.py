@@ -133,7 +133,12 @@ def serialize_completion(target: dict[str, Any], official_schema: dict[str, Any]
     return json.dumps(completion, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
-def _extract_ids(encoded: Any, *, batch: bool = False) -> list[int] | list[list[int]]:
+def _extract_ids(
+    encoded: Any,
+    *,
+    batch: bool = False,
+    expected_batch_size: int | None = None,
+) -> list[int] | list[list[int]]:
     if isinstance(encoded, Mapping) or hasattr(encoded, "keys"):
         if "input_ids" not in encoded:
             raise ValueError("apply_chat_template result has no input_ids")
@@ -146,6 +151,8 @@ def _extract_ids(encoded: Any, *, batch: bool = False) -> list[int] | list[list[
         ids = list(ids)
     if batch:
         if ids and not isinstance(ids[0], (list, tuple)):
+            if expected_batch_size == 1:
+                return [list(map(int, ids))]
             raise ValueError("batched chat template returned a flat input_ids sequence")
         return [list(map(int, row)) for row in ids]
     if ids and isinstance(ids[0], (list, tuple)):
@@ -199,7 +206,7 @@ def apply_chat_template_batch(
         add_generation_prompt=add_generation_prompt,
         enable_thinking=False,
     )
-    ids = _extract_ids(encoded, batch=True)
+    ids = _extract_ids(encoded, batch=True, expected_batch_size=len(batch_messages))
     if len(ids) != len(batch_messages):
         raise ValueError("batched chat template returned an unexpected number of sequences")
     return ids
