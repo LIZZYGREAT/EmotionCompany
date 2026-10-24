@@ -18,6 +18,7 @@ from src.data.sft_dataset import (
     load_config,
     parse_args,
 )
+from src.data.sft_collator import SFTDataCollator, validate_dataset_batches
 from src.shared.prompting import (
     build_messages,
     encode_full_training_sequence,
@@ -259,4 +260,83 @@ def test_s16_invalid_s_p_overrides_are_rejected_before_build():
     ])
     with pytest.raises(ValueError, match="smaller than S"):
         _apply_overrides(config, args)
+
+
+def test_s09_pad_id_equal_to_eos_does_not_mask_real_eos():
+    eos = 9
+    collator = SFTDataCollator(pad_token_id=eos, max_sequence_length=8)
+    short = {
+        "sample_id": "short",
+        "prompt_length": 2,
+        "completion_length": 2,
+        "input_ids": [1, 2, 3, eos],
+        "labels": [-100, -100, 3, eos],
+    }
+    long = {
+        "sample_id": "long",
+        "prompt_length": 2,
+        "completion_length": 4,
+        "input_ids": [4, 5, 6, 7, 8, eos],
+        "labels": [-100, -100, 6, 7, 8, eos],
+    }
+    batch = collator([short, long])
+    assert batch["input_ids"][0].tolist() == [1, 2, 3, eos, eos, eos]
+    assert batch["attention_mask"][0].tolist() == [1, 1, 1, 1, 0, 0]
+    assert batch["labels"][0].tolist() == [-100, -100, 3, eos, -100, -100]
+    assert batch["labels"][0, 3].item() == eos
+
+
+def test_s10_real_tokenizer_batch_shapes_and_prefixes(tmp_path, sft_context):
+    tokenizer, _, _, _, _ = sft_context
+    rows = []
+    for index, response in enumerate(("短。", "稍长一些。" * 5, "不同长度回复。" * 20, "最长回复。" * 55)):
+        sample = _sample(response=response)
+        sample["sample_id"] = f"train:train_conv_{index + 1:06d}:pp0"
+        sample["conversation_id"] = f"train_conv_{index + 1:06d}"
+        item, excluded, _ = _build(sample, (1280, 2048), sft_context)
+        assert excluded is None and item is not None
+        rows.append(item)
+
+    collator = SFTDataCollator(
+        int(tokenizer.pad_token_id),
+        max_sequence_length=2048,
+    )
+    for size in (1, 2, 4):
+        batch = collator(rows[:size])
+        assert batch["input_ids"].shape == batch["labels"].shape == batch["attention_mask"].shape
+        assert int(batch["attention_mask"].sum().item()) == sum(len(row["input_ids"]) for row in rows[:size])
+        for index, row in enumerate(rows[:size]):
+            n = len(row["input_ids"])
+            assert batch["input_ids"][index, :n].tolist() == row["input_ids"]
+            assert batch["labels"][index, :n].tolist() == row["labels"]
+            assert batch["attention_mask"][index, :n].tolist() == [1] * n
+            assert batch["labels"][index, n:].tolist() == [-100] * (batch["labels"].shape[1] - n)
+    train_path = tmp_path / "train.jsonl"
+    train_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    (tmp_path / "dev.jsonl").write_text(train_path.read_text(encoding="utf-8"), encoding="utf-8")
+    summary = validate_dataset_batches(
+        tmp_path,
+        split_names=("train", "dev"),
+        batch_sizes=(1, 2, 4),
+        pad_token_id=int(tokenizer.pad_token_id),
+        eos_token_id=int(tokenizer.eos_token_id),
+        max_sequence_length=2048,
+    )
+    assert summary["all_batch_invariants_pass"] is True
+    assert all(len(value["checks"]) == 3 for value in summary["splits"].values())
+
+
+def test_s10_padding_rounding_refuses_to_truncate_or_exceed_s():
+    feature = {
+        "sample_id": "x",
+        "prompt_length": 1,
+        "completion_length": 4,
+        "input_ids": [1, 2, 3, 4, 5],
+        "labels": [-100, 2, 3, 4, 5],
+    }
+    collator = SFTDataCollator(0, pad_to_multiple_of=4, max_sequence_length=8)
+    assert collator([feature])["input_ids"].shape == (1, 8)
+    too_small = SFTDataCollator(0, pad_to_multiple_of=8, max_sequence_length=7)
+    with pytest.raises(ValueError, match="would exceed max_sequence_length"):
+        too_small([feature])
 

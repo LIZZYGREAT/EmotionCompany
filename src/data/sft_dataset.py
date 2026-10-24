@@ -23,6 +23,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from participant.run_inference import load_runtime_tokenizer
+from src.data.sft_collator import validate_dataset_batches
 from src.shared.prompting import (
     build_messages,
     encode_full_training_sequence,
@@ -585,6 +586,16 @@ def build_sft_data(root: Path, config: dict[str, Any]) -> dict[str, Any]:
         if len(budget_rows) != expected_total:
             raise ValueError(f"D0.4.2 candidate rows {len(budget_rows)} != expected total {expected_total}")
 
+        batch_validation = validate_dataset_batches(
+            stage_dataset,
+            split_names=TRAIN_SPLITS,
+            batch_sizes=config["validation"]["batch_sizes"],
+            pad_token_id=int(tokenizer.pad_token_id),
+            eos_token_id=int(tokenizer.eos_token_id),
+            max_sequence_length=seq,
+            pad_to_multiple_of=profile.get("pad_to_multiple_of"),
+        )
+
         input_hashes_after = {name: sha256_file(path) for name, path in paths.items()}
         if context["input_hashes"] != input_hashes_after:
             raise RuntimeError("one or more locked inputs changed during SFT construction")
@@ -609,14 +620,17 @@ def build_sft_data(root: Path, config: dict[str, Any]) -> dict[str, Any]:
             "tokenizer": context["tokenizer_facts"],
             "schema_sha256": context["input_hashes"]["train_schema"],
             "count_conservation": all(item["counts_conserve"] for item in split_summary.values()),
+            "batch_validation": batch_validation,
         }
         (stage_artifacts / "summary.json").write_bytes(_json_bytes(summary, pretty=True))
+        (stage_artifacts / "batch_validation.json").write_bytes(_json_bytes(batch_validation, pretty=True))
 
         staged_files = {
             "train.jsonl": stage_dataset / "train.jsonl",
             "dev.jsonl": stage_dataset / "dev.jsonl",
             "excluded_samples.jsonl": excluded_path,
             "summary.json": stage_artifacts / "summary.json",
+            "batch_validation.json": stage_artifacts / "batch_validation.json",
         }
         hashes = {name: sha256_file(path) for name, path in staged_files.items()}
         output_dir_hash = hashlib.sha256(
