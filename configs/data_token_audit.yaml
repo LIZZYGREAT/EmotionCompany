@@ -1,0 +1,58 @@
+version: D0.4.2-v1
+
+inputs:
+  normalized_dir: data/processed/v1
+  pipeline_manifest: outputs/data_pipeline/v1/manifest.json
+  train_schema: data/train/train_public.schema.json
+  val_schema: data/val/val_public.schema.json
+  submission_schema: participant/templates/submission_schema.json
+
+model:
+  tokenizer_id: Qwen/Qwen3-1.7B
+  tokenizer_revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  local_files_only: true
+  enable_thinking: false
+
+prompt:
+  version: P0
+  text_path: configs/prompts/p0.txt
+  history_format: native_chat_template
+  completion_json: compact
+  memory_refs_policy: empty_in_a0_completion
+  profile_order: official_schema_enum_order
+
+context:
+  history_strategy: recent_first_complete_messages
+  preserve_current_user_message: true
+  keep_complete_completion: true
+
+simulation:
+  candidates:
+    - max_train_seq_length: 1024
+      max_prompt_tokens: [512, 768]
+    - max_train_seq_length: 2048
+      max_prompt_tokens: [1024, 1280, 1536]
+    - max_train_seq_length: 4096
+      max_prompt_tokens: [2048, 3072, 3584]
+    # Matched-P sensitivity cases separate the effect of S from the effect of P.
+    - max_train_seq_length: 4096
+      max_prompt_tokens: [1024, 1280, 1536]
+  percentile_method: nearest_rank
+  response_length_train_percentiles: [50, 90]
+
+deployment:
+  reference_inference_config: participant/configs/inference_config.json
+  additional_generation_candidates: []
+  serving_context_limits: []
+
+tokenizer:
+  batch_size: 64
+  verify_batch_with_scalar_samples: 16
+
+outputs:
+  directory: outputs/token_audit/v1
+  report: docs/data/D0.4.2_Token长度审计报告.md
+
+validation:
+  assert_inputs_unchanged: true
+  unit_test_command: python -m pytest tests/test_data_audit.py tests/test_data_pipeline.py tests/test_prompting.py tests/test_token_stats.py -q
