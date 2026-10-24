@@ -939,6 +939,7 @@ class Audit:
             },
             "checks_enabled": self.checks,
             "issue_counts": summary["issues"]["by_severity"],
+            "issue_counts_by_code": summary["issues"]["by_code"],
         }
 
 
@@ -984,6 +985,11 @@ def _render_report(summary: dict[str, Any], manifest: dict[str, Any], command: s
     for split in SPLITS:
         c = summary["splits"][split]["counters"]
         lines.append(f"| {split} | {c.get('physical_line_count', 0):,} | {c.get('nonempty_line_count', 0):,} | {c.get('parseable_line_count', 0):,} | {c.get('parsed_object_count', 0):,} | {c.get('turn_count', 0):,} | {c.get('prediction_point_count', 0):,} | {c.get('empty_points_conversation_count', 0):,} | {c.get('unparseable_line_count', 0):,} | {c.get('root_shape_analyzable_conversation_count', 0):,} | {c.get('schema_invalid_row_count', 0):,} |")
+    train_counters = summary["splits"]["train"]["counters"]
+    val_counters = summary["splits"]["val"]["counters"]
+    lines.append(
+        f"参考回复与指向 Assistant Turn 完全一致：Train {train_counters.get('response_text_exact_match_count', 0):,}/{train_counters.get('prediction_point_count', 0):,}，Val {val_counters.get('response_text_exact_match_count', 0):,}/{val_counters.get('prediction_point_count', 0):,}；仅空白差异 {train_counters.get('response_text_whitespace_only_mismatch_count', 0) + val_counters.get('response_text_whitespace_only_mismatch_count', 0)}，其他差异 {train_counters.get('response_text_other_mismatch_count', 0) + val_counters.get('response_text_other_mismatch_count', 0)}。"
+    )
     for split in SPLITS:
         data = summary["splits"][split]
         counters = data["counters"]
@@ -1056,6 +1062,8 @@ def _render_report(summary: dict[str, Any], manifest: dict[str, Any], command: s
               f"| 回复轮次关联 | `RESPONSE_NOT_AFTER_TARGET` {summary['issues']['by_code'].get('RESPONSE_NOT_AFTER_TARGET', 0)}；`RESPONSE_NOT_FIRST_ASSISTANT` {summary['issues']['by_code'].get('RESPONSE_NOT_FIRST_ASSISTANT', 0)} | 确认严格回复时序规则及可接受例外 | 误关联会引入未来信息或错误监督 | P0 / 标注与建模负责人 |",
               f"| 标签集合口径 | 官方 Schema 与 A0 列表 {enum_status} | 如有差异，先确认唯一官方枚举版本；差异详情见 summary.json | 改标签会影响评测协议 | P0 / 赛题数据负责人 |",
               f"| Train/Val 重合候选 | 对话文本 {summary['duplicates_and_cross_split']['exact_turn_overlap_validation_conversations']} 个 Val 对话；历史 {summary['duplicates_and_cross_split']['exact_history_overlap_validation_points'] + summary['duplicates_and_cross_split']['normalized_history_only_overlap_validation_points']} 个 Val 点 | 结合长度、来源及短模板属性人工判断 | 错误删除 Val 会改变官方验证集 | P1 / 数据负责人 |",
+              f"| 集合内精确重复候选 | turns 重复 {summary['duplicates_and_cross_split']['within_split_exact_duplicate_turn_records']} 条；Prediction Point 重复 {summary['duplicates_and_cross_split']['within_split_exact_duplicate_prediction_issues']} 条 | 结合来源和监督内容决定是否重复计权；不自动删除 | 误删合法多点或重复样本会改变训练分布 | P1 / 数据负责人 |",
+              f"| 短回复候选 | Train {summary['splits']['train']['text_lengths_unicode_characters']['short_response_candidates']}、Val {summary['splits']['val']['text_lengths_unicode_characters']['short_response_candidates']}（阈值 < {summary['methodology']['thresholds'].get('short_response_chars')} 字） | 抽样确认回复是否完整、是否为合理短答 | 过度剔除会损失有效监督 | P2 / 标注负责人 |",
               f"| 相同输入/目标标签冲突 | 同一历史 {summary['duplicates_and_cross_split']['same_history_label_conflict_groups_within_split']} 个集合内组；同一目标 {summary['duplicates_and_cross_split']['same_target_label_conflict_groups']} 组；跨集 {summary['duplicates_and_cross_split']['history_label_conflict_validation_points']} 个 Val 点 | 先核对标注口径，再决定是否隔离/保留多标签版本 | 不同合法回复本身不构成冲突 | P1 / 标注负责人 |",
               f"| 空预测点/空画像/非空记忆 | Train {summary['splits']['train']['counters'].get('empty_points_conversation_count', 0)} / {summary['splits']['train']['profile']['all_three_empty_points']} / {summary['splits']['train']['memory_refs']['nonempty_points']}；Val {summary['splits']['val']['counters'].get('empty_points_conversation_count', 0)} / {summary['splits']['val']['profile']['all_three_empty_points']} / {summary['splits']['val']['memory_refs']['nonempty_points']} | 明确是否保留无监督对话；空画像和 memory_refs 非空按既定协议统计 | 擅自删除改变样本分布 | P2 / 建模负责人 |",
               "", "## 9. 复现与完整性", "", f"命令：`{command}`", "", "合成测试：由 `tests/test_data_audit.py` 覆盖；测试命令及结果记录于交付说明。输入在读取前后分别计算 SHA-256；两个值一致方可产出。原始数据未由本工具写入。机器产物：`outputs/data_audit/d0_1/manifest.json`、`summary.json`、`issues.jsonl`。", "", "---", "数据事实、Schema/规则自动判定、以及需人工解释的候选项在本报告中分开表述；本阶段到此停止，不执行 D0.2 清洗。", ""]
