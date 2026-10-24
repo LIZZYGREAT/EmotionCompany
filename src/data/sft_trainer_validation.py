@@ -60,7 +60,7 @@ def _model_state_sha256(model: GPT2LMHeadModel) -> str:
     return digest.hexdigest()
 
 
-def validate_trainer_data_path(
+def _validate_trainer_data_path_impl(
     dataset_dir: Path,
     *,
     tokenizer: Any,
@@ -194,3 +194,29 @@ def validate_trainer_data_path(
             "input_ids", "labels", "attention_mask"
         },
     }
+
+
+def validate_trainer_data_path(
+    dataset_dir: Path,
+    *,
+    tokenizer: Any,
+    pad_token_id: int,
+    eos_token_id: int,
+    max_sequence_length: int,
+    collator: SFTDataCollator | None = None,
+    batch_size: int = 2,
+    root: Path = PROJECT_ROOT,
+) -> dict[str, Any]:
+    """Run the real data-path check without perturbing caller RNG state."""
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        return _validate_trainer_data_path_impl(
+            dataset_dir,
+            tokenizer=tokenizer,
+            pad_token_id=pad_token_id,
+            eos_token_id=eos_token_id,
+            max_sequence_length=max_sequence_length,
+            collator=collator,
+            batch_size=batch_size,
+            root=root,
+        )

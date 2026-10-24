@@ -366,6 +366,15 @@ def test_s15_pinned_trl_trainer_dataloader_preserves_prebuilt_labels(tmp_path, s
         max_sequence_length=2048,
         batch_size=2,
     )
+    repeated_result = validate_trainer_data_path(
+        tmp_path,
+        tokenizer=tokenizer,
+        pad_token_id=int(tokenizer.pad_token_id),
+        eos_token_id=int(tokenizer.eos_token_id),
+        max_sequence_length=2048,
+        batch_size=2,
+    )
+    assert repeated_result == result
     assert result["status"] == "passed"
     assert result["trainer"] == "trl.SFTTrainer"
     assert result["versions"] == {

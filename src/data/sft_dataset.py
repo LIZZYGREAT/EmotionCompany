@@ -9,6 +9,7 @@ import importlib.metadata
 import json
 import os
 import platform
+import re
 import shutil
 import shlex
 import subprocess
@@ -457,6 +458,7 @@ def _run_configured_test(root: Path, command: str) -> dict[str, Any]:
         ),
         output[-500:],
     )
+    summary = re.sub(r"\s+in \d+(?:\.\d+)?s$", "", summary)
     return {
         "configured_command": command,
         "executed_command": f"{Path(sys.executable).name} -m pytest {' '.join(parts[3:])}",
@@ -864,7 +866,7 @@ def build_sft_data(root: Path, config: dict[str, Any]) -> dict[str, Any]:
                 "all_splits_conserve_counts": summary["count_conservation"],
                 "trainer_batch_path": trainer_validation,
                 "tests": copy.deepcopy(config.get("_test_results", [])),
-                "test_counts": {
+                "test_command_counts": {
                     "passed": sum(result["status"] == "passed" for result in config.get("_test_results", [])),
                     "failed": sum(result["status"] == "failed" for result in config.get("_test_results", [])),
                     "blocked": sum(result["status"] == "blocked" for result in config.get("_test_results", [])),
