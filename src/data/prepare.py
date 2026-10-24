@@ -324,6 +324,7 @@ def _render_report(
     split_manifest: dict[str, Any],
     manifest_core: dict[str, Any],
     test_result: str | None,
+    full_repeat_result: str | None,
 ) -> str:
     train = summary["train"]
     val = summary["val"]
@@ -334,7 +335,8 @@ def _render_report(
         f"| `{label}` | {train_points['raw_train']['emotion_counts'].get(label, 0)} | "
         f"{train_points['unique_train']['emotion_counts'].get(label, 0)} | "
         f"{train_points['train']['emotion_counts'].get(label, 0)} | "
-        f"{train_points['dev']['emotion_counts'].get(label, 0)} |"
+        f"{train_points['dev']['emotion_counts'].get(label, 0)} | "
+        f"{train_points['val']['emotion_counts'].get(label, 0)} |"
         for label in labels
     ]
     dimension_rows = []
@@ -344,7 +346,7 @@ def _render_report(
         tags = sorted(set(counts) | set(after))
         dimension_rows.append(
             f"| `{dim}` | {sum(counts.values())} | {sum(after.values())} | "
-            f"{len(tags)} 个标签 |"
+            f"{sum(train_points['val']['profile_tag_counts'][dim].values())} | {len(tags)} 个标签 |"
         )
     hash_lines = [
         f"| {split} | `{item['path']}` | {item['line_count']} | {item['prediction_point_count']} | "
@@ -394,15 +396,15 @@ def _render_report(
         "",
         "## 4. 情绪、画像与保留内容",
         "",
-        "| 情绪 | Train 原始 | Train/Dev 去重后合计 | Train | Dev |",
-        "|---|---:|---:|---:|---:|",
+        "| 情绪 | Train 原始 | Train/Dev 去重后合计 | Train | Dev | Val |",
+        "|---|---:|---:|---:|---:|---:|",
         *label_rows,
         "",
-        "| 画像维度 | 原始标签赋值数 | 去重后标签赋值数 | 出现标签种类 |",
-        "|---|---:|---:|---:|",
+        "| 画像维度 | Train 原始标签赋值数 | Train/Dev 去重后标签赋值数 | Val 标签赋值数 | Train 标签种类 |",
+        "|---|---:|---:|---:|---:|",
         *dimension_rows,
         "",
-        f"全空画像：原始 {train_points['raw_train']['profile_all_empty_count']}，去重后 {train_points['unique_train']['profile_all_empty_count']}；非空 memory_refs：原始 {train_points['raw_train']['memory_refs_nonempty_count']}，去重后 {train_points['unique_train']['memory_refs_nonempty_count']}。短回复（<5 Unicode 字符）：原始 {train_points['raw_train']['short_response_under_5_count']}，去重后保留 {train_points['unique_train']['short_response_under_5_count']}。空画像、短回复和非空记忆均不做填补或过滤。",
+        f"Train 全空画像：原始 {train_points['raw_train']['profile_all_empty_count']}，去重后 {train_points['unique_train']['profile_all_empty_count']}；Val 全空画像 {train_points['val']['profile_all_empty_count']}。非空 memory_refs：Train 原始 {train_points['raw_train']['memory_refs_nonempty_count']}、去重后 {train_points['unique_train']['memory_refs_nonempty_count']}；Val {train_points['val']['memory_refs_nonempty_count']}。短回复（<5 Unicode 字符）：Train 原始 {train_points['raw_train']['short_response_under_5_count']}、去重后保留 {train_points['unique_train']['short_response_under_5_count']}；Val {train_points['val']['short_response_under_5_count']}。空画像、短回复和非空记忆均不做填补或过滤。",
         "",
         "## 5. 自动验证与复现",
         "",
@@ -410,7 +412,9 @@ def _render_report(
         f"本次测试摘要：{test_text}",
         "",
         f"有效原始 Train 点恰好落入隔离、去重、Train 或 Dev 之一：**{str(summary['conservation_valid']).lower()}**。Val 样本数符合基线：**{str(summary['val_count_valid']).lower()}**。输出生成前校验输入指纹：**{str(summary['input_sha256_unchanged']).lower()}**。",
-        "固定输入、配置、seed 下，JSONL、清洗日志和 split manifest 均由确定性序列化与 SHA-256 排序生成；T12 重复运行检查应验证字节一致。具体输出指纹见 `outputs/data_pipeline/v1/manifest.json`。",
+        "T12 自动用例在合成 JSONL 上逐字节比较 Train/Dev/Val JSONL、清洗日志和 split manifest。",
+        f"官方全量数据二次构建检查：{full_repeat_result or '未提供重复构建结果'}。",
+        "具体输出指纹见 `outputs/data_pipeline/v1/manifest.json`。",
         "",
         "## 6. 风险与 D0.4 交接",
         "",
@@ -427,6 +431,7 @@ def run_pipeline(
     *,
     config_path: Path | None = None,
     test_result: str | None = None,
+    full_repeat_result: str | None = None,
 ) -> dict[str, Any]:
     root = root.resolve()
     config = copy.deepcopy(config)
@@ -812,6 +817,7 @@ def run_pipeline(
                 "unit_test_command", "python -m pytest tests/test_data_audit.py tests/test_data_pipeline.py -q"
             ),
             "unit_test_result": test_result,
+            "full_dataset_repeat_result": full_repeat_result,
         },
     }
 
@@ -883,7 +889,7 @@ def run_pipeline(
             "python_version": platform.python_version(),
             "platform": sys.platform,
         }
-        report_text = _render_report(summary, split_manifest, manifest_core, test_result)
+        report_text = _render_report(summary, split_manifest, manifest_core, test_result, full_repeat_result)
         report_final = output_paths["report"]
         report_final.parent.mkdir(parents=True, exist_ok=True)
         fd, report_temp_name = tempfile.mkstemp(prefix=f".{report_final.name}.stage-", dir=report_final.parent)
@@ -966,10 +972,21 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Optional observed test summary to include in the generated build report",
     )
+    parser.add_argument(
+        "--full-repeat-result",
+        default=None,
+        help="Optional observed full-data byte-repeatability result for the build report",
+    )
     args = parser.parse_args(argv)
     try:
         config, config_path = load_config(PROJECT_ROOT, Path(args.config))
-        result = run_pipeline(PROJECT_ROOT, config, config_path=config_path, test_result=args.test_result)
+        result = run_pipeline(
+            PROJECT_ROOT,
+            config,
+            config_path=config_path,
+            test_result=args.test_result,
+            full_repeat_result=args.full_repeat_result,
+        )
     except Exception as exc:
         print(f"D0.3 build failed: {exc}", file=sys.stderr)
         return 2
