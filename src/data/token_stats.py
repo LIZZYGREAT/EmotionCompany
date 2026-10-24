@@ -34,6 +34,7 @@ from src.shared.prompting import (
     serialize_completion,
     select_recent_complete_suffix,
     tokenizer_signature,
+    validate_completion_suffix,
     validate_prompt_enum_order,
 )
 
@@ -168,33 +169,9 @@ def _validate_completion_suffix(
     full_ids: list[int],
     sample_id: str,
 ) -> list[int]:
-    if full_ids[:len(prompt_ids)] != prompt_ids:
-        raise ValueError(f"{sample_id}: full training Token IDs do not start with the inference prompt")
-    completion_ids = full_ids[len(prompt_ids):]
-    if not completion_ids:
-        raise ValueError(f"{sample_id}: completion Token IDs are empty")
-    eos_id = getattr(tokenizer, "eos_token_id", None)
-    if eos_id is None or int(eos_id) not in completion_ids:
-        raise ValueError(f"{sample_id}: chat-template completion has no tokenizer EOS marker")
-    decoded = tokenizer.decode(
-        completion_ids,
-        skip_special_tokens=False,
-        clean_up_tokenization_spaces=False,
+    return validate_completion_suffix(
+        tokenizer, completion_json, prompt_ids, full_ids, sample_id=sample_id
     )
-    if not decoded.startswith(completion_json):
-        raise ValueError(f"{sample_id}: decoded completion does not begin with the serialized JSON")
-    suffix = decoded[len(completion_json):]
-    eos_text = tokenizer.decode(
-        [int(eos_id)],
-        skip_special_tokens=False,
-        clean_up_tokenization_spaces=False,
-    )
-    terminal_position = suffix.rfind(eos_text)
-    if terminal_position < 0 or suffix[terminal_position + len(eos_text):].strip():
-        raise ValueError(f"{sample_id}: completion JSON is not followed by the template EOS boundary")
-    if suffix[:terminal_position]:
-        raise ValueError(f"{sample_id}: unexpected text appears between JSON completion and EOS")
-    return completion_ids
 
 
 def _target_enums(schema: dict[str, Any]) -> dict[str, list[str]]:

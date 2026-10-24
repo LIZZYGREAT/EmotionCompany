@@ -7,7 +7,8 @@ inputs:
   d042_budget_rows: outputs/token_audit/v1/budget_simulations.jsonl
   train_schema: data/train/train_public.schema.json
   prompt_path: configs/prompts/p0.txt
-  tokenizer_config: participant/configs/inference_config.json
+  tokenizer_config: configs/data_token_audit.yaml
+  runner_config: participant/configs/inference_config.json
 
 profile:
   name: local_smoke_S2048_P1280
