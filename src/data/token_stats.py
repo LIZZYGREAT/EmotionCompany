@@ -1305,7 +1305,7 @@ def _run_validation(root: Path, command: str) -> dict[str, Any]:
     prefix = "python -m pytest "
     if not command.startswith(prefix):
         raise ValueError("validation.unit_test_command must use `python -m pytest ...`")
-    test_paths = command[len(prefix):].split()
+    test_paths = [part for part in command[len(prefix):].split() if part != "-q"]
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", *test_paths, "-q"],
         cwd=root,
@@ -1549,7 +1549,16 @@ def main(argv: list[str] | None = None) -> int:
         "output_dir": result["output_dir"], "report": result["report"],
         "input_hashes_unchanged": result["input_hashes_unchanged"],
         "tokenizer_revision": result["tokenizer"]["resolved_revision"],
-        "budget_summary": result["budget_summary"],
+        "budget_summary": {
+            key: {
+                "full_fit": value["n_full_fit"],
+                "trimmed_fit": value["n_trimmed_fit"],
+                "prompt_floor_exceeds_cap": value["n_prompt_floor_exceeds_cap"],
+                "completion_overflows_train_budget": value["n_completion_overflows_train_budget"],
+                "usable_rate": value["usable_rate"],
+            }
+            for key, value in result["budget_summary"].items()
+        },
     }, ensure_ascii=False, indent=2))
     return 0
 
