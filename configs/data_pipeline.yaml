@@ -1,0 +1,56 @@
+version: D0.3-v1
+
+inputs:
+  train:
+    path: data/train/train_public.jsonl
+    schema: data/train/train_public.schema.json
+    expected_sha256: 184a47471f8d6f70fa21b9265b0a4d4e51c3748ba25af39a801884a2da35341a
+    expected_schema_sha256: a9467e520b06a96859acaa2ff022e395d08ff6ad5e8ae3532a22cc24c630cada
+    expected_line_count: 8338
+    expected_conversation_count: 8338
+    expected_prediction_points: 18657
+  val:
+    path: data/val/val_public.jsonl
+    schema: data/val/val_public.schema.json
+    expected_sha256: 097c0639ef7370a18a54670ec3c8390ce5dc87c1ed95f436cef07b68dfed7668
+    expected_schema_sha256: 4b995d80aba99883bda63e2fa18b161a2784e501f98316295f4618b0a0c4af10
+    expected_line_count: 900
+    expected_conversation_count: 900
+    expected_prediction_points: 2354
+
+outputs:
+  normalized_dir: data/processed/v1
+  artifacts_dir: outputs/data_pipeline/v1
+  report: docs/data/D0.3_数据构建报告.md
+
+policy:
+  version: D0.2-v1
+  invalid_prediction_point: quarantine_point
+  exact_duplicate_training_point: keep_first_source_order
+  short_response_chars: 5
+  short_response_action: keep_and_report
+  empty_profile_action: keep
+  empty_prediction_points_action: no_sample_preserve_conversation_accounting
+  preserve_memory_refs: true
+  text_normalization: none
+
+split:
+  dev_ratio: 0.10
+  seed: 42
+  group_by_full_conversation: true
+  group_by_exact_legal_history: true
+  preserve_emotions:
+    - anxiety
+    - relaxed
+    - helplessness
+    - fear
+    - sadness
+    - mixed
+  large_group_fraction: 0.01
+  max_dev_ratio_deviation: 0.02
+
+validation:
+  strict_official_schema: true
+  fail_on_unexpected_val_error: true
+  assert_input_unchanged: true
+  unit_test_command: python -m pytest tests/test_data_audit.py tests/test_data_pipeline.py -q
