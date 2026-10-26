@@ -29,6 +29,10 @@ bash /root/participant/start.sh /root/test_inference_data.jsonl /root/result
 运行完成后，`/root/result` 中应生成 `submission.jsonl` 和
 `performance_report.json`。详细配置和运行方式见 `participant/README.md`。
 
+## 开发规范与重要约束
+
+仓库协作约束见 [`AGENTS.md`](AGENTS.md)，赛事文件保护范围、官方运行接口和 Schema 指纹见[赛事文件边界与运行契约](docs/competition/赛事文件边界与运行契约.md)。日常修改前先查看 `git status --short`；只暂存本任务明确修改的文件，再提交，例如 `git add <明确的文件路径>`、`git commit -m "<type>: <summary>"`。不要提交原始赛事数据、模型权重/缓存或 `outputs/` 产物。
+
 
 ## 内部技术专家评审所需资料
 1. 需要提交技术方案、实验设计和报告；

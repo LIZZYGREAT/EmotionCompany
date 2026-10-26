@@ -48,6 +48,7 @@ def _api_config() -> dict:
 
 
 def _run_mock_api(tmp_path: Path, monkeypatch, raw_path: Path | None) -> tuple[Path, list[dict]]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(runner, "WORKSPACE_ROOT", tmp_path)
     input_path = tmp_path / "input.jsonl"
     samples = [
@@ -122,6 +123,16 @@ def test_raw_log_is_disabled_by_default_and_does_not_change_official_files(tmp_p
     assert sorted(path.name for path in result_dir.iterdir()) == ["performance_report.json", "submission.jsonl"]
     assert report["raw_predictions_sha256"] is None
     assert report["raw_predictions_path"] is None
+
+
+def test_opt_in_raw_log_does_not_change_official_submission(tmp_path, monkeypatch):
+    default_dir, default_predictions = _run_mock_api(tmp_path / "default", monkeypatch, None)
+    raw_path = tmp_path / "with_raw" / "outputs" / "evaluation" / "raw_predictions.jsonl"
+    raw_dir, raw_predictions = _run_mock_api(tmp_path / "with_raw", monkeypatch, raw_path)
+
+    assert default_predictions == raw_predictions
+    assert sorted(path.name for path in default_dir.iterdir()) == ["performance_report.json", "submission.jsonl"]
+    assert sorted(path.name for path in raw_dir.iterdir()) == ["performance_report.json", "submission.jsonl"]
 
 
 def test_raw_log_cannot_be_written_outside_outputs(tmp_path, monkeypatch):
