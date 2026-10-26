@@ -33,6 +33,7 @@ def _api_config() -> dict:
         "openai_compatible": {"pass_reasoning_content_field": False},
         "model_id": "Qwen/Qwen3-1.7B",
         "model_revision": None,
+        "experiment_id": "E00.2",
         "generation": {"max_new_tokens": 20, "do_sample": False},
         "performance_rounds": 100,
         "hardware_label": "mock-cpu",
@@ -108,6 +109,9 @@ def test_opt_in_raw_log_uses_same_generation_and_records_failures(tmp_path, monk
     assert predictions[1]["emotion_label"] == ""
     assert report["raw_predictions_sha256"] == runner.sha256(raw_path)
     assert report["test_file_sha256"] == runner.sha256(tmp_path / "input.jsonl")
+    assert report["run_id"]
+    assert report["experiment_id"] == "E00.2"
+    assert report["raw_predictions_rows"] == 2
     assert report["submission_schema_validated"] is True
 
 

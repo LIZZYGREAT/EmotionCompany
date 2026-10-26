@@ -3,6 +3,7 @@
   "model_path": "./model",
   "model_id": "Qwen/Qwen3-1.7B",
   "model_revision": null,
+  "experiment_id": "E00.2",
   "trust_remote_code": false,
   "device_map": "auto",
   "torch_dtype": "auto",

@@ -5,7 +5,7 @@ data:
   train_path: data/processed/v1/train.jsonl
   d03_manifest_path: outputs/data_pipeline/v1/manifest.json
   expected_dev_count: 1833
-  output_dir: outputs/evaluation/e00_1/dev_adapter
+  output_dir: outputs/evaluation/e00_1/dev_adapter_v1
 smoke:
   seed: 42
   count: 20
@@ -41,6 +41,7 @@ scoring:
     tokenize: char
     max_ngram_order: 4
     smooth_method: exp
+    effective_order: true
   rouge_l:
     implementation: local_unicode_character_lcs
     version: 1

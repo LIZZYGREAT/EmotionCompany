@@ -14,6 +14,7 @@ import statistics
 import sys
 import tempfile
 import time
+import uuid
 import urllib.error
 import urllib.request
 from functools import lru_cache
@@ -97,6 +98,7 @@ def load_config() -> dict[str, Any]:
         "EVALUATION_BASE_URL": "base_url",
         "EVALUATION_API_MODEL": "api_model",
         "EVALUATION_API_KEY": "api_key",
+        "EVALUATION_EXPERIMENT_ID": "experiment_id",
     }
     for environment_name, config_name in environment_overrides.items():
         if environment_name in os.environ and (
@@ -763,6 +765,8 @@ def main() -> None:
     submission_path = result_dir / "submission.jsonl"
     raw_output_path = resolve_raw_output_path(result_dir, submission_path)
     config = load_config()
+    run_id = os.environ.get("EVALUATION_RUN_ID", "").strip() or uuid.uuid4().hex
+    experiment_id = os.environ.get("EVALUATION_EXPERIMENT_ID", config.get("experiment_id", "unspecified"))
     backend = config["backend"]
     samples = read_jsonl(test_file)
     prompt_text, submission_schema, enums, prompt_facts = load_runtime_protocol(config)
@@ -990,6 +994,8 @@ def main() -> None:
     report = {
         **backend_report,
         "backend": backend,
+        "run_id": run_id,
+        "experiment_id": experiment_id,
         "complete": len(latencies) == config["performance_rounds"],
         "required_rounds": config["performance_rounds"],
         "rounds": len(latencies),

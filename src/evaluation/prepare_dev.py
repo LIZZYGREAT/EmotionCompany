@@ -14,7 +14,14 @@ from typing import Any
 
 import yaml
 
-from src.evaluation import jsonl_bytes, load_submission_schema, read_jsonl, schema_enums, sha256_file
+from src.evaluation import (
+    jsonl_bytes,
+    load_d03_target_validator,
+    load_submission_schema,
+    read_jsonl,
+    schema_enums,
+    sha256_file,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -68,7 +75,10 @@ def _schema_target_errors(target: Any, enums: dict[str, list[str]]) -> list[str]
 
 
 def validate_dev_rows(
-    rows: list[dict[str, Any]], expected_count: int, enums: dict[str, list[str]]
+    rows: list[dict[str, Any]],
+    expected_count: int,
+    enums: dict[str, list[str]],
+    target_validator: Any | None = None,
 ) -> None:
     if len(rows) != expected_count:
         raise ValueError(f"D0.3 Dev 数量不符: expected={expected_count}, actual={len(rows)}")
@@ -99,6 +109,11 @@ def validate_dev_rows(
         if history[-1]["role"] != "user":
             raise ValueError(f"Dev 第 {index} 行最后一条 history 必须为 user: {sample_id}")
         target_errors = _schema_target_errors(row["target"], enums)
+        if target_validator is not None:
+            target_errors.extend(
+                f"official_schema:{error.message}"
+                for error in target_validator.iter_errors(row["target"])
+            )
         if target_errors:
             raise ValueError(f"Dev 第 {index} 行 target 不符合 D0.3 Schema: {sample_id}: {target_errors}")
 
@@ -242,9 +257,11 @@ def prepare_records(
     config: dict[str, Any],
     config_sha256: str,
     output_dir: Path,
+    target_schema_facts: dict[str, Any] | None = None,
+    target_validator: Any | None = None,
 ) -> dict[str, Any]:
     expected_count = int(config["data"]["expected_dev_count"])
-    validate_dev_rows(rows, expected_count, enums)
+    validate_dev_rows(rows, expected_count, enums, target_validator)
     source = {
         "split": config["data"]["split"],
         "dev_path": str(_resolve(config["data"]["dev_path"]).relative_to(ROOT)),
@@ -253,6 +270,7 @@ def prepare_records(
         "d03_manifest_path": str(d03_manifest_path.relative_to(ROOT)) if d03_manifest_path.is_relative_to(ROOT) else str(d03_manifest_path),
         "d03_manifest_sha256": sha256_file(d03_manifest_path),
         "d03_pipeline_version": d03_manifest.get("pipeline_version"),
+        "target_schema": target_schema_facts,
     }
     inference_rows: list[dict[str, Any]] = []
     reference_rows: list[dict[str, Any]] = []
@@ -268,6 +286,7 @@ def prepare_records(
     )
     smoke_facts["eval_ids"] = [inference_rows[index]["id"] for index in smoke_indices]
     smoke_facts["sample_ids"] = [rows[index]["sample_id"] for index in smoke_indices]
+    smoke_facts["history_length_basis"] = "sum of Python Unicode code points in message content; 500-character boundary; descriptive proxy, not tokenizer length"
     output_rows = {
         "inference_input.jsonl": inference_rows,
         "references.jsonl": reference_rows,
@@ -322,6 +341,7 @@ def prepare_from_paths(config_path: Path, output_override: Path | None = None) -
         raise FileNotFoundError(f"D0.3 Manifest 缺失: {manifest_path}")
     d03_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     source_sha, _ = validate_d03_source(dev_path, manifest_path, d03_manifest, int(config["data"]["expected_dev_count"]))
+    target_validator, target_schema_facts = load_d03_target_validator(manifest_path, ROOT)
     rows = read_jsonl(dev_path)
     schema = load_submission_schema(ROOT)
     enums = schema_enums(schema)
@@ -337,6 +357,8 @@ def prepare_from_paths(config_path: Path, output_override: Path | None = None) -
         config=config,
         config_sha256=hashlib.sha256(config_bytes).hexdigest(),
         output_dir=output_dir,
+        target_schema_facts=target_schema_facts,
+        target_validator=target_validator,
     )
 
 
