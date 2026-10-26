@@ -66,7 +66,7 @@ def test_sampling_seed_is_stable_per_id_and_sets_cpu_and_cuda_rng():
     assert calls == [("cpu", first), ("cuda", first)]
 
 
-def test_nf4_observation_uses_loaded_modules_dtype_and_device_map():
+def test_nf4_observation_uses_loaded_modules_dtype_and_observed_device_placement():
     class FakeLinear4bit:
         def __init__(self, dtype="torch.bfloat16", quant_type="nf4", double_quant=True):
             self.compute_dtype = dtype
@@ -78,11 +78,22 @@ def test_nf4_observation_uses_loaded_modules_dtype_and_device_map():
     class FakeModel:
         hf_device_map = {"model": "cuda:0"}
 
-        def __init__(self, modules):
+        def __init__(self, modules, parameter_device="cuda:0"):
             self._modules = modules
+            self._parameter_device = parameter_device
 
         def modules(self):
             return iter(self._modules)
+
+        def named_parameters(self):
+            for index, module in enumerate(self._modules):
+                if isinstance(module, FakeLinear4bit):
+                    yield f"linear.{index}.weight", SimpleNamespace(device=self._parameter_device)
+
+        def named_modules(self):
+            yield "", self
+            for index, module in enumerate(self._modules):
+                yield f"linear.{index}", module
 
     config = {"quantization": {"enabled": True, "use_double_quant": True}}
     torch_cuda = SimpleNamespace(is_available=lambda: True)
@@ -100,6 +111,15 @@ def test_nf4_observation_uses_loaded_modules_dtype_and_device_map():
     assert observed["double_quant_runtime_observed"] is True
     assert observed["offload_devices"] == []
 
+    no_hf_map_model = FakeModel([FakeLinear4bit()])
+    no_hf_map_model.hf_device_map = None
+    fallback_observation = runner.inspect_quantization_runtime(
+        no_hf_map_model, config, torch_stub, FakeLinear4bit
+    )
+    assert fallback_observation["real_nf4_verified"] is True
+    assert fallback_observation["device_map_source"] == "parameter_devices"
+    assert fallback_observation["observed_parameter_devices"] == ["cuda:0"]
+
     cpu_offload_model = FakeModel([FakeLinear4bit()])
     cpu_offload_model.hf_device_map = {"model": "cuda:0", "offload": "cpu"}
     offloaded = runner.inspect_quantization_runtime(cpu_offload_model, config, torch_stub, FakeLinear4bit)
@@ -110,6 +130,23 @@ def test_nf4_observation_uses_loaded_modules_dtype_and_device_map():
         FakeModel([FakeLinear4bit(dtype="torch.float16")]), config, torch_stub, FakeLinear4bit
     )
     assert wrong_dtype["real_nf4_verified"] is False
+
+    cpu_parameters = runner.inspect_quantization_runtime(
+        FakeModel([FakeLinear4bit()], parameter_device="cpu"),
+        config,
+        torch_stub,
+        FakeLinear4bit,
+    )
+    assert cpu_parameters["real_nf4_verified"] is False
+    assert cpu_parameters["offload_devices"] == ["cpu"]
+
+    hooked_module = FakeLinear4bit()
+    hooked_module._hf_hook = SimpleNamespace(offload=True)
+    hooked_offload = runner.inspect_quantization_runtime(
+        FakeModel([hooked_module]), config, torch_stub, FakeLinear4bit
+    )
+    assert hooked_offload["real_nf4_verified"] is False
+    assert hooked_offload["offload_devices"] == ["accelerate_hook"]
 
 
 def test_nf4_does_not_fall_back_when_cuda_is_unavailable():

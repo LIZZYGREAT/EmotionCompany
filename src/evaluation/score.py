@@ -220,6 +220,7 @@ def _validate_runtime_compatibility(
             and type(observed_quantization.get("linear4bit_module_count")) is int
             and observed_quantization.get("linear4bit_module_count", 0) > 0
             and observed_quantization.get("device_map_observed") is True
+            and observed_quantization.get("placement_verified") is True
             and not observed_quantization.get("offload_devices")
         )
     if run_metadata.get("backend") == "transformers":

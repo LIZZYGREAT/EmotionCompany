@@ -452,6 +452,9 @@ def execute(run_id: str) -> int:
         print(f"BLOCKED_IN_CODEX_ENV: CUDA unavailable; rendered configs: {run_root}")
         return 2
 
+    manifest["gpu_status"] = "cuda_available_run_attempted"
+    manifest["stage"] = "model_mount_and_preflight"
+    manifest_path.write_bytes(_json_bytes(manifest))
     try:
         profile_cfg = yaml.safe_load(PROFILE_PATH.read_text(encoding="utf-8"))
         model_mount = _check_local_model_mount(profile_cfg["model"]["weight_revision"])
@@ -483,6 +486,7 @@ def execute(run_id: str) -> int:
         )
         manifest["preflight"] = _assert_preflight(preflight_result, preflight_raw)
         manifest["stage"] = "single_sample_preflight_passed"
+        manifest["real_smoke_status"] = "preflight_passed_smoke_not_started"
         manifest_path.write_bytes(_json_bytes(manifest))
 
         runs: dict[str, dict[str, Any]] = {}

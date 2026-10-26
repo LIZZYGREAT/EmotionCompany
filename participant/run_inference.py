@@ -259,6 +259,8 @@ def require_cuda_for_quantization(config: dict[str, Any], torch_module: Any) -> 
 
 
 def _device_name(value: Any) -> str:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return f"cuda:{value}"
     return str(value).replace("torch.", "")
 
 
@@ -301,12 +303,44 @@ def inspect_quantization_runtime(
     raw_device_map = getattr(model, "hf_device_map", None)
     device_map = (
         {str(name): _device_name(device) for name, device in raw_device_map.items()}
-        if isinstance(raw_device_map, dict) else None
+        if isinstance(raw_device_map, dict) and raw_device_map else None
     )
-    offload_devices = sorted({
-        device for device in (device_map or {}).values()
-        if device.lower() in {"cpu", "disk"}
-    })
+    parameter_devices: set[str] = set()
+    if callable(getattr(model, "named_parameters", None)):
+        try:
+            for _name, parameter in model.named_parameters():
+                device = getattr(parameter, "device", None)
+                if device is not None:
+                    parameter_devices.add(_device_name(device))
+        except (RuntimeError, TypeError):
+            parameter_devices.clear()
+    hook_offload_modules: list[str] = []
+    if callable(getattr(model, "named_modules", None)):
+        for module_name, module in model.named_modules():
+            pending_hooks = [getattr(module, "_hf_hook", None)]
+            while pending_hooks:
+                hook = pending_hooks.pop()
+                if hook is None:
+                    continue
+                nested_hooks = getattr(hook, "hooks", None)
+                if isinstance(nested_hooks, (list, tuple)):
+                    pending_hooks.extend(nested_hooks)
+                if getattr(hook, "offload", False) is True:
+                    hook_offload_modules.append(module_name or "<root>")
+    observed_devices = set((device_map or {}).values()) | parameter_devices
+    offload_devices = {
+        device for device in observed_devices
+        if not device.lower().startswith("cuda")
+    }
+    if hook_offload_modules:
+        offload_devices.add("accelerate_hook")
+    placement_observed = device_map is not None or bool(parameter_devices)
+    placement_verified = bool(
+        placement_observed
+        and observed_devices
+        and not offload_devices
+        and bool(parameter_devices or device_map)
+    )
     use_double_quant = config.get("quantization", {}).get("use_double_quant", True)
     cuda_available = bool(torch_module.cuda.is_available())
     real_nf4_verified = bool(
@@ -314,8 +348,7 @@ def inspect_quantization_runtime(
         and modules
         and compute_dtypes == ["bfloat16"]
         and quant_types == ["nf4"]
-        and device_map is not None
-        and not offload_devices
+        and placement_verified
     )
     return {
         "applied": bool(modules),
@@ -327,9 +360,16 @@ def inspect_quantization_runtime(
         "use_double_quant": use_double_quant,
         "double_quant_runtime_observed": observed_double_quant,
         "linear4bit_module_count": len(modules),
-        "device_map_observed": device_map is not None,
+        "device_map_observed": placement_observed,
+        "device_map_source": "hf_device_map" if device_map is not None else (
+            "parameter_devices" if parameter_devices else None
+        ),
         "hf_device_map": device_map,
-        "offload_devices": offload_devices,
+        "observed_parameter_devices": sorted(parameter_devices),
+        "observed_devices": sorted(observed_devices),
+        "offload_devices": sorted(offload_devices),
+        "accelerate_offload_hook_modules": sorted(set(hook_offload_modules)),
+        "placement_verified": placement_verified,
         "cuda_available": cuda_available,
         "real_nf4_verified": real_nf4_verified,
     }
