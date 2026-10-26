@@ -8,10 +8,10 @@ from pathlib import Path
 import pytest
 import yaml
 
-import src.evaluation.score as score_module
 from src.evaluation import jsonl_bytes, load_submission_schema, schema_enums, sha256_file
 from src.evaluation.prepare_dev import prepare_records
 from src.evaluation.score import _load_train_majority, score_files
+from scripts import e00_mock_smoke
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -114,6 +114,7 @@ def _build_d03_shaped_fixture(tmp_path: Path) -> tuple[dict, str, Path]:
             "run_id": f"mock-{collection}-run",
             "experiment_id": "E00.1-mock-fixture",
             "backend": "mock",
+            "execution_mode": "mock_fixture",
             "hardware_label": "cpu-test-fixture",
             "timing_scope": "synthetic test fixture",
             "test_file_sha256": sha256_file(input_path),
@@ -157,19 +158,6 @@ def _score_fixture(config: dict, config_sha: str, fixture_dir: Path, collection:
     )
 
 
-@pytest.fixture(autouse=True)
-def allow_only_test_generated_mock_runtime(monkeypatch):
-    production_checker = score_module._validate_runtime_compatibility
-
-    def validate_fixture_runtime(metadata, current_config, scope):
-        test_metadata = dict(metadata)
-        if test_metadata.get("backend") == "mock":
-            test_metadata["backend"] = "openai_compatible"
-        return production_checker(test_metadata, current_config, scope)
-
-    monkeypatch.setattr(score_module, "_validate_runtime_compatibility", validate_fixture_runtime)
-
-
 def test_d03_shape_smoke_scores_with_auto_selected_id_map_and_full_set_stays_exact(tmp_path):
     config, config_sha, fixture_dir = _build_d03_shaped_fixture(tmp_path)
 
@@ -178,6 +166,8 @@ def test_d03_shape_smoke_scores_with_auto_selected_id_map_and_full_set_stays_exa
 
     assert smoke["sample_count"] == 3
     assert smoke["dataset_scope"] == "D0.3_dev"
+    assert smoke["execution_mode"] == "mock_fixture"
+    assert "not model quality evidence" in smoke["limitations"][-1]
     assert smoke["model_identity_verification"]["status"] == "not_applicable_mock"
     assert smoke["simple_majority_emotion_baseline"] == {
         "status": "not_run",
@@ -187,6 +177,34 @@ def test_d03_shape_smoke_scores_with_auto_selected_id_map_and_full_set_stays_exa
     }
     assert full["sample_count"] == 6
     assert full["simple_majority_emotion_baseline"]["accuracy"] is None
+
+
+def test_mock_smoke_builder_only_needs_target_free_input_and_refuses_overwrite(tmp_path, monkeypatch):
+    monkeypatch.setattr(e00_mock_smoke, "ROOT", tmp_path)
+    input_path = tmp_path / "smoke_input.jsonl"
+    input_path.write_bytes(jsonl_bytes([
+        {"id": "test_000001_t0", "history": [{"role": "user", "content": "消息一"}]},
+        {"id": "test_000002_t0", "history": [{"role": "user", "content": "消息二"}]},
+    ]))
+    output_dir = tmp_path / "outputs/evaluation/mock-smoke"
+    report = e00_mock_smoke.build_mock_run(
+        input_path,
+        output_dir,
+        "test-mock-run",
+        ROOT / "configs/evaluation/e00.yaml",
+    )
+
+    submission = [json.loads(line) for line in (output_dir / "submission.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [row["id"] for row in submission] == ["test_000001_t0", "test_000002_t0"]
+    assert report["execution_mode"] == "mock_fixture"
+    assert report["test_file_sha256"] == sha256_file(input_path)
+    with pytest.raises(FileExistsError, match="拒绝覆盖"):
+        e00_mock_smoke.build_mock_run(
+            input_path,
+            output_dir,
+            "test-mock-run-2",
+            ROOT / "configs/evaluation/e00.yaml",
+        )
 
 
 def test_smoke_scoring_rejects_missing_extra_and_wrong_id_map(tmp_path):
@@ -256,9 +274,17 @@ def test_scoring_config_can_change_without_rebuilding_dev_but_stale_runtime_is_r
     assert scored["hashes"]["evaluation_config_sha256"] == changed_sha
 
     report["generation_config"] = copy.deepcopy(config["generation"])
-    _write_json(report_path, report)
+    stale_runtime_report = copy.deepcopy(report)
+    stale_runtime_report["backend"] = "openai_compatible"
+    stale_runtime_report.pop("execution_mode", None)
+    stale_runtime_report["run_id"] = "real-backend-stale-runtime"
+    stale_runtime_path = fixture_dir / "real-backend-stale-report.json"
+    _write_json(stale_runtime_path, stale_runtime_report)
     with pytest.raises(ValueError, match="generation_settings"):
-        _score_fixture(changed, changed_sha, fixture_dir, "smoke", "stale-runtime")
+        _score_fixture(
+            changed, changed_sha, fixture_dir, "smoke", "stale-runtime",
+            run_metadata_path=stale_runtime_path,
+        )
 
 
 def test_full_dev_rejects_short_reference_set_even_when_artifact_hashes_match(tmp_path):

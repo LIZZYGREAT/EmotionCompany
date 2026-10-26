@@ -127,6 +127,25 @@ python -m src.evaluation.score \
 
 This fixture uses fabricated rows and the existing participant parser/schema; it is labeled `synthetic_fixture` / `mock` and is not an E00 model result. Scoring checks complete ID-set equality, duplicate IDs, evaluation-manifest hashes, input hash, run ID, target-free input structure and the official submission Schema before computing metrics. The scorer writes `metrics.json`, `report.md` and ID-only `case_errors.jsonl`. Outputs and raw conversations stay under ignored `outputs/`.
 
+To exercise scoring with the real D0.3 Smoke IDs without loading a model, generate explicit Mock predictions using only the target-free Smoke input (the helper never reads References):
+
+```bash
+RUN_ID=E00.1-mock-smoke-20261026
+python scripts/e00_mock_smoke.py \
+  --input outputs/evaluation/e00_1/dev_adapter_v2/smoke_input.jsonl \
+  --output-dir "outputs/evaluation/e00_1/mock_smoke_v2/$RUN_ID" \
+  --run-id "$RUN_ID"
+
+python -m src.evaluation.score \
+  --config configs/evaluation/e00.yaml \
+  --references outputs/evaluation/e00_1/dev_adapter_v2/smoke_references.jsonl \
+  --submission "outputs/evaluation/e00_1/mock_smoke_v2/$RUN_ID/submission.jsonl" \
+  --raw "outputs/evaluation/e00_1/mock_smoke_v2/$RUN_ID/raw_predictions.jsonl" \
+  --output-dir "outputs/evaluation/e00_1/mock_smoke_v2/$RUN_ID/scored"
+```
+
+The output report is marked `execution_mode=mock_fixture`; its scores validate only the alignment and scoring pipeline, not a model. Use a new run ID/output directory for each execution.
+
 For a later E00.2 real-model smoke, use a fresh run directory and a new raw output path for every run. Raw logging is opt-in and refuses to overwrite an existing file. NF4 is also opt-in; the E00.1 implementation does not load Qwen or verify GPU execution:
 
 First inspect the local cache. Tokenizer cache files do not prove model weights are complete:

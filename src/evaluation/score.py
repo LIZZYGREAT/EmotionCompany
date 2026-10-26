@@ -175,12 +175,17 @@ def _observed_weight_hash_valid(identity: Any) -> bool:
 
 
 def _validate_runtime_compatibility(
-    run_metadata: dict[str, Any], config: dict[str, Any], dataset_scope: str
+    run_metadata: dict[str, Any], config: dict[str, Any], dataset_scope: str, *, allow_mock_fixture: bool = False
 ) -> dict[str, Any]:
     if dataset_scope != "D0.3_dev":
         return {
             "status": "not_applicable_synthetic_fixture",
             "checks": {"backend_is_mock": run_metadata.get("backend") == "mock"},
+        }
+    if allow_mock_fixture and run_metadata.get("backend") == "mock":
+        return {
+            "status": "not_applicable_mock_fixture",
+            "checks": {"explicit_execution_mode": run_metadata.get("execution_mode") == "mock_fixture"},
         }
     runtime_protocol = run_metadata.get("protocol", {})
     runtime_prompt = runtime_protocol.get("prompt", {})
@@ -568,8 +573,15 @@ def score_files(
     run_experiment_id = run_metadata.get("experiment_id")
     if not isinstance(run_experiment_id, str) or not run_experiment_id.strip() or run_experiment_id == "unspecified":
         raise ValueError("模型运行报告缺少具名 experiment_id")
+    execution_mode = run_metadata.get("execution_mode", "model_inference")
+    if execution_mode == "mock_fixture" and run_metadata.get("backend") != "mock":
+        raise ValueError("execution_mode=mock_fixture 必须使用 backend=mock")
+    is_mock_fixture = execution_mode == "mock_fixture" and run_metadata.get("backend") == "mock"
     runtime_compatibility = _validate_runtime_compatibility(
-        run_metadata, config, manifest.get("dataset_scope", "unknown")
+        run_metadata,
+        config,
+        manifest.get("dataset_scope", "unknown"),
+        allow_mock_fixture=is_mock_fixture,
     )
 
     ordered_ids = list(reference_by_id)
@@ -624,6 +636,7 @@ def score_files(
     performance = {
         "backend": run_metadata.get("backend"),
         "run_id": run_metadata["run_id"],
+        "execution_mode": execution_mode,
         "hardware_label": run_metadata.get("hardware_label"),
         "timing_scope": run_metadata.get("timing_scope"),
         "official_performance_rounds": run_metadata.get("rounds"),
@@ -641,6 +654,7 @@ def score_files(
         "experiment_id": run_experiment_id,
         "evaluation_manifest_experiment_id": manifest.get("experiment_id"),
         "run_id": run_metadata["run_id"],
+        "execution_mode": execution_mode,
         "sample_count": len(expected_ids),
         "denominators": {
             "emotion": len(expected_ids),
@@ -681,6 +695,7 @@ def score_files(
         "limitations": [
             "All task metrics are local proxies until the official scoring implementations are verified.",
             "No local submetric is converted into official competition points.",
+            *(["Mock fixture predictions are pipeline checks, not model quality evidence."] if is_mock_fixture else []),
         ],
         "scorer_code_commit": _current_commit(),
     }
@@ -695,6 +710,7 @@ def score_files(
         "",
         f"- 范围：`{metrics['dataset_scope']}`；样本数：{metrics['sample_count']}。",
         f"- 实验 / 运行：`{metrics['experiment_id']}` / `{metrics['run_id']}`；后端：`{performance['backend']}`。",
+        f"- 执行模式：`{execution_mode}`。",
         f"- 模型权重身份：`{identity['status']}`（{identity_summary}）；配置 revision 不代表已核验 revision。",
         f"- 范围标记：`{metrics['metrics_scope']}`；不映射为官方总分。",
         f"- 情绪 Accuracy：{emotion_result['accuracy']:.6f}；固定 16 类 Macro-F1：{emotion_result['macro_f1']:.6f}。",
