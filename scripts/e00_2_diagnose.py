@@ -120,6 +120,12 @@ def _extract_object(raw_text: Any) -> tuple[dict[str, Any] | None, str, str | No
     return value, "object_extracted", None
 
 
+def _extraction_class(strict_object: dict[str, Any] | None, extracted: dict[str, Any] | None) -> str:
+    if strict_object is not None:
+        return "strict_json_object"
+    return "strict_fail_but_extracted" if extracted is not None else "no_object_extracted"
+
+
 def _label_value(value: Any, *, present: bool = True) -> dict[str, Any]:
     if not present:
         return {"type": "missing"}
@@ -365,6 +371,7 @@ def _case_diagnosis(
     raw_text = raw_row.get("raw_text")
     strict_object, strict_status, strict_error = _strict_parse(raw_text)
     extracted, extraction_status, extraction_error = _extract_object(raw_text)
+    extraction_class = _extraction_class(strict_object, extracted)
     expected, parse_failed, invalid_label = run_inference.parse_prediction(
         sample_id, raw_text if isinstance(raw_text, str) else "", enums
     )
@@ -439,7 +446,11 @@ def _case_diagnosis(
                     "combined_invalid_label_if_object_extracted": predicted_invalid_label if extracted is not None else None,
                 },
                 "strict_json": {"status": strict_status, "object": strict_object is not None, "error_category_detail": strict_error},
-                "permissive_extraction": {"status": extraction_status, "error_category_detail": extraction_error},
+                "permissive_extraction": {
+                    "status": extraction_status,
+                    "class": extraction_class,
+                    "error_category_detail": extraction_error,
+                },
                 "fields": {
                     "missing": missing_fields,
                     "extra": extra_fields,
@@ -563,7 +574,7 @@ def _increment_profile_totals(totals: dict[str, Any], case: dict[str, Any], aux:
     extraction = case["profiles"]
     profile_name = next(iter(extraction))
     profile_case = extraction[profile_name]
-    totals["permissive_extraction_counts"][profile_case["permissive_extraction"]["status"]] += 1
+    totals["permissive_extraction_counts"][profile_case["permissive_extraction"]["class"]] += 1
     totals["runner_status_counts"][aux["runner_status"]] += 1
     totals["performance_status_counts"][profile_case["performance_status"]] += 1
     totals["emotion_status_counts"][aux["emotion_status"]] += 1

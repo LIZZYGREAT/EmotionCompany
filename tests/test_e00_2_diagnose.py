@@ -46,6 +46,14 @@ def test_strict_json_scalar_is_not_a_valid_completion_object():
     assert diagnose._strict_parse("null")[1] == "valid_json_non_object"
 
 
+def test_strict_fail_but_extracted_and_no_object_have_distinct_classes():
+    wrapped = "Prefix: " + json.dumps(_completion())
+    strict_object = diagnose._strict_parse(wrapped)[0]
+    extracted = diagnose._extract_object(wrapped)[0]
+    assert diagnose._extraction_class(strict_object, extracted) == "strict_fail_but_extracted"
+    assert diagnose._extraction_class(None, None) == "no_object_extracted"
+
+
 @pytest.mark.parametrize(
     ("raw", "present", "expected"),
     [
