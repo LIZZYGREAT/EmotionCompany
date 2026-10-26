@@ -256,6 +256,10 @@ def test_transformers_runtime_requires_recomputed_weight_file_hashes(tmp_path):
             "quant_type": "nf4",
             "compute_dtype": "bfloat16",
             "use_double_quant": config["quantization"]["planned"]["use_double_quant"],
+            "real_nf4_verified": True,
+            "linear4bit_module_count": 2,
+            "device_map_observed": True,
+            "offload_devices": [],
         },
         "generation_config": dict(config["generation"]),
         "protocol": {
@@ -274,6 +278,11 @@ def test_transformers_runtime_requires_recomputed_weight_file_hashes(tmp_path):
     assert _validate_runtime_compatibility(run, config, "D0.3_dev")["status"] == "verified"
     assert _model_identity_verification(run, "D0.3_dev")["status"] == "verified"
     assert _model_identity_verification(run, "D0.3_dev")["revision_status"] == "unverified_revision"
+
+    run["quantization"]["real_nf4_verified"] = False
+    with pytest.raises(ValueError, match="transformers_nf4_applied"):
+        _validate_runtime_compatibility(run, config, "D0.3_dev")
+    run["quantization"]["real_nf4_verified"] = True
 
     run["model_weight_identity"]["observed_weight_hash"] = "0" * 64
     with pytest.raises(ValueError, match="observed_model_weight_hash"):

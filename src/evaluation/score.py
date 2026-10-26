@@ -206,6 +206,9 @@ def _validate_runtime_compatibility(
         "id_not_in_prompt": runtime_protocol.get("id_in_prompt") is False,
         "backend_is_not_mock": run_metadata.get("backend") != "mock",
     }
+    expected_weight_revision = config.get("model", {}).get("weight_revision")
+    if expected_weight_revision is not None:
+        checks["model_revision"] = run_metadata.get("model_revision") == expected_weight_revision
     if run_metadata.get("backend") == "transformers" and config.get("quantization", {}).get("planned", {}).get("load_in_4bit"):
         observed_quantization = run_metadata.get("quantization", {})
         checks["transformers_nf4_applied"] = (
@@ -213,6 +216,11 @@ def _validate_runtime_compatibility(
             and observed_quantization.get("quant_type") == "nf4"
             and observed_quantization.get("compute_dtype") == "bfloat16"
             and observed_quantization.get("use_double_quant") == config["quantization"]["planned"].get("use_double_quant")
+            and observed_quantization.get("real_nf4_verified") is True
+            and type(observed_quantization.get("linear4bit_module_count")) is int
+            and observed_quantization.get("linear4bit_module_count", 0) > 0
+            and observed_quantization.get("device_map_observed") is True
+            and not observed_quantization.get("offload_devices")
         )
     if run_metadata.get("backend") == "transformers":
         weight_identity = run_metadata.get("model_weight_identity", {})

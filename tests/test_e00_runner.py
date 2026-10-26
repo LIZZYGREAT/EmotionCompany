@@ -239,7 +239,7 @@ def test_transformers_timer_synchronizes_before_and_after_the_measured_region(tm
         [{"role": "user", "content": "一条消息"}],
     ))
     monkeypatch.setattr(runner, "synchronize", lambda _torch: events.append("sync"))
-    clock_values = iter([10.0, 10.25])
+    clock_values = iter([1.0, 1.1, 10.0, 10.25])
     monkeypatch.setattr(runner.time, "perf_counter", lambda: (events.append("clock"), next(clock_values))[1])
     monkeypatch.setattr(runner, "generate_transformers_sample", lambda *_args: (events.append("generate") or _completion(), {"generated_tokens": 2, "stop_reason": "eos"}))
     monkeypatch.setattr(transformers, "AutoConfig", FakeAutoConfig)
@@ -254,7 +254,7 @@ def test_transformers_timer_synchronizes_before_and_after_the_measured_region(tm
 
     runner.main()
 
-    assert events == ["sync", "clock", "generate", "sync", "clock"]
+    assert events == ["clock", "clock", "sync", "clock", "generate", "sync", "clock"]
     report = json.loads((result_dir / "performance_report.json").read_text(encoding="utf-8"))
     assert report["average_latency_ms"] == 250.0
     assert "CUDA synchronized before start and after validation" in report["timing_scope"]

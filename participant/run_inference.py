@@ -28,6 +28,14 @@ ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "configs" / "inference_config.json"
 
 
+def inference_config_path() -> Path:
+    configured = os.environ.get("EVALUATION_INFERENCE_CONFIG")
+    if not configured:
+        return CONFIG_PATH.resolve()
+    path = Path(configured).expanduser()
+    return (path if path.is_absolute() else WORKSPACE_ROOT / path).resolve()
+
+
 def _find_workspace_root(start: Path) -> Path:
     for candidate in (start, *start.parents):
         if (candidate / "configs/prompts/p0.txt").is_file() and (candidate / "src/shared/prompting.py").is_file():
@@ -91,8 +99,13 @@ def prepare_result_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def load_config() -> dict[str, Any]:
-    config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+def load_config(config_path: Path | None = None) -> dict[str, Any]:
+    selected_config_path = (config_path or inference_config_path()).resolve()
+    if not selected_config_path.is_file():
+        raise FileNotFoundError(f"推理配置文件不存在: {selected_config_path}")
+    config = json.loads(selected_config_path.read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        raise ValueError("推理配置 JSON 根节点必须为 object")
     environment_overrides = {
         "EVALUATION_BACKEND": "backend",
         "EVALUATION_BASE_URL": "base_url",
@@ -166,6 +179,8 @@ def load_config() -> dict[str, Any]:
         not isinstance(serving_limit, int) or isinstance(serving_limit, bool) or serving_limit <= 0
     ):
         raise ValueError("context.serving_context_limit 必须为正整数或 null")
+    if not isinstance(config["generation"], dict):
+        raise ValueError("generation 必须为 JSON object")
     generation_cap = config["generation"].get("max_new_tokens")
     if not isinstance(generation_cap, int) or isinstance(generation_cap, bool) or generation_cap <= 0:
         raise ValueError("generation.max_new_tokens 必须为正整数")
@@ -174,6 +189,37 @@ def load_config() -> dict[str, Any]:
             f"部署预算不兼容：P({prompt_cap}) + G({generation_cap}) = "
             f"{prompt_cap + generation_cap} > K({serving_limit})"
         )
+    generation = config["generation"]
+    if "do_sample" in generation and not isinstance(generation["do_sample"], bool):
+        raise ValueError("generation.do_sample 必须为 boolean")
+    sampling = config.get("sampling", {})
+    if not isinstance(sampling, dict):
+        raise ValueError("sampling 必须为 JSON object")
+    if "base_seed" in sampling and (
+        not isinstance(sampling["base_seed"], int)
+        or isinstance(sampling["base_seed"], bool)
+        or sampling["base_seed"] < 0
+        or sampling["base_seed"] >= 2**64
+    ):
+        raise ValueError("sampling.base_seed 必须在 [0, 2**64) 范围内")
+    if (
+        config["backend"] == "transformers"
+        and generation.get("do_sample", False)
+        and "base_seed" not in sampling
+    ):
+        raise ValueError("Transformers Sampling 必须配置 sampling.base_seed")
+    if generation.get("do_sample", False):
+        temperature = generation.get("temperature", 1.0)
+        top_p = generation.get("top_p", 1.0)
+        top_k = generation.get("top_k")
+        if not isinstance(temperature, (int, float)) or isinstance(temperature, bool) or temperature <= 0:
+            raise ValueError("generation.temperature 必须为正数")
+        if not isinstance(top_p, (int, float)) or isinstance(top_p, bool) or not 0 < top_p <= 1:
+            raise ValueError("generation.top_p 必须位于 (0, 1]")
+        if top_k is not None and (
+            not isinstance(top_k, int) or isinstance(top_k, bool) or top_k <= 0
+        ):
+            raise ValueError("generation.top_k 必须为正整数")
     tokenizer_config = config["tokenizer"]
     for key in ("model_id", "revision", "expected_signature_sha256", "expected_template_sha256", "files_sha256"):
         if key not in tokenizer_config:
@@ -207,19 +253,178 @@ def build_quantization_config(
     )
 
 
+def require_cuda_for_quantization(config: dict[str, Any], torch_module: Any) -> None:
+    if config.get("quantization", {}).get("enabled", False) and not torch_module.cuda.is_available():
+        raise RuntimeError("请求 NF4 真实模型运行但 CUDA 不可用；拒绝降级到 CPU")
+
+
+def _device_name(value: Any) -> str:
+    return str(value).replace("torch.", "")
+
+
+def inspect_quantization_runtime(
+    model: Any,
+    config: dict[str, Any],
+    torch_module: Any,
+    linear4bit_type: type | None = None,
+) -> dict[str, Any]:
+    """Inspect the loaded model instead of inferring NF4 from its config object."""
+    if not config.get("quantization", {}).get("enabled", False):
+        return {"applied": False, "real_nf4_verified": False, "linear4bit_module_count": 0}
+    if linear4bit_type is None:
+        try:
+            from bitsandbytes.nn import Linear4bit
+        except ImportError as exc:
+            raise RuntimeError("NF4 已请求，但 bitsandbytes.nn.Linear4bit 不可用") from exc
+        linear4bit_type = Linear4bit
+
+    modules = [module for module in model.modules() if isinstance(module, linear4bit_type)]
+    compute_dtypes = sorted({
+        _device_name(getattr(module, "compute_dtype", None))
+        for module in modules
+    })
+    quant_types = sorted({
+        str(getattr(getattr(module, "weight", None), "quant_type", None)).lower()
+        for module in modules
+    })
+    double_quant_observations = []
+    for module in modules:
+        weight = getattr(module, "weight", None)
+        quant_state = getattr(weight, "quant_state", None)
+        if quant_state is not None and hasattr(quant_state, "nested"):
+            double_quant_observations.append(getattr(quant_state, "nested") is not None)
+    observed_double_quant = (
+        double_quant_observations[0]
+        if double_quant_observations and all(value == double_quant_observations[0] for value in double_quant_observations)
+        else None
+    )
+    raw_device_map = getattr(model, "hf_device_map", None)
+    device_map = (
+        {str(name): _device_name(device) for name, device in raw_device_map.items()}
+        if isinstance(raw_device_map, dict) else None
+    )
+    offload_devices = sorted({
+        device for device in (device_map or {}).values()
+        if device.lower() in {"cpu", "disk"}
+    })
+    use_double_quant = config.get("quantization", {}).get("use_double_quant", True)
+    cuda_available = bool(torch_module.cuda.is_available())
+    real_nf4_verified = bool(
+        cuda_available
+        and modules
+        and compute_dtypes == ["bfloat16"]
+        and quant_types == ["nf4"]
+        and device_map is not None
+        and not offload_devices
+    )
+    return {
+        "applied": bool(modules),
+        "load_in_4bit": True,
+        "quant_type": quant_types[0] if len(quant_types) == 1 else None,
+        "compute_dtype": compute_dtypes[0] if len(compute_dtypes) == 1 else None,
+        "observed_compute_dtypes": compute_dtypes,
+        "observed_quant_types": quant_types,
+        "use_double_quant": use_double_quant,
+        "double_quant_runtime_observed": observed_double_quant,
+        "linear4bit_module_count": len(modules),
+        "device_map_observed": device_map is not None,
+        "hf_device_map": device_map,
+        "offload_devices": offload_devices,
+        "cuda_available": cuda_available,
+        "real_nf4_verified": real_nf4_verified,
+    }
+
+
+def cuda_memory_facts(torch_module: Any) -> dict[str, Any]:
+    cuda = torch_module.cuda
+    if not cuda.is_available():
+        return {"cuda_available": False}
+    device_index = cuda.current_device()
+    properties = cuda.get_device_properties(device_index)
+    return {
+        "cuda_available": True,
+        "device_index": int(device_index),
+        "gpu_name": str(properties.name),
+        "total_memory_bytes": int(properties.total_memory),
+        "allocator_current_allocated_bytes": int(cuda.memory_allocated(device_index)),
+        "allocator_current_reserved_bytes": int(cuda.memory_reserved(device_index)),
+        "allocator_peak_allocated_bytes": int(cuda.max_memory_allocated(device_index)),
+        "allocator_peak_reserved_bytes": int(cuda.max_memory_reserved(device_index)),
+        "memory_measurement": "PyTorch CUDA allocator; excludes non-PyTorch and other-process allocations",
+    }
+
+
+def derive_sample_seed(base_seed: int, sample_id: str) -> int:
+    digest = hashlib.sha256(f"{base_seed}:{sample_id}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big", signed=False)
+
+
+def set_sampling_seed(torch_module: Any, seed: int) -> None:
+    torch_module.manual_seed(seed)
+    if torch_module.cuda.is_available():
+        torch_module.cuda.manual_seed_all(seed)
+
+
+def run_configuration_provenance() -> dict[str, Any]:
+    config_path = inference_config_path()
+    evaluation_value = os.environ.get("EVALUATION_EVALUATION_CONFIG")
+    evaluation_path = None
+    if evaluation_value:
+        candidate = Path(evaluation_value).expanduser()
+        evaluation_path = (candidate if candidate.is_absolute() else WORKSPACE_ROOT / candidate).resolve()
+    override_names = sorted(
+        name for name in os.environ
+        if name.startswith("EVALUATION_") and name not in {
+            "EVALUATION_API_KEY", "EVALUATION_INFERENCE_CONFIG", "EVALUATION_EVALUATION_CONFIG",
+            "EVALUATION_RAW_OUTPUT_PATH", "EVALUATION_RUN_ID",
+        }
+    )
+    return {
+        "inference_config_path": str(config_path),
+        "inference_config_sha256": sha256(config_path) if config_path.is_file() else None,
+        "evaluation_config_path": str(evaluation_path) if evaluation_path else None,
+        "evaluation_config_sha256": (
+            sha256(evaluation_path) if evaluation_path is not None and evaluation_path.is_file() else None
+        ),
+        "environment_override_names": override_names,
+    }
+
+
 def _weight_identity(model_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
     configured_revision = config.get("model_revision")
     if not isinstance(configured_revision, str) or not configured_revision.strip():
         configured_revision = None
-    candidates = sorted(
-        path for path in model_dir.rglob("*")
-        if path.is_file() and (
-            path.name.endswith(".safetensors")
-            or path.name.endswith(".gguf")
-            or path.name == "pytorch_model.bin"
-            or path.name.startswith("pytorch_model-") and path.name.endswith(".bin")
+    weight_index = model_dir / "model.safetensors.index.json"
+    fingerprint_status = "all_supported_weight_files_sha256"
+    if weight_index.is_file():
+        try:
+            index = json.loads(weight_index.read_text(encoding="utf-8"))
+            weight_map = index["weight_map"]
+            shard_names = sorted(set(weight_map.values()))
+            if not shard_names or not all(isinstance(name, str) for name in shard_names):
+                raise ValueError("weight_map must reference one or more string shard names")
+            candidates = []
+            for name in shard_names:
+                relative = Path(name)
+                if relative.is_absolute() or ".." in relative.parts:
+                    raise ValueError(f"weight shard path escapes model directory: {name}")
+                shard = model_dir / relative
+                if not shard.is_file() or shard.stat().st_size <= 0:
+                    raise ValueError(f"indexed weight shard is missing or empty: {name}")
+                candidates.append(shard)
+            fingerprint_status = "indexed_safetensors_shards_sha256"
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"无效的 model.safetensors.index.json: {exc}") from exc
+    else:
+        candidates = sorted(
+            path for path in model_dir.rglob("*")
+            if path.is_file() and (
+                path.name.endswith(".safetensors")
+                or path.name.endswith(".gguf")
+                or path.name == "pytorch_model.bin"
+                or path.name.startswith("pytorch_model-") and path.name.endswith(".bin")
+            )
         )
-    )
     if not candidates:
         return {
             "model_id": config.get("model_id"),
@@ -243,7 +448,7 @@ def _weight_identity(model_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
         "configured_revision": configured_revision,
         "local_path": str(model_dir),
         "identity_status": "observed",
-        "fingerprint_status": "all_supported_weight_files_sha256",
+        "fingerprint_status": fingerprint_status,
         "revision_status": "unverified_revision" if configured_revision else "not_configured",
         "observed_weight_hash": fingerprint,
         "aggregate_sha256": fingerprint,
@@ -768,6 +973,7 @@ def main() -> None:
     submission_path = result_dir / "submission.jsonl"
     raw_output_path = resolve_raw_output_path(result_dir, submission_path)
     config = load_config()
+    configuration_provenance = run_configuration_provenance()
     run_id = os.environ.get("EVALUATION_RUN_ID", "").strip() or uuid.uuid4().hex
     experiment_id = os.environ.get("EVALUATION_EXPERIMENT_ID", config.get("experiment_id", "unspecified"))
     backend = config["backend"]
@@ -798,6 +1004,7 @@ def main() -> None:
         except ImportError as exc:
             raise RuntimeError("请先安装 participant/requirements.txt") from exc
 
+        require_cuda_for_quantization(config, torch)
         trust_remote_code = bool(config.get("trust_remote_code", False))
         model_config = AutoConfig.from_pretrained(
             local_model,
@@ -820,19 +1027,19 @@ def main() -> None:
         quantization_config = build_quantization_config(config, torch)
         if quantization_config is not None:
             model_load_kwargs["quantization_config"] = quantization_config
+        model_load_started = time.perf_counter()
         model = model_loader.from_pretrained(local_model, **model_load_kwargs)
         model.eval()
-        quantization_facts = (
-            {
-                "applied": True,
-                "load_in_4bit": True,
-                "quant_type": "nf4",
-                "compute_dtype": "bfloat16",
-                "use_double_quant": config.get("quantization", {}).get("use_double_quant", True),
-            }
-            if quantization_config is not None
-            else {"applied": False, "method": "legacy default model loader arguments"}
-        )
+        model_load_seconds = time.perf_counter() - model_load_started
+        quantization_facts = inspect_quantization_runtime(model, config, torch)
+        if quantization_config is not None and not quantization_facts["real_nf4_verified"]:
+            raise RuntimeError(
+                "模型加载后未通过真实 NF4/BF16/CUDA/无 offload 验收: "
+                + json.dumps(quantization_facts, ensure_ascii=False, sort_keys=True)
+            )
+        memory_after_load = cuda_memory_facts(torch)
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
         backend_report = {
             "version": "transformers_p0_f2_t1_v3",
             "timing_scope": (
@@ -845,6 +1052,9 @@ def main() -> None:
             "model_loader": model_loader.__name__,
             "model_weight_identity": weight_identity,
             "quantization": quantization_facts,
+            "model_load_seconds": round(model_load_seconds, 6),
+            "cuda_memory_after_model_load": memory_after_load,
+            "cuda_peak_memory_scope": "reset after model load; peak covers inference samples only",
             "template_equivalence": "local_input_ids_are_the_shared_encode_inference_prompt_result",
         }
     else:
@@ -900,6 +1110,7 @@ def main() -> None:
             stop_reason = "not_generated"
             raw_text: str | None = None
             error_type: str | None = None
+            sampling_seed: int | None = None
             prediction: dict[str, Any]
 
             if selection["floor_exceeds_cap"]:
@@ -912,6 +1123,11 @@ def main() -> None:
                 can_parse_output = False
                 try:
                     if backend == "transformers":
+                        if generation.get("do_sample", False):
+                            sampling_seed = derive_sample_seed(
+                                config["sampling"]["base_seed"], sample["id"]
+                            )
+                            set_sampling_seed(torch, sampling_seed)
                         decoded, generation_details = generate_transformers_sample(
                             model, torch, tokenizer, selection["prompt_ids"], generation
                         )
@@ -972,6 +1188,8 @@ def main() -> None:
                 "removed_history_messages": removed_messages,
                 "generated_tokens": generated_tokens,
                 "stop_reason": stop_reason,
+                "sampling_seed": sampling_seed,
+                "is_first_sample_cold_start": index == 1 and backend == "transformers",
                 "server_prompt_tokens": server_details.get("server_prompt_tokens"),
                 "server_completion_tokens": server_details.get("server_completion_tokens"),
             })
@@ -1002,6 +1220,7 @@ def main() -> None:
         "backend": backend,
         "run_id": run_id,
         "experiment_id": experiment_id,
+        "configuration": configuration_provenance,
         "complete": len(latencies) == config["performance_rounds"],
         "required_rounds": config["performance_rounds"],
         "rounds": len(latencies),
@@ -1019,6 +1238,16 @@ def main() -> None:
         "model_id": config.get("model_id"),
         "model_revision": config.get("model_revision"),
         "generation_config": generation,
+        "sampling": (
+            {
+                "enabled": bool(generation.get("do_sample", False)),
+                "base_seed": config.get("sampling", {}).get("base_seed"),
+                "seed_derivation": "int(first_8_bytes_sha256(f'{base_seed}:{id}'))",
+                "seeded_backend": "transformers_per_sample_cpu_and_all_cuda_devices",
+            }
+            if backend == "transformers" and generation.get("do_sample", False)
+            else {"enabled": False}
+        ),
         "raw_predictions_rows": len(raw_predictions) if raw_output_path is not None else None,
         "samples": prediction_count,
         "submission_rows": prediction_count,
@@ -1069,6 +1298,12 @@ def main() -> None:
             if backend == "transformers" else "BLOCKED_NOT_RUN_no_pinned_vllm_token_id_diagnostic"
         ),
         "api_reasoning_content_field_enabled": bool(config.get("openai_compatible", {}).get("pass_reasoning_content_field", False)),
+        "sample_timing": {
+            "model_load_seconds": backend_report.get("model_load_seconds"),
+            "first_sample_is_cold_start": backend == "transformers",
+            "separate_warmup_run": False,
+            "cuda_memory_after_inference": cuda_memory_facts(torch) if backend == "transformers" else None,
+        },
         "sample_diagnostics": sample_diagnostics,
     }
     (result_dir / "performance_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
