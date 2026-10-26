@@ -12,6 +12,7 @@ import os
 import re
 import statistics
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -108,6 +109,11 @@ def load_config() -> dict[str, Any]:
         config["hardware_label"] = os.environ["EVALUATION_HARDWARE_LABEL"]
     if os.environ.get("EVALUATION_TOKENIZER_PATH"):
         config.setdefault("tokenizer", {})["local_path"] = os.environ["EVALUATION_TOKENIZER_PATH"]
+    if "EVALUATION_ENABLE_NF4" in os.environ:
+        value = os.environ["EVALUATION_ENABLE_NF4"].strip().lower()
+        if value not in {"1", "true", "yes", "0", "false", "no"}:
+            raise ValueError("EVALUATION_ENABLE_NF4 必须为 true/false")
+        config.setdefault("quantization", {})["enabled"] = value in {"1", "true", "yes"}
     if os.environ.get("EVALUATION_MAX_PROMPT_TOKENS"):
         config.setdefault("context", {})["max_prompt_tokens"] = int(os.environ["EVALUATION_MAX_PROMPT_TOKENS"])
     if os.environ.get("EVALUATION_PROMPT_BUDGET_PROFILE"):
@@ -133,6 +139,18 @@ def load_config() -> dict[str, Any]:
             raise ValueError("request_timeout_seconds 必须为正数")
         if not isinstance(config.get("api_options", {}), dict):
             raise ValueError("api_options 必须为 JSON object")
+    quantization = config.get("quantization", {})
+    if not isinstance(quantization, dict):
+        raise ValueError("quantization 必须为 JSON object")
+    if quantization.get("enabled", False):
+        if quantization.get("load_in_4bit", True) is not True:
+            raise ValueError("启用量化时 load_in_4bit 必须为 true")
+        if quantization.get("quant_type", "nf4") != "nf4":
+            raise ValueError("当前仅支持显式 NF4 候选")
+        if quantization.get("compute_dtype", "bfloat16") != "bfloat16":
+            raise ValueError("当前 NF4 候选要求 bfloat16 compute dtype")
+        if not isinstance(quantization.get("use_double_quant", True), bool):
+            raise ValueError("quantization.use_double_quant 必须为 boolean")
     if not isinstance(config["performance_rounds"], int) or config["performance_rounds"] <= 0:
         raise ValueError("performance_rounds 必须为正整数")
     context = config["context"]
@@ -161,6 +179,105 @@ def load_config() -> dict[str, Any]:
     if tokenizer_config.get("local_files_only") is not True:
         raise ValueError("tokenizer.local_files_only 必须为 true，禁止运行时隐式下载")
     return config
+
+
+def build_quantization_config(
+    config: dict[str, Any],
+    torch_module: Any,
+    bitsandbytes_config_cls: Any | None = None,
+) -> Any | None:
+    """Return a real BitsAndBytesConfig only when opt-in NF4 is enabled."""
+    quantization = config.get("quantization", {})
+    if not quantization.get("enabled", False):
+        return None
+    if bitsandbytes_config_cls is None:
+        from transformers import BitsAndBytesConfig
+
+        bitsandbytes_config_cls = BitsAndBytesConfig
+    dtype = getattr(torch_module, "bfloat16", None)
+    if dtype is None:
+        raise ValueError("当前 PyTorch 缺少 bfloat16 dtype")
+    return bitsandbytes_config_cls(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=dtype,
+        bnb_4bit_use_double_quant=quantization.get("use_double_quant", True),
+    )
+
+
+def _weight_identity(model_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
+    configured_revision = config.get("model_revision")
+    if isinstance(configured_revision, str) and configured_revision.strip():
+        return {
+            "model_id": config.get("model_id"),
+            "configured_revision": configured_revision,
+            "local_path": str(model_dir),
+            "fingerprint_status": "revision_configured_file_hashes_not_computed",
+            "files": [],
+        }
+    candidates = sorted(
+        path for path in model_dir.rglob("*")
+        if path.is_file() and (
+            path.name.endswith(".safetensors")
+            or path.name.endswith(".gguf")
+            or path.name == "pytorch_model.bin"
+            or path.name.startswith("pytorch_model-") and path.name.endswith(".bin")
+        )
+    )
+    if not candidates:
+        return {
+            "model_id": config.get("model_id"),
+            "configured_revision": None,
+            "local_path": str(model_dir),
+            "fingerprint_status": "no_supported_weight_files_found",
+            "files": [],
+        }
+    files = [{"path": path.relative_to(model_dir).as_posix(), "size_bytes": path.stat().st_size, "sha256": sha256(path)} for path in candidates]
+    fingerprint = hashlib.sha256(
+        json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return {
+        "model_id": config.get("model_id"),
+        "configured_revision": None,
+        "local_path": str(model_dir),
+        "fingerprint_status": "all_supported_weight_files_sha256",
+        "aggregate_sha256": fingerprint,
+        "files": files,
+    }
+
+
+def resolve_raw_output_path(result_dir: Path, submission_path: Path) -> Path | None:
+    configured = os.environ.get("EVALUATION_RAW_OUTPUT_PATH")
+    if not configured:
+        return None
+    raw_path = Path(configured).expanduser().resolve()
+    outputs_root = (WORKSPACE_ROOT / "outputs").resolve()
+    if not raw_path.is_relative_to(outputs_root):
+        raise ValueError(f"原始生成文本只能写入 outputs/ 下: {raw_path}")
+    if raw_path in {submission_path.resolve(), (result_dir / "performance_report.json").resolve()}:
+        raise ValueError("原始诊断路径不得覆盖官方提交或性能报告")
+    if raw_path.exists():
+        raise FileExistsError(f"原始诊断输出已存在，拒绝覆盖: {raw_path}")
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    return raw_path
+
+
+def _write_jsonl_atomic(path: Path, rows: list[dict[str, Any]]) -> None:
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", newline="\n", dir=path.parent,
+            prefix=f".{path.name}.", suffix=".tmp", delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def model_path(config: dict[str, Any]) -> Path:
@@ -620,7 +737,11 @@ def generate_transformers_sample(
         contains_eos = bool((new_ids == eos_id).any().item())
     details = {
         "generated_tokens": int(new_ids.shape[-1]),
-        "stop_reason": "eos" if contains_eos else "generation_limit_or_other",
+        "stop_reason": (
+            "eos" if contains_eos
+            else "max_new_tokens" if int(new_ids.shape[-1]) >= generation.get("max_new_tokens", 0)
+            else "unknown"
+        ),
     }
     return decoded, details
 
@@ -639,6 +760,8 @@ def main() -> None:
     test_file = validate_test_file(args.test_file.resolve())
     result_dir = args.result_dir.resolve()
     prepare_result_dir(result_dir)
+    submission_path = result_dir / "submission.jsonl"
+    raw_output_path = resolve_raw_output_path(result_dir, submission_path)
     config = load_config()
     backend = config["backend"]
     samples = read_jsonl(test_file)
@@ -680,20 +803,41 @@ def main() -> None:
             else AutoModelForCausalLM
         )
         tokenizer, tokenizer_facts = load_runtime_tokenizer(config, local_model)
-        model = model_loader.from_pretrained(
-            local_model,
-            trust_remote_code=trust_remote_code,
-            local_files_only=True,
-            device_map=config.get("device_map", "auto"),
-            torch_dtype=config.get("torch_dtype", "auto"),
-        )
+        weight_identity = _weight_identity(local_model, config)
+        model_load_kwargs = {
+            "trust_remote_code": trust_remote_code,
+            "local_files_only": True,
+            "device_map": config.get("device_map", "auto"),
+            "torch_dtype": config.get("torch_dtype", "auto"),
+        }
+        quantization_config = build_quantization_config(config, torch)
+        if quantization_config is not None:
+            model_load_kwargs["quantization_config"] = quantization_config
+        model = model_loader.from_pretrained(local_model, **model_load_kwargs)
         model.eval()
+        quantization_facts = (
+            {
+                "applied": True,
+                "load_in_4bit": True,
+                "quant_type": "nf4",
+                "compute_dtype": "bfloat16",
+                "use_double_quant": config.get("quantization", {}).get("use_double_quant", True),
+            }
+            if quantization_config is not None
+            else {"applied": False, "method": "legacy default model loader arguments"}
+        )
         backend_report = {
             "version": "transformers_p0_f2_t1_v3",
-            "timing_scope": "tokenize+generate+decode+parse+validate; model loading excluded",
+            "timing_scope": (
+                "per-sample tokenize+generate+decode+parse+schema validation; CUDA synchronized "
+                "before start and after validation; model/tokenizer loading, weight fingerprinting, "
+                "initialization and warmup excluded"
+            ),
             "model_path_name": local_model.name,
             "model_type": model_config.model_type,
             "model_loader": model_loader.__name__,
+            "model_weight_identity": weight_identity,
+            "quantization": quantization_facts,
             "template_equivalence": "local_input_ids_are_the_shared_encode_inference_prompt_result",
         }
     else:
@@ -706,13 +850,18 @@ def main() -> None:
         tokenizer, tokenizer_facts = load_runtime_tokenizer(config, local_tokenizer_source)
         backend_report = {
             "version": "openai_compatible_p0_f2_t1_v3",
-            "timing_scope": "HTTP request+server inference+response decode+parse+validate; server startup excluded",
+            "timing_scope": "client prompt tokenization+HTTP request/server inference+response decode+parse+schema validation; server startup excluded",
             "api_model": config["api_model"],
             "base_url": config["base_url"],
+            "model_weight_identity": {
+                "model_id": config.get("model_id"),
+                "configured_revision": config.get("model_revision"),
+                "fingerprint_status": "remote_or_local_server_weight_identity_not_observable",
+            },
+            "quantization": {"applied": False, "method": "configured by external server; not observed"},
             "template_equivalence": "BLOCKED_NOT_RUN_exact_server_token_ids_not_observable",
         }
 
-    submission_path = result_dir / "submission.jsonl"
     latencies: list[float] = []
     prediction_count = 0
     parse_failure_ids: list[str] = []
@@ -722,6 +871,7 @@ def main() -> None:
     server_prompt_token_mismatch_ids: list[str] = []
     sample_diagnostics: list[dict[str, Any]] = []
     statuses: list[str] = []
+    raw_predictions: list[dict[str, Any]] = []
 
     with submission_path.open("w", encoding="utf-8", newline="\n") as submission_handle:
         for index, sample in enumerate(samples, 1):
@@ -738,6 +888,9 @@ def main() -> None:
             }
             generated_tokens = 0
             stop_reason = "not_generated"
+            raw_text: str | None = None
+            error_type: str | None = None
+            prediction: dict[str, Any]
 
             if selection["floor_exceeds_cap"]:
                 prediction = empty_prediction(sample["id"], enums)
@@ -745,6 +898,8 @@ def main() -> None:
                 prompt_overflow_ids.append(sample["id"])
                 stop_reason = "not_generated_prompt_floor_exceeds_cap"
             else:
+                decoded: str | None = None
+                can_parse_output = False
                 try:
                     if backend == "transformers":
                         decoded, generation_details = generate_transformers_sample(
@@ -752,25 +907,36 @@ def main() -> None:
                         )
                         generated_tokens = generation_details["generated_tokens"]
                         stop_reason = generation_details["stop_reason"]
+                        can_parse_output = True
                     else:
                         decoded, server_details = _request_chat_completion_details(config, messages, generation)
-                        generated_tokens = server_details.get("server_completion_tokens") or 0
-                        stop_reason = server_details.get("finish_reason") or "server_finish_reason_unreported"
+                        generated_tokens = server_details.get("server_completion_tokens")
+                        finish_reason = server_details.get("finish_reason")
+                        stop_reason = (
+                            f"server_finish_reason:{finish_reason}"
+                            if isinstance(finish_reason, str) and finish_reason
+                            else "unknown_server_finish_reason"
+                        )
                         server_prompt_tokens = server_details.get("server_prompt_tokens")
                         if isinstance(server_prompt_tokens, int) and server_prompt_tokens != prompt_tokens:
                             prediction = empty_prediction(sample["id"], enums)
                             status = "server_prompt_token_mismatch"
                             server_prompt_token_mismatch_ids.append(sample["id"])
-                            decoded = None
                         else:
-                            decoded = decoded
+                            can_parse_output = True
                 except TemplateEquivalenceError:
                     prediction = empty_prediction(sample["id"], enums)
                     status = "template_equivalence_failure"
                     template_equivalence_failure_ids.append(sample["id"])
-                    decoded = None
+                    stop_reason = "not_generated_template_equivalence_failure"
+                except Exception as exc:
+                    prediction = empty_prediction(sample["id"], enums)
+                    status = "generation_failure"
+                    error_type = type(exc).__name__
+                    stop_reason = "not_generated_generation_failure"
+                raw_text = decoded
 
-                if decoded is not None:
+                if can_parse_output and decoded is not None:
                     prediction, parse_failed, invalid_label = parse_prediction(sample["id"], decoded, enums)
                     if parse_failed:
                         parse_failure_ids.append(sample["id"])
@@ -779,9 +945,9 @@ def main() -> None:
                     status = "parse_failure" if parse_failed else ("invalid_label" if invalid_label else "success")
 
             validate_submission_prediction(prediction, submission_schema)
-            elapsed_ms = (time.perf_counter() - started) * 1000
             if backend == "transformers":
                 synchronize(torch)
+            elapsed_ms = (time.perf_counter() - started) * 1000
             if index <= config["performance_rounds"]:
                 latencies.append(elapsed_ms)
             prediction_count += 1
@@ -799,11 +965,27 @@ def main() -> None:
                 "server_prompt_tokens": server_details.get("server_prompt_tokens"),
                 "server_completion_tokens": server_details.get("server_completion_tokens"),
             })
+            if raw_output_path is not None:
+                raw_predictions.append({
+                    "id": sample["id"],
+                    "raw_text": raw_text,
+                    "status": status,
+                    "prompt_tokens": prompt_tokens,
+                    "generated_tokens": generated_tokens,
+                    "stop_reason": stop_reason,
+                    "latency_ms": round(elapsed_ms, 6),
+                    "removed_history_messages": removed_messages,
+                    "backend": backend,
+                    "error_type": error_type,
+                })
             submission_handle.write(json.dumps(prediction, ensure_ascii=False, separators=(",", ":")) + "\n")
             print(f"[{index}/{len(samples)}] {sample['id']}: {elapsed_ms:.3f} ms ({status})", flush=True)
 
     if prediction_count != len(samples):
         raise RuntimeError(f"提交行数不守恒: input={len(samples)}, output={prediction_count}")
+
+    if raw_output_path is not None:
+        _write_jsonl_atomic(raw_output_path, raw_predictions)
 
     report = {
         **backend_report,
@@ -820,6 +1002,12 @@ def main() -> None:
         "hardware_label": config["hardware_label"],
         "test_file_sha256": sha256(test_file),
         "submission_sha256": sha256(submission_path),
+        "raw_predictions_sha256": sha256(raw_output_path) if raw_output_path is not None else None,
+        "raw_predictions_path": str(raw_output_path) if raw_output_path is not None else None,
+        "model_id": config.get("model_id"),
+        "model_revision": config.get("model_revision"),
+        "generation_config": generation,
+        "raw_predictions_rows": len(raw_predictions) if raw_output_path is not None else None,
         "samples": prediction_count,
         "submission_rows": prediction_count,
         "submission_schema_validated": True,

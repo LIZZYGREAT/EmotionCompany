@@ -1,9 +1,18 @@
 {
   "backend": "transformers",
   "model_path": "./model",
+  "model_id": "Qwen/Qwen3-1.7B",
+  "model_revision": null,
   "trust_remote_code": false,
   "device_map": "auto",
   "torch_dtype": "auto",
+  "quantization": {
+    "enabled": false,
+    "load_in_4bit": true,
+    "quant_type": "nf4",
+    "compute_dtype": "bfloat16",
+    "use_double_quant": true
+  },
   "base_url": "http://127.0.0.1:8000/v1",
   "api_model": "local-model",
   "api_key": "",
