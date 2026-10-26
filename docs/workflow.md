@@ -76,7 +76,7 @@ Run the participant entry point after providing the model and service configurat
 bash participant/start.sh TEST_FILE RESULT_DIR
 ```
 
-Current defaults are provisional: `P=1280` (`local_smoke_candidate_P1280`), `G=1200` reference, `K=null` (`not_verified`). Set `EVALUATION_MAX_PROMPT_TOKENS`, `EVALUATION_PROMPT_BUDGET_PROFILE`, and `EVALUATION_SERVING_CONTEXT_LIMIT` for a named run. If K is configured, startup and runner both reject `P+G>K`; vLLM then receives `--max-model-len K`. Tensor Parallel defaults to 1 and can be set with `VLLM_TENSOR_PARALLEL_SIZE`. This workspace has no `participant/model` directory or `vllm` executable. Static cache inspection found the Qwen3-1.7B snapshot at `~/.cache/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e`, with `config.json`, the weight index and both referenced weight shards present. If using this snapshot later, set `EVALUATION_MODEL_PATH` to the measured directory. It has not been loaded; GPU access is blocked by the operating system, so real Transformers generation, server prompt/token equivalence, K, and hardware feasibility remain unverified.
+Current defaults are provisional: `P=1280` (`local_smoke_candidate_P1280`), `G=1200` reference, `K=null` (`not_verified`). Set `EVALUATION_MAX_PROMPT_TOKENS`, `EVALUATION_PROMPT_BUDGET_PROFILE`, and `EVALUATION_SERVING_CONTEXT_LIMIT` for a named run. If K is configured, startup and runner both reject `P+G>K`; vLLM then receives `--max-model-len K`. Tensor Parallel defaults to 1 and can be set with `VLLM_TENSOR_PARALLEL_SIZE`. The earlier E00.0.1 acceptance check preceded the local model mount and real GPU run. For E00.2, `participant/model` now resolves to the recorded Qwen3-1.7B snapshot, and the real Transformers/NF4/BF16/CUDA run passed the archived identity and device-placement checks. `K` and vLLM server-side prompt/token equivalence remain unverified; see `docs/experiments/E00.2_真实模型Smoke与解码对照报告.md` for the run record.
 
 ## D0.4.3 — Completion-only SFT data and Trainer Batch acceptance
 
@@ -165,6 +165,16 @@ python scripts/e00_2_smoke.py --run-id "E00.2-$(date +%Y%m%d-%H%M%S)" --execute
 ```
 
 Greedy uses `do_sample=false`; Sampling uses `do_sample=true, temperature=0.7, top_p=0.8, top_k=20` with base seed 42 and a stable per-ID seed. Runner reports include effective runner/evaluation config hashes, model shard identity, actual NF4 module/device-map evidence, model-load time, CUDA allocator usage, cold first-sample timing, and per-sample diagnostics. Raw model text and per-case comparison files stay under ignored `outputs/evaluation/e00_2/`; the tracked report contains no conversation text. Twenty Smoke rows are exploratory and cannot establish a generally better decoding strategy. Do not start E00.3 until the local run and both E00 scorer validations pass. The current execution state is documented in `docs/experiments/E00.2_真实模型Smoke与解码对照报告.md`.
+
+After a completed real Smoke, run the offline diagnosis against its immutable artifacts:
+
+```bash
+python scripts/e00_2_diagnose.py \
+  --run-root outputs/evaluation/e00_2/E00.2-20261026-220635 \
+  --output-dir outputs/evaluation/e00_2/diagnostics/E00.2-20261026-220635
+```
+
+Use a new output directory for each run; the CLI refuses to overwrite an existing one. It verifies the Manifest and source hashes, joins Raw/Submission/Performance/References by ID, reconciles historical Metrics, checks local model-mount metadata without rehashing multi-GB shards, and compares Smoke truncation with D0.4.2. It reads existing artifacts only, does not load a model or modify inference behavior, and writes its detailed outputs under ignored `outputs/`. The tracked analysis is `docs/experiments/E00.2_错误归因与后续决策.md`; it contains field counts and conclusions, not Raw completions or conversation text.
 
 ## Regression suite
 
