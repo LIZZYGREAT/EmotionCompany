@@ -573,7 +573,9 @@ def score_files(
     run_experiment_id = run_metadata.get("experiment_id")
     if not isinstance(run_experiment_id, str) or not run_experiment_id.strip() or run_experiment_id == "unspecified":
         raise ValueError("模型运行报告缺少具名 experiment_id")
-    execution_mode = run_metadata.get("execution_mode", "model_inference")
+    execution_mode = run_metadata.get(
+        "execution_mode", "mock_fixture" if run_metadata.get("backend") == "mock" else "model_inference"
+    )
     if execution_mode == "mock_fixture" and run_metadata.get("backend") != "mock":
         raise ValueError("execution_mode=mock_fixture 必须使用 backend=mock")
     is_mock_fixture = execution_mode == "mock_fixture" and run_metadata.get("backend") == "mock"

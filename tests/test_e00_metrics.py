@@ -337,6 +337,8 @@ def test_score_cli_core_aligns_by_id_and_records_known_fixture_values(tmp_path):
         output_dir=fixture_dir / "scored",
     )
     assert result["dataset_scope"] == "synthetic_fixture"
+    assert result["execution_mode"] == "mock_fixture"
+    assert result["model_identity_verification"]["status"] == "not_applicable_synthetic_fixture"
     assert result["sample_count"] == 3
     assert result["emotion"]["accuracy"] == pytest.approx(2 / 3)
     assert result["emotion"]["invalid_empty_prediction_count"] == 1
