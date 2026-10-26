@@ -176,6 +176,45 @@ python scripts/e00_2_diagnose.py \
 
 Use a new output directory for each run; the CLI refuses to overwrite an existing one. It verifies the Manifest and source hashes, joins Raw/Submission/Performance/References by ID, reconciles historical Metrics, checks local model-mount metadata without rehashing multi-GB shards, and compares Smoke truncation with D0.4.2. It reads existing artifacts only, does not load a model or modify inference behavior, and writes its detailed outputs under ignored `outputs/`. The tracked analysis is `docs/experiments/E00.2_错误归因与后续决策.md`; it contains field counts and conclusions, not Raw completions or conversation text.
 
+## E00.2-D — Single-field emotion diagnosis
+
+This is a separate 20-row diagnostic, not an A0 result or a full Dev evaluation. It uses the independent `Pdiag-E1` prompt and the exact history suffix selected by the archived A0 Greedy P0/T1 run. The preflight checks every row against A0 `performance_report.json` and the D0.4.2 `S=2048/P=1280` ledger, then verifies the new prompt stays within P=1280. The `run` command accepts only `id` and `history`; it never reads References. The `score` command reads References, applies strict single-label matching, counts invalid outputs in the 20-row denominator, and compares the same IDs with A0 Greedy.
+
+Run the focused checks before using a CUDA host:
+
+```bash
+python -m pip check
+python -m pytest tests/test_e00_2_emotion_diag.py -q
+python -m pytest tests/test_e00_2_runtime.py tests/test_e00_2_profiles.py tests/test_e00_2_diagnose.py tests/test_inference_protocol.py tests/test_e00_metrics.py -q
+bash -n participant/start.sh
+```
+
+On the local WSL machine with CUDA available and the verified model mount, create one fresh run and score it only after the run Manifest reports `real_run_completed`:
+
+```bash
+set -e
+RUN_ID='E00.2-D-emotion-002'
+RUN_DIR="outputs/evaluation/e00_2/emotion_diag/$RUN_ID"
+python scripts/e00_2_emotion_diag.py run \
+  --config configs/evaluation/e00_2_emotion_diag.yaml \
+  --run-id "$RUN_ID" \
+  --output-dir "$RUN_DIR"
+
+python - "$RUN_DIR/manifest.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if manifest.get("status") != "real_run_completed":
+    raise SystemExit(f"score skipped: run status is {manifest.get('status')}")
+PY
+
+python scripts/e00_2_emotion_diag.py score --run-dir "$RUN_DIR"
+```
+
+The runner requires actual NF4/BF16/CUDA placement with no CPU/disk offload and the archived weight identity; it does not fall back to CPU. If CUDA is unavailable, it writes a `blocked_in_codex_env` Manifest and does not create predictions. A blocked run ID is immutable; use a new one on a later attempt. Raw predictions and per-case results stay under ignored `outputs/`; only the concise report is tracked at `docs/experiments/E00.2-D_单字段情绪诊断报告.md`. The 20-row result is descriptive only because the prompt and output contract changed together, so it cannot establish causality or replace the A0 baseline.
+
 ## Regression suite
 
 Run the complete current data and prompt/token audit suite with:
