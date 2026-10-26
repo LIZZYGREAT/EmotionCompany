@@ -26,6 +26,7 @@ from src.evaluation import (
     strict_json_loads,
 )
 from src.evaluation.metrics import emotion_metrics, profile_metrics, raw_diagnostics, response_metrics
+from src.evaluation.prepare_dev import adapter_config_identity, source_identity_sha256
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -134,6 +135,45 @@ def _validate_d03_manifest(manifest: dict[str, Any], manifest_path: Path) -> dic
     }
 
 
+def _observed_weight_hash_valid(identity: Any) -> bool:
+    if not isinstance(identity, dict) or identity.get("identity_status") != "observed":
+        return False
+    observed_hash = identity.get("observed_weight_hash")
+    files = identity.get("files")
+    if (
+        not isinstance(observed_hash, str)
+        or len(observed_hash) != 64
+        or any(character not in "0123456789abcdef" for character in observed_hash.lower())
+        or not isinstance(files, list)
+        or not files
+    ):
+        return False
+    seen_paths: set[str] = set()
+    for item in files:
+        if not isinstance(item, dict):
+            return False
+        path = item.get("path")
+        size = item.get("size_bytes")
+        file_hash = item.get("sha256")
+        if (
+            not isinstance(path, str)
+            or not path
+            or path in seen_paths
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or size < 0
+            or not isinstance(file_hash, str)
+            or len(file_hash) != 64
+            or any(character not in "0123456789abcdef" for character in file_hash.lower())
+        ):
+            return False
+        seen_paths.add(path)
+    aggregate = hashlib.sha256(
+        json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return aggregate == observed_hash
+
+
 def _validate_runtime_compatibility(
     run_metadata: dict[str, Any], config: dict[str, Any], dataset_scope: str
 ) -> dict[str, Any]:
@@ -169,10 +209,38 @@ def _validate_runtime_compatibility(
             and observed_quantization.get("compute_dtype") == "bfloat16"
             and observed_quantization.get("use_double_quant") == config["quantization"]["planned"].get("use_double_quant")
         )
+    if run_metadata.get("backend") == "transformers":
+        weight_identity = run_metadata.get("model_weight_identity", {})
+        checks["observed_model_weight_hash"] = _observed_weight_hash_valid(weight_identity)
     failed_checks = [name for name, passed in checks.items() if not passed]
     if failed_checks:
         raise ValueError(f"模型运行协议与当前 E00 配置不一致: {failed_checks}")
     return {"status": "verified", "checks": checks}
+
+
+def _model_identity_verification(run_metadata: dict[str, Any], dataset_scope: str) -> dict[str, Any]:
+    backend = run_metadata.get("backend")
+    if dataset_scope != "D0.3_dev":
+        return {"status": "not_applicable_synthetic_fixture", "reason": "synthetic_dataset_scope"}
+    if backend == "mock":
+        return {"status": "not_applicable_mock", "reason": "mock_outputs_do_not_identify_model_weights"}
+    identity = run_metadata.get("model_weight_identity")
+    if not isinstance(identity, dict):
+        return {"status": "unverified", "reason": "model_weight_identity_missing"}
+    observed_hash = identity.get("observed_weight_hash")
+    if not _observed_weight_hash_valid(identity):
+        return {
+            "status": "unverified",
+            "reason": identity.get("fingerprint_status", "weight_hash_not_observed"),
+            "configured_revision": identity.get("configured_revision"),
+        }
+    return {
+        "status": "verified",
+        "basis": "SHA-256 of observed local model weight files",
+        "observed_weight_hash": observed_hash,
+        "configured_revision": identity.get("configured_revision"),
+        "revision_status": identity.get("revision_status", "not_configured"),
+    }
 
 
 def _inference_filename(references_path: Path) -> str:
@@ -348,7 +416,10 @@ def score_files(
     raw_path = raw_path.resolve() if raw_path else None
     output_dir = output_dir.resolve()
     manifest_path = (manifest_path or references_path.parent / "manifest.json").resolve()
-    id_map_path = (id_map_path or references_path.parent / "id_map.jsonl").resolve()
+    inference_filename = _inference_filename(references_path)
+    references_filename = "references.jsonl" if inference_filename == "inference_input.jsonl" else "smoke_references.jsonl"
+    id_map_name = "smoke_id_map.jsonl" if inference_filename == "smoke_input.jsonl" else "id_map.jsonl"
+    id_map_path = (id_map_path or references_path.parent / id_map_name).resolve()
     run_metadata_path = (run_metadata_path or submission_path.parent / "performance_report.json").resolve()
     for path, label in (
         (references_path, "References"), (submission_path, "Submission"),
@@ -410,15 +481,12 @@ def score_files(
         if prediction.get("id") != eval_id:
             raise ValueError(f"Submission id 与对齐 ID 不一致: {eval_id}")
 
-    inference_filename = _inference_filename(references_path)
-    references_filename = "references.jsonl" if inference_filename == "inference_input.jsonl" else "smoke_references.jsonl"
     references_fact = _output_fact(manifest, references_filename)
     if sha256_file(references_path) != references_fact.get("sha256"):
         raise ValueError("References 文件 SHA-256 与 Manifest 不符")
     reference_rows_count = references_fact.get("rows", references_fact.get("records"))
     if reference_rows_count is not None and reference_rows_count != len(references):
         raise ValueError("References 行数与 Manifest 不符")
-    id_map_name = "smoke_id_map.jsonl" if inference_filename == "smoke_input.jsonl" else "id_map.jsonl"
     id_map_fact = _assert_file_matches_manifest(id_map_path, manifest, id_map_name)
     if sha256_file(id_map_path) != id_map_fact.get("sha256"):
         raise ValueError("ID map SHA-256 与 Manifest 不符")
@@ -429,15 +497,40 @@ def score_files(
     _assert_file_matches_manifest(inference_path, manifest, inference_filename)
     _assert_target_free_inference_input(inference_path, expected_ids)
     if manifest.get("dataset_scope") == "D0.3_dev":
+        if manifest.get("source_identity_sha256") != source_identity_sha256(manifest.get("source", {})):
+            raise ValueError("评测 Manifest 的 D0.3 数据来源指纹不一致")
         expected_dev_count = int(config["data"]["expected_dev_count"])
-        if manifest.get("source", {}).get("dev_rows") != expected_dev_count or len(expected_ids) != expected_dev_count:
+        if manifest.get("source", {}).get("dev_rows") != d03_facts.get("dev_rows"):
+            raise ValueError("E00 Manifest source.dev_rows 与 D0.3 Manifest 行数不一致")
+        if manifest.get("source", {}).get("dev_rows") != expected_dev_count:
             raise ValueError(
-                f"D0.3 完整 Dev 数量必须为 {expected_dev_count}: "
-                f"source={manifest.get('source', {}).get('dev_rows')}, references={len(expected_ids)}"
+                f"D0.3 来源 Dev 数量必须为 {expected_dev_count}: "
+                f"source={manifest.get('source', {}).get('dev_rows')}"
+            )
+        expected_adapter, expected_adapter_sha = adapter_config_identity(config)
+        if (
+            manifest.get("adapter_config_sha256") != expected_adapter_sha
+            or manifest.get("adapter_config") != expected_adapter
+        ):
+            raise ValueError("评测数据适配条件与当前配置不一致（Dev 数量、ID 规则或 Smoke seed/count）")
+        if inference_filename == "smoke_input.jsonl":
+            selection = manifest.get("smoke_selection", {})
+            smoke_ids = selection.get("eval_ids")
+            expected_smoke_count = min(int(config["smoke"]["count"]), expected_dev_count)
+            if (
+                not isinstance(smoke_ids, list)
+                or any(not isinstance(sample_id, str) or not sample_id for sample_id in smoke_ids)
+                or len(smoke_ids) != len(set(smoke_ids))
+                or selection.get("actual_count") != expected_smoke_count
+                or selection.get("requested_count") != int(config["smoke"]["count"])
+                or set(smoke_ids) != expected_ids
+            ):
+                raise ValueError("Smoke References ID 集合与 Manifest smoke_selection 不一致")
+        elif len(expected_ids) != expected_dev_count:
+            raise ValueError(
+                f"完整 D0.3 Dev 数量必须为 {expected_dev_count}: references={len(expected_ids)}"
             )
     current_config_hash = config_sha256
-    if manifest.get("config_sha256") and manifest.get("dataset_scope") == "D0.3_dev" and manifest["config_sha256"] != current_config_hash:
-        raise ValueError("评测输入与当前 E00 配置 hash 不一致，请重新构建 Dev 适配文件")
 
     with submission_path.open("rb") as handle:
         submission_hash = hashlib.sha256(handle.read()).hexdigest()
@@ -467,7 +560,7 @@ def score_files(
     if run_metadata.get("submission_sha256") != submission_hash:
         raise ValueError("模型运行报告的 submission hash 不匹配")
     if run_metadata.get("samples", run_metadata.get("submission_rows")) != len(expected_ids):
-        raise ValueError("模型运行报告样本数与完整评测集合不一致")
+        raise ValueError("模型运行报告样本数与所选评测集合不一致")
     if raw_path is not None and run_metadata.get("raw_predictions_sha256") != raw_hash:
         raise ValueError("模型运行报告的 raw hash 不匹配")
     if run_metadata.get("run_id") is None:
@@ -521,9 +614,10 @@ def score_files(
     if manifest.get("dataset_scope") == "D0.3_dev":
         d03_manifest_path = _resolve(manifest["source"]["d03_manifest_path"])
         majority_baseline = _load_train_majority(config, d03_manifest_path, enums["emotion_label"])
-        majority_baseline["accuracy"] = sum(
-            majority_baseline["emotion_label"] == target["emotion_label"] for target in gold_targets
-        ) / len(gold_targets)
+        if majority_baseline["status"] == "computed":
+            majority_baseline["accuracy"] = sum(
+                majority_baseline["emotion_label"] == target["emotion_label"] for target in gold_targets
+            ) / len(gold_targets)
 
     raw_latencies = [row.get("latency_ms") for row in raw_rows_ordered or []]
     raw_latencies = [float(value) for value in raw_latencies if isinstance(value, (int, float)) and not isinstance(value, bool)]
@@ -567,6 +661,9 @@ def score_files(
         },
         "source_verification": d03_facts,
         "runtime_compatibility": runtime_compatibility,
+        "model_identity_verification": _model_identity_verification(
+            run_metadata, manifest.get("dataset_scope", "unknown")
+        ),
         "model": {
             "model_id": run_metadata.get("model_id"),
             "model_revision": run_metadata.get("model_revision"),
@@ -587,11 +684,18 @@ def score_files(
         ],
         "scorer_code_commit": _current_commit(),
     }
+    identity = metrics["model_identity_verification"]
+    identity_summary = identity.get("observed_weight_hash") or identity.get("reason") or identity.get("basis", "not available")
+    majority_summary = (
+        f"{majority_baseline['status']}, label={majority_baseline['emotion_label']}, accuracy={majority_baseline['accuracy']}"
+        if majority_baseline is not None else "not applicable"
+    )
     report_lines = [
         "# E00 本地评测报告",
         "",
         f"- 范围：`{metrics['dataset_scope']}`；样本数：{metrics['sample_count']}。",
         f"- 实验 / 运行：`{metrics['experiment_id']}` / `{metrics['run_id']}`；后端：`{performance['backend']}`。",
+        f"- 模型权重身份：`{identity['status']}`（{identity_summary}）；配置 revision 不代表已核验 revision。",
         f"- 范围标记：`{metrics['metrics_scope']}`；不映射为官方总分。",
         f"- 情绪 Accuracy：{emotion_result['accuracy']:.6f}；固定 16 类 Macro-F1：{emotion_result['macro_f1']:.6f}。",
         f"- 画像三维同时 Exact Match：{profile_result['all_three_dimensions_exact_match']:.6f}；33 标签 Micro-F1：{profile_result['overall_33_label_micro_f1']:.6f}。",
@@ -602,6 +706,7 @@ def score_files(
         f"- Submission Schema 合法率：{(raw_result['submission_schema_valid_rate'] if raw_result else 1.0):.6f}。",
         f"- 计时范围：{performance['timing_scope'] or '未提供'}。",
         f"- D0.3 来源校验：`{d03_facts['status']}`。",
+        f"- Train 多数类基线：`{majority_summary}`。",
         "",
         "情绪及画像完整逐类数据、运行指纹和错误案例见 `metrics.json` 与 `case_errors.jsonl`。",
     ]

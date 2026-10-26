@@ -25,6 +25,7 @@ from src.evaluation import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
+ADAPTER_VERSION = "E00.1-dev-adapter-v2"
 ARTIFACT_NAMES = (
     "inference_input.jsonl",
     "references.jsonl",
@@ -39,6 +40,37 @@ ARTIFACT_NAMES = (
 def _resolve(path: str | Path, base: Path = ROOT) -> Path:
     value = Path(path)
     return (value if value.is_absolute() else base / value).resolve()
+
+
+def adapter_config_identity(config: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """Return the configuration facts that determine Dev and Smoke membership."""
+    identity = {
+        "adapter_version": ADAPTER_VERSION,
+        "split": config["data"]["split"],
+        "expected_dev_count": int(config["data"]["expected_dev_count"]),
+        "eval_id_rule": "test_{one_based_source_row:06d}_t0_v1",
+        "inference_fields": ["id", "history"],
+        "reference_fields": ["eval_id", "sample_id", "target"],
+        "smoke": {
+            "seed": int(config["smoke"]["seed"]),
+            "count": int(config["smoke"]["count"]),
+            "selection_method": "greedy_feature_coverage_then_seeded_order_v1",
+        },
+    }
+    serialized = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return identity, hashlib.sha256(serialized).hexdigest()
+
+
+def source_identity_sha256(source: dict[str, Any]) -> str:
+    identity = {
+        key: source.get(key)
+        for key in (
+            "split", "dev_path", "dev_sha256", "dev_rows", "d03_manifest_path",
+            "d03_manifest_sha256", "d03_pipeline_version", "target_schema",
+        )
+    }
+    serialized = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
 
 
 def _schema_target_errors(target: Any, enums: dict[str, list[str]]) -> list[str]:
@@ -217,7 +249,9 @@ def _commit_id() -> str | None:
         return None
 
 
-def _atomic_write_bundle(output_dir: Path, payloads: dict[str, bytes], source_sha: str, config_sha: str) -> None:
+def _atomic_write_bundle(
+    output_dir: Path, payloads: dict[str, bytes], source_identity_sha: str, adapter_config_sha: str
+) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     existing = [output_dir / name for name in ARTIFACT_NAMES if (output_dir / name).exists()]
     manifest_path = output_dir / "manifest.json"
@@ -225,8 +259,11 @@ def _atomic_write_bundle(output_dir: Path, payloads: dict[str, bytes], source_sh
         raise FileExistsError(f"输出目录已有文件但没有本工具 Manifest，拒绝覆盖: {output_dir}")
     if manifest_path.is_file():
         previous = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if previous.get("source", {}).get("dev_sha256") != source_sha or previous.get("config_sha256") != config_sha:
-            raise FileExistsError(f"输出目录属于不同输入/配置，拒绝覆盖: {output_dir}")
+        if (
+            previous.get("source_identity_sha256") != source_identity_sha
+            or previous.get("adapter_config_sha256") != adapter_config_sha
+        ):
+            raise FileExistsError(f"输出目录属于不同输入/适配条件，拒绝覆盖: {output_dir}")
     temporary: dict[str, Path] = {}
     try:
         for name, data in payloads.items():
@@ -261,6 +298,7 @@ def prepare_records(
     target_validator: Any | None = None,
 ) -> dict[str, Any]:
     expected_count = int(config["data"]["expected_dev_count"])
+    adapter_identity, adapter_sha256 = adapter_config_identity(config)
     validate_dev_rows(rows, expected_count, enums, target_validator)
     source = {
         "split": config["data"]["split"],
@@ -305,10 +343,14 @@ def prepare_records(
         for name, data in files.items()
     }
     manifest = {
-        "manifest_version": "E00.1-dev-adapter-v1",
+        "manifest_version": ADAPTER_VERSION,
         "experiment_id": config["experiment_id"],
         "dataset_scope": "D0.3_dev",
         "source": source,
+        "source_identity_sha256": source_identity_sha256(source),
+        "adapter_config": adapter_identity,
+        "adapter_config_sha256": adapter_sha256,
+        # Provenance only: model runtime and scoring settings do not define this dataset.
         "config_sha256": config_sha256,
         "protocol": config["protocol"],
         "planned_config": {
@@ -322,7 +364,7 @@ def prepare_records(
         "git_commit": _commit_id(),
     }
     files["manifest.json"] = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-    _atomic_write_bundle(output_dir, files, source_sha256, config_sha256)
+    _atomic_write_bundle(output_dir, files, manifest["source_identity_sha256"], adapter_sha256)
     return manifest
 
 

@@ -209,14 +209,8 @@ def build_quantization_config(
 
 def _weight_identity(model_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
     configured_revision = config.get("model_revision")
-    if isinstance(configured_revision, str) and configured_revision.strip():
-        return {
-            "model_id": config.get("model_id"),
-            "configured_revision": configured_revision,
-            "local_path": str(model_dir),
-            "fingerprint_status": "revision_configured_file_hashes_not_computed",
-            "files": [],
-        }
+    if not isinstance(configured_revision, str) or not configured_revision.strip():
+        configured_revision = None
     candidates = sorted(
         path for path in model_dir.rglob("*")
         if path.is_file() and (
@@ -229,9 +223,15 @@ def _weight_identity(model_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
     if not candidates:
         return {
             "model_id": config.get("model_id"),
-            "configured_revision": None,
+            "configured_revision": configured_revision,
             "local_path": str(model_dir),
-            "fingerprint_status": "no_supported_weight_files_found",
+            "identity_status": "declared" if configured_revision else "unverified",
+            "fingerprint_status": (
+                "revision_configured_file_hashes_not_computed"
+                if configured_revision else "no_supported_weight_files_found"
+            ),
+            "revision_status": "unverified_revision" if configured_revision else "not_configured",
+            "observed_weight_hash": None,
             "files": [],
         }
     files = [{"path": path.relative_to(model_dir).as_posix(), "size_bytes": path.stat().st_size, "sha256": sha256(path)} for path in candidates]
@@ -240,9 +240,12 @@ def _weight_identity(model_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
     ).hexdigest()
     return {
         "model_id": config.get("model_id"),
-        "configured_revision": None,
+        "configured_revision": configured_revision,
         "local_path": str(model_dir),
+        "identity_status": "observed",
         "fingerprint_status": "all_supported_weight_files_sha256",
+        "revision_status": "unverified_revision" if configured_revision else "not_configured",
+        "observed_weight_hash": fingerprint,
         "aggregate_sha256": fingerprint,
         "files": files,
     }
@@ -860,7 +863,10 @@ def main() -> None:
             "model_weight_identity": {
                 "model_id": config.get("model_id"),
                 "configured_revision": config.get("model_revision"),
+                "identity_status": "unverified",
                 "fingerprint_status": "remote_or_local_server_weight_identity_not_observable",
+                "revision_status": "unverified_revision" if config.get("model_revision") else "not_configured",
+                "observed_weight_hash": None,
             },
             "quantization": {"applied": False, "method": "configured by external server; not observed"},
             "template_equivalence": "BLOCKED_NOT_RUN_exact_server_token_ids_not_observable",

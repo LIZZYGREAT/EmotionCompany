@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from participant import run_inference as runner
 
@@ -131,6 +132,8 @@ def test_opt_in_raw_log_does_not_change_official_submission(tmp_path, monkeypatc
     raw_dir, raw_predictions = _run_mock_api(tmp_path / "with_raw", monkeypatch, raw_path)
 
     assert default_predictions == raw_predictions
+    validator = Draft202012Validator(runner.load_submission_schema())
+    assert all(not list(validator.iter_errors(row)) for row in default_predictions)
     assert sorted(path.name for path in default_dir.iterdir()) == ["performance_report.json", "submission.jsonl"]
     assert sorted(path.name for path in raw_dir.iterdir()) == ["performance_report.json", "submission.jsonl"]
 
@@ -157,6 +160,38 @@ def test_nf4_configuration_is_explicit_and_opt_in():
         "bnb_4bit_compute_dtype": torch_stub.bfloat16,
         "bnb_4bit_use_double_quant": False,
     }
+
+
+def test_weight_identity_hashes_snapshot_weight_contents_even_with_declared_revision(tmp_path):
+    blob_path = tmp_path / "blobs" / "model-shard"
+    blob_path.parent.mkdir()
+    blob_path.write_bytes(b"tiny synthetic safetensors payload")
+    snapshot = tmp_path / "snapshots" / ("a" * 40)
+    snapshot.mkdir(parents=True)
+    (snapshot / "model-00001.safetensors").symlink_to(blob_path)
+
+    identity = runner._weight_identity(snapshot, {
+        "model_id": "mock-model",
+        "model_revision": "a" * 40,
+    })
+
+    assert identity["identity_status"] == "observed"
+    assert identity["configured_revision"] == "a" * 40
+    assert identity["revision_status"] == "unverified_revision"
+    assert identity["observed_weight_hash"] == identity["aggregate_sha256"]
+    assert identity["files"][0]["sha256"] == runner.sha256(blob_path)
+
+
+def test_weight_identity_keeps_revision_declaration_separate_from_observed_hash(tmp_path):
+    identity = runner._weight_identity(tmp_path, {
+        "model_id": "mock-model",
+        "model_revision": "b" * 40,
+    })
+
+    assert identity["identity_status"] == "declared"
+    assert identity["fingerprint_status"] == "revision_configured_file_hashes_not_computed"
+    assert identity["revision_status"] == "unverified_revision"
+    assert identity["observed_weight_hash"] is None
 
 
 def test_transformers_timer_synchronizes_before_and_after_the_measured_region(tmp_path, monkeypatch):

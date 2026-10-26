@@ -104,11 +104,11 @@ python -m pip check
 Build target-free evaluation input from the full D0.3 Dev set (1,833 rows), plus physically separate references and a deterministic 20-row smoke subset:
 
 ```bash
-python -m pytest tests/test_e00_prepare.py tests/test_e00_metrics.py tests/test_e00_runner.py -q
+python -m pytest tests/test_e00_prepare.py tests/test_e00_metrics.py tests/test_e00_runner.py tests/test_e00_smoke_scoring.py tests/test_competition_contract.py -q
 python -m src.evaluation.prepare_dev --config configs/evaluation/e00.yaml
 ```
 
-The default output is `outputs/evaluation/e00_1/dev_adapter_v1/`. `inference_input.jsonl` contains only `id` and `history`; `references.jsonl` contains `target`; `id_map.jsonl` links the local evaluation IDs to D0.3 `sample_id`s. The generated IDs such as `test_000001_t0` are local evaluation IDs, not official hidden-test IDs. The builder verifies the D0.3 Dev hash/count, D0.3 Manifest, official target Schema, unique IDs, source provenance and output hashes. It refuses to replace a directory owned by a different input/configuration. Missing D0.3 files or manifests are errors; no substitute data is generated.
+The default output is `outputs/evaluation/e00_1/dev_adapter_v2/`. `inference_input.jsonl` contains only `id` and `history`; `references.jsonl` contains `target`; `id_map.jsonl` links the local evaluation IDs to D0.3 `sample_id`s. The generated IDs such as `test_000001_t0` are local evaluation IDs, not official hidden-test IDs. The builder verifies the D0.3 Dev hash/count, D0.3 Manifest, official target Schema, unique IDs, source provenance and output hashes. Its adapter fingerprint covers the source contract, ID rule, adapter version and Smoke seed/count; changing generation, quantization or scoring options does not change the dataset identity. Existing output directories are not overwritten when the source data or adapter conditions differ. Missing D0.3 files or manifests are errors; no substitute data is generated.
 
 Run the offline synthetic acceptance and score its artifacts independently:
 
@@ -129,6 +129,25 @@ This fixture uses fabricated rows and the existing participant parser/schema; it
 
 For a later E00.2 real-model smoke, use a fresh run directory and a new raw output path for every run. Raw logging is opt-in and refuses to overwrite an existing file. NF4 is also opt-in; the E00.1 implementation does not load Qwen or verify GPU execution:
 
+First inspect the local cache. Tokenizer cache files do not prove model weights are complete:
+
+```bash
+ls -ld participant/model 2>/dev/null || true
+ls -lah ~/.cache/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/ 2>/dev/null || true
+find ~/.cache/huggingface/hub/models--Qwen--Qwen3-1.7B \\
+  -name '*.safetensors' -o -name config.json 2>/dev/null
+```
+
+Only after confirming an actual snapshot directory containing `config.json` and every weight shard, point the runner at that measured path. If that snapshot's tokenizer does not match the frozen tokenizer fingerprint, set a separately verified tokenizer directory. Keep local-only loading and the Chat Template fingerprint check enabled; do not download a model as part of E00.1.
+
+Set these only to paths observed on the machine; the following values are placeholders, not expected cache locations:
+
+```bash
+export EVALUATION_MODEL_PATH='/absolute/path/confirmed/above/snapshots/<actual-revision>'
+# Optional, only if a separate tokenizer directory matches the frozen fingerprint:
+# export EVALUATION_TOKENIZER_PATH='/absolute/path/to/verified/tokenizer'
+```
+
 ```bash
 RUN_ID=E00.2-smoke-001
 EVALUATION_EXPERIMENT_ID=E00.2 \
@@ -136,18 +155,18 @@ EVALUATION_RUN_ID="$RUN_ID" \
 EVALUATION_ENABLE_NF4=1 \
 EVALUATION_RAW_OUTPUT_PATH="$PWD/outputs/evaluation/$RUN_ID/raw_predictions.jsonl" \
 bash participant/start.sh \
-  outputs/evaluation/e00_1/dev_adapter_v1/smoke_input.jsonl \
+  outputs/evaluation/e00_1/dev_adapter_v2/smoke_input.jsonl \
   "outputs/evaluation/$RUN_ID/runner"
 
 python -m src.evaluation.score \
   --config configs/evaluation/e00.yaml \
-  --references outputs/evaluation/e00_1/dev_adapter_v1/smoke_references.jsonl \
+  --references outputs/evaluation/e00_1/dev_adapter_v2/smoke_references.jsonl \
   --submission "outputs/evaluation/$RUN_ID/runner/submission.jsonl" \
   --raw "outputs/evaluation/$RUN_ID/raw_predictions.jsonl" \
   --output-dir "outputs/evaluation/$RUN_ID/scored"
 ```
 
-Use the full `inference_input.jsonl` / `references.jsonl` pair for the later 1,833-row Dev run. `score.py` rejects a real D0.3 run whose model ID, P0/Tokenizer/Chat Template fingerprint, P/G settings, T1 protocol or NF4 configuration do not match the named E00 config. The 100-round performance report remains incomplete for a smoke subset; this is expected. Do not interpret the mock fixture as speed or quality evidence.
+Use the full `inference_input.jsonl` / `references.jsonl` pair for the later 1,833-row Dev run. The scorer automatically selects the matching full or Smoke ID map and checks the exact Smoke membership from the Manifest. It rejects a real D0.3 run whose model ID, P0/Tokenizer/Chat Template fingerprint, P/G settings, T1 protocol or NF4 configuration do not match the current experiment config. The data adapter fingerprint remains stable across those runtime/scoring changes, while each scored output records the full config fingerprint to prevent confusing results. The 100-round performance report remains incomplete for a smoke subset; this is expected. Do not interpret the mock fixture as speed or quality evidence.
 
 ## Regression suite
 

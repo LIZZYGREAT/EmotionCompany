@@ -109,6 +109,44 @@ def test_dev_adapter_rerun_is_byte_deterministic(tmp_path):
     assert all(set(row) == {"id", "history"} for row in smoke_inputs)
 
 
+def test_adapter_dataset_identity_ignores_model_and_scoring_candidates(tmp_path):
+    rows = [_row(f"train:identity-{index}:pp0", emotion="anxiety" if index % 2 else "joy") for index in range(10)]
+    config = _config(tmp_path, len(rows))
+    d03_manifest_path = tmp_path / "d03-manifest.json"
+    d03_manifest_path.write_text('{"stable":true}\n', encoding="utf-8")
+    output_dir = tmp_path / "prepared"
+    arguments = dict(
+        rows=rows,
+        enums=schema_enums(load_submission_schema(ROOT)),
+        d03_manifest={"pipeline_version": "D0.3-v1"},
+        d03_manifest_path=d03_manifest_path,
+        source_sha256="e" * 64,
+        config=config,
+        config_sha256="a" * 64,
+        output_dir=output_dir,
+    )
+    first_manifest = prepare_records(**arguments)
+    first_outputs = {
+        name: (output_dir / name).read_bytes()
+        for name in first_manifest["outputs"]
+    }
+
+    changed_config = copy.deepcopy(config)
+    changed_config["generation"]["do_sample"] = True
+    changed_config["quantization"]["planned"]["load_in_4bit"] = False
+    changed_config["scoring"]["bert_score"]["enabled"] = True
+    arguments["config"] = changed_config
+    arguments["config_sha256"] = "b" * 64
+    second_manifest = prepare_records(**arguments)
+
+    assert second_manifest["adapter_config_sha256"] == first_manifest["adapter_config_sha256"]
+    assert second_manifest["config_sha256"] != first_manifest["config_sha256"]
+    assert {
+        name: (output_dir / name).read_bytes()
+        for name in second_manifest["outputs"]
+    } == first_outputs
+
+
 def test_dev_contract_rejects_duplicate_ids_bad_source_target_and_last_role():
     enums = schema_enums(load_submission_schema(ROOT))
     rows = [_row("train:duplicate:pp0"), _row("train:duplicate:pp0")]

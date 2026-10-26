@@ -18,7 +18,8 @@ from src.evaluation.metrics import (
     response_metrics,
     rouge_l_f1,
 )
-from src.evaluation.score import _validate_runtime_compatibility, score_files
+from src.evaluation.score import _model_identity_verification, _validate_runtime_compatibility, score_files
+from participant.run_inference import _weight_identity
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -238,6 +239,44 @@ def test_runtime_fingerprint_blocks_protocol_or_generation_mismatch():
     assert result["status"] == "verified"
     run["generation_config"]["do_sample"] = True
     with pytest.raises(ValueError, match="generation_settings"):
+        _validate_runtime_compatibility(run, config, "D0.3_dev")
+
+
+def test_transformers_runtime_requires_recomputed_weight_file_hashes(tmp_path):
+    config = yaml.safe_load((ROOT / "configs/evaluation/e00.yaml").read_text(encoding="utf-8"))
+    weight_path = tmp_path / "model.safetensors"
+    weight_path.write_bytes(b"tiny weight fixture")
+    identity = _weight_identity(tmp_path, {"model_id": config["model"]["model_id"], "model_revision": "c" * 40})
+    run = {
+        "model_id": config["model"]["model_id"],
+        "backend": "transformers",
+        "model_weight_identity": identity,
+        "quantization": {
+            "applied": True,
+            "quant_type": "nf4",
+            "compute_dtype": "bfloat16",
+            "use_double_quant": config["quantization"]["planned"]["use_double_quant"],
+        },
+        "generation_config": dict(config["generation"]),
+        "protocol": {
+            "prompt": {"sha256": config["protocol"]["prompt_sha256"]},
+            "tokenizer": {
+                "signature_sha256": config["protocol"]["tokenizer_signature_sha256"],
+                "template_sha256": config["protocol"]["chat_template_sha256"],
+            },
+            "history_strategy": "T1_recent_contiguous_complete_message_suffix",
+            "completion_field_order": ["emotion_label", "user_profile", "response_text", "memory_refs"],
+            "id_in_prompt": False,
+        },
+        "budget": {"P_max_prompt_tokens": config["protocol"]["max_prompt_tokens"]},
+    }
+
+    assert _validate_runtime_compatibility(run, config, "D0.3_dev")["status"] == "verified"
+    assert _model_identity_verification(run, "D0.3_dev")["status"] == "verified"
+    assert _model_identity_verification(run, "D0.3_dev")["revision_status"] == "unverified_revision"
+
+    run["model_weight_identity"]["observed_weight_hash"] = "0" * 64
+    with pytest.raises(ValueError, match="observed_model_weight_hash"):
         _validate_runtime_compatibility(run, config, "D0.3_dev")
 
 
