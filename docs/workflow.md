@@ -146,46 +146,25 @@ python -m src.evaluation.score \
 
 The output report is marked `execution_mode=mock_fixture`; its scores validate only the alignment and scoring pipeline, not a model. Use a new run ID/output directory for each execution.
 
-For a later E00.2 real-model smoke, use a fresh run directory and a new raw output path for every run. Raw logging is opt-in and refuses to overwrite an existing file. NF4 is also opt-in; the E00.1 implementation does not load Qwen or verify GPU execution:
+## E00.2 — Real model Smoke and decoding comparison
 
-First inspect the local cache. Tokenizer cache files do not prove model weights are complete:
+E00.2 uses the original `Qwen/Qwen3-1.7B` weights through the ignored local mount `participant/model`. It must resolve to a complete, locally cached snapshot containing `config.json`, `model.safetensors.index.json`, and every non-empty indexed shard. Do not copy weights into the repository or let the runner download them. The inference runner requires CUDA, loaded `bitsandbytes.nn.Linear4bit` modules using NF4/BF16, and no CPU/disk device-map offload before generation.
 
-```bash
-ls -ld participant/model 2>/dev/null || true
-ls -lah ~/.cache/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/ 2>/dev/null || true
-find ~/.cache/huggingface/hub/models--Qwen--Qwen3-1.7B \\
-  -name '*.safetensors' -o -name config.json 2>/dev/null
-```
-
-Only after confirming an actual snapshot directory containing `config.json` and every weight shard, point the runner at that measured path. If that snapshot's tokenizer does not match the frozen tokenizer fingerprint, set a separately verified tokenizer directory. Keep local-only loading and the Chat Template fingerprint check enabled; do not download a model as part of E00.1.
-
-Set these only to paths observed on the machine; the following values are placeholders, not expected cache locations:
+The versioned profile is `configs/evaluation/e00_2_profiles.yaml`. Render-only mode creates independent Greedy and Sampling runner JSON/evaluation YAML snapshots under an ignored run directory, records both config SHA-256 values, and refuses to overwrite an existing run ID:
 
 ```bash
-export EVALUATION_MODEL_PATH='/absolute/path/confirmed/above/snapshots/<actual-revision>'
-# Optional, only if a separate tokenizer directory matches the frozen fingerprint:
-# export EVALUATION_TOKENIZER_PATH='/absolute/path/to/verified/tokenizer'
+python scripts/e00_2_smoke.py --run-id "E00.2-config-$(date +%Y%m%d-%H%M%S)" --render-only
 ```
+
+After activating the local CUDA `.venv` and providing the verified model mount, execute a fresh run with this command. It renders snapshots, runs a one-row real NF4 preflight, then runs and scores both independent 20-row profiles against the unchanged E00.1 Smoke references. CUDA, NF4, identity, ID-alignment, or scorer failure stops the run and is recorded in the local `run_manifest.json`:
 
 ```bash
-RUN_ID=E00.2-smoke-001
-EVALUATION_EXPERIMENT_ID=E00.2 \
-EVALUATION_RUN_ID="$RUN_ID" \
-EVALUATION_ENABLE_NF4=1 \
-EVALUATION_RAW_OUTPUT_PATH="$PWD/outputs/evaluation/$RUN_ID/raw_predictions.jsonl" \
-bash participant/start.sh \
-  outputs/evaluation/e00_1/dev_adapter_v2/smoke_input.jsonl \
-  "outputs/evaluation/$RUN_ID/runner"
-
-python -m src.evaluation.score \
-  --config configs/evaluation/e00.yaml \
-  --references outputs/evaluation/e00_1/dev_adapter_v2/smoke_references.jsonl \
-  --submission "outputs/evaluation/$RUN_ID/runner/submission.jsonl" \
-  --raw "outputs/evaluation/$RUN_ID/raw_predictions.jsonl" \
-  --output-dir "outputs/evaluation/$RUN_ID/scored"
+cd ~/projects/EmotionalCompany
+source .venv/bin/activate
+python scripts/e00_2_smoke.py --run-id "E00.2-$(date +%Y%m%d-%H%M%S)" --execute
 ```
 
-Use the full `inference_input.jsonl` / `references.jsonl` pair for the later 1,833-row Dev run. The scorer automatically selects the matching full or Smoke ID map and checks the exact Smoke membership from the Manifest. It rejects a real D0.3 run whose model ID, P0/Tokenizer/Chat Template fingerprint, P/G settings, T1 protocol or NF4 configuration do not match the current experiment config. The data adapter fingerprint remains stable across those runtime/scoring changes, while each scored output records the full config fingerprint to prevent confusing results. The 100-round performance report remains incomplete for a smoke subset; this is expected. Do not interpret the mock fixture as speed or quality evidence.
+Greedy uses `do_sample=false`; Sampling uses `do_sample=true, temperature=0.7, top_p=0.8, top_k=20` with base seed 42 and a stable per-ID seed. Runner reports include effective runner/evaluation config hashes, model shard identity, actual NF4 module/device-map evidence, model-load time, CUDA allocator usage, cold first-sample timing, and per-sample diagnostics. Raw model text and per-case comparison files stay under ignored `outputs/evaluation/e00_2/`; the tracked report contains no conversation text. Twenty Smoke rows are exploratory and cannot establish a generally better decoding strategy. Do not start E00.3 until the local run and both E00 scorer validations pass. The current execution state is documented in `docs/experiments/E00.2_真实模型Smoke与解码对照报告.md`.
 
 ## Regression suite
 
