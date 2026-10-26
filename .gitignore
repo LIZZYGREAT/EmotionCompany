@@ -25,3 +25,5 @@ runs/
 .env
 
 .ua/
+.telecodex/
+docs/private
