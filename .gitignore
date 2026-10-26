@@ -16,6 +16,7 @@ checkpoints/
 runs/
 
 # Model weights
+/participant/model
 *.safetensors
 *.pt
 *.pth
