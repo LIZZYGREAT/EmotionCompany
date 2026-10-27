@@ -10,7 +10,7 @@
 
 ## 开始新任务
 
-先确认本地没有待处理的改动，再同步远端并从最新 `main` 建分支：
+先确认本地没有待处理的改动，再同步远端并从最新 `main` 建分支(根据实际情况来，不一定是main分支)：
 
 ```bash
 git status --short
@@ -40,7 +40,7 @@ git commit -m "feat(scope): summary"
 
 不要无检查地执行 `git add .` 或 `git add -A`。提交信息使用简洁类型前缀，例如 `feat(...)`、`fix(...)`、`docs(...)`、`test(...)`、`chore(...)`。
 
-## 同步 `main`
+## 同步 `main`/其他开发分支
 
 个人维护、未交接给队友的任务分支，默认用 rebase 跟进最新 `main`：
 
@@ -69,7 +69,7 @@ git push --force-with-lease origin task-branch-name
 git push -u origin task-branch-name
 ```
 
-在 GitHub 创建 PR，目标分支设为 `main`，来源为当前任务分支。PR 说明应写明：
+在 GitHub 创建 PR，目标分支设为 `main`/其他目标的分支，来源为当前任务分支。PR 说明应写明：
 
 - 本次目标和改动范围；
 - 本地检查的命令和实际结果；
@@ -114,13 +114,3 @@ git pull --ff-only origin main
 
 首次将 CI 设为 Required 前，先让工作流在一个真实 PR 上成功运行，再将 GitHub Checks 中实际出现的 Job 名绑定为 Required Check。本仓库工作流的预期稳定 Job 名为 `unit-cpu`；确认 GitHub Checks 中确实出现后再绑定。不要提前填写不存在的检查名，以免 PR 永久等待。
 
-## 常见故障处理
-
-| 情况 | 处理 |
-|---|---|
-| 推送提示 non-fast-forward | `git fetch` 后检查双方提交，再决定个人分支 rebase 或协商 merge；不要直接强推。 |
-| 推送 `main` 被拒绝 | 转到任务分支并创建 PR，不关闭保护规则。 |
-| Required CI 一直 Pending | 核对工作流是否触发，以及 Ruleset 绑定的检查名是否与实际 Job 名完全相同。 |
-| rebase 后审批失效 | 请另一位队友重新审查并批准。 |
-| CI 失败 | 阅读失败步骤和日志，在原任务分支提交针对性修复，再等待 CI 重新运行。 |
-| 合并后旧分支仍落后 `main` | 从最新 `main` 创建后续任务分支；不要为修正旧分支图而重写 `main` 历史。 |
