@@ -619,6 +619,12 @@ def _safe_run_dir(path_value: str | Path, run_id: str, root: Path | None = None)
     return path
 
 
+def _cuda_available() -> bool:
+    import torch
+
+    return bool(torch.cuda.is_available())
+
+
 def run_diagnostic(config_path: Path, run_id: str, output_dir: Path) -> int:
     if not re.fullmatch(r"E00\.2-D-emotion-[A-Za-z0-9][A-Za-z0-9._-]*", run_id):
         raise ValueError("run_id 必须使用 E00.2-D-emotion- 前缀并只含安全字符")
@@ -665,7 +671,7 @@ def run_diagnostic(config_path: Path, run_id: str, output_dir: Path) -> int:
             "samples": sample_metadata,
         },
     }
-    if not __import__("torch").cuda.is_available():
+    if not _cuda_available():
         base_manifest.update({
             "status": "blocked_in_codex_env",
             "blocked_reason": "torch.cuda.is_available() is false; real NF4 model inference was not attempted",

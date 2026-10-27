@@ -258,6 +258,7 @@ def test_run_with_unavailable_cuda_records_block_without_reading_references(tmp_
         "references_expected_sha256": "references-sha",
     }
     monkeypatch.setattr(diag, "load_preflight", lambda *_args, **_kwargs: context)
+    monkeypatch.setattr(diag, "_cuda_available", lambda: False)
     result = diag.run_diagnostic(config_path, "E00.2-D-emotion-test", output_root / "E00.2-D-emotion-test")
     assert result == 2
     run_dir = output_root / "E00.2-D-emotion-test"
