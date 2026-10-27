@@ -28,7 +28,7 @@
 - [x] 对已暂存 Markdown 测试 `git commit` 自动修复；确认没有把其他文件或未暂存改动带入提交。针对部分暂存场景验证安全拒绝。
 - [x] 验证中文路径、空格文件名、LF/CRLF、正常 Markdown 文档与有意硬换行；不修改无关文件、不破坏正文。
 - [x] 运行 `git diff --check` 和 `git diff --cached --check` 均无错误（如仍有非 Markdown 问题，应明确报告、人工修复）。
-- [ ] 在任务分支推送并确认现有 `unit-cpu` CI 通过；不调整 `main` 分支保护或 Required Check。
+- [x] 在任务分支推送并确认现有 `unit-cpu` CI 通过；不调整 `main` 分支保护或 Required Check。
 
 ## 四、交付要求
 
@@ -40,4 +40,5 @@
 - 启用前确认本仓库 `core.hooksPath` 未设置后，已通过 `git config --local core.hooksPath .github/hooks` 配置本地 Hook；这项配置仅保存在本机 `.git/config`。
 - 临时仓库验证通过：`--file` 支持中文及空格路径，保留 UTF-8 BOM 和 CRLF，清理尾随空格/Tab、末尾空行并补齐最终换行，而且重复执行幂等；`--changed` 清理新增 Markdown 但不暂存；硬换行安全拒绝，符号链接、受保护路径、删除路径和非 Markdown 文件均跳过。
 - 临时 Git 仓库的真实 `git commit` 验证通过：Hook 自动修复已暂存 Markdown，提交中没有带入其他未暂存文件；部分暂存时 Hook 阻止提交，HEAD、索引和工作区内容保持不变。
-- `python3 -m py_compile .github/scripts/fix_whitespace.py`、`bash -n .github/hooks/pre-commit` 和 `git diff --check` 均通过。推送及 `unit-cpu` CI 结果将在完成后补记。
+- `python3 -m py_compile .github/scripts/fix_whitespace.py`、`bash -n .github/hooks/pre-commit`、`git diff --check` 和 `git diff --cached --check` 均通过。
+- 实现提交 `e7981cb` 已推送到 `ci/git-ci-validation`；[GitHub Actions 运行 #5](https://github.com/LIZZYGREAT/EmotionCompany/actions/runs/40502219928) 中的 `unit-cpu` 已完成并通过。
