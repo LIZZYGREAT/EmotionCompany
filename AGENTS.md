@@ -9,6 +9,6 @@
 
 ## Team Git and PR workflow
 
-- Follow [双人 Git 协作与 PR 操作规范](data/knowledge/双人Git协作与PR操作规范.md) for task branches, explicit staging, commits, syncing, reviews, and merges.
+- Follow [双人 Git 协作与 PR 操作规范](docs/knowledge/双人Git协作与PR操作规范.md) for task branches, explicit staging, commits, syncing, reviews, and merges.
 - Integrate into `main` through a teammate-reviewed PR after the `unit-cpu` CI check passes. Do not push or force-push directly to `main`.
 - Keep the GitHub PR template and CI workflow aligned with the Required Check configured for `main`.
