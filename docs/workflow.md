@@ -121,14 +121,14 @@ Run the offline synthetic acceptance and score its artifacts independently:
 ```bash
 python scripts/e00_mock_acceptance.py \
   --config configs/evaluation/e00.yaml \
-  --output-dir outputs/evaluation/e00_1/fixtures_v1
+  --output-dir outputs/evaluation/e00_1/fixtures_v2
 
 python -m src.evaluation.score \
   --config configs/evaluation/e00.yaml \
-  --references outputs/evaluation/e00_1/fixtures_v1/references.jsonl \
-  --submission outputs/evaluation/e00_1/fixtures_v1/submission.jsonl \
-  --raw outputs/evaluation/e00_1/fixtures_v1/raw_predictions.jsonl \
-  --output-dir outputs/evaluation/e00_1/fixtures_v1/scored
+  --references outputs/evaluation/e00_1/fixtures_v2/references.jsonl \
+  --submission outputs/evaluation/e00_1/fixtures_v2/submission.jsonl \
+  --raw outputs/evaluation/e00_1/fixtures_v2/raw_predictions.jsonl \
+  --output-dir outputs/evaluation/e00_1/fixtures_v2/scored
 ```
 
 This fixture uses fabricated rows and the existing participant parser/schema; it is labeled `synthetic_fixture` / `mock` and is not an E00 model result. Scoring checks complete ID-set equality, duplicate IDs, evaluation-manifest hashes, input hash, run ID, target-free input structure and the official submission Schema before computing metrics. The scorer writes `metrics.json`, `report.md` and ID-only `case_errors.jsonl`. Outputs and raw conversations stay under ignored `outputs/`.
