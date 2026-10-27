@@ -17,11 +17,13 @@
 | 分支 | `main`、`e00-1-evaluation-infrastructure` | E01 起使用短期任务分支 |
 | `main` 保护 | GitHub Branch API 显示 `protected=false`；未检索到仓库 Rulesets | 建立并启用一套 `main` Ruleset |
 | 自动 CI | 目前没有 `.github/workflows/` | 新增最小 CPU CI |
-| E00 开发成果 | 现有 E00 分支比 `main` 领先 **26 个提交、40 个变更文件** | 进行一次可审查的 PR 整合；禁止直接/强制推送 `main` |
+| E00 开发成果 | 初稿核查快照：E00 分支比 `main` 领先 **26 个提交、40 个变更文件** | 进行一次可审查的 PR 整合；禁止直接/强制推送 `main` |
 | 官方比赛契约 | `AGENTS.md` 与 `docs/competition/赛事文件边界与运行契约.md` 已有保护规则 | 新规范必须兼容，不另造冲突规则 |
 | 本地资源 | 原始数据、生成结果、模型缓存、CUDA GPU 不应依赖 GitHub CI | CI 只执行可自包含的 CPU / 合成测试 |
 
 > **可验证性说明**：分支、提交、Rulesets 和工作流目录来自仓库检查；GitHub 设置是否经过人工修改应在实施后重新核对。此次没有替队伍修改任何仓库或网页设置。
+
+> 上表的 26 个提交和 40 个文件是初稿核查时的历史快照，不代表当前计数。截至本次 CI 修订，E00 仍未合入 `main`；正式整合前须重新 fetch 并核对分支差异。
 
 ### 2. 三条基本原则
 
