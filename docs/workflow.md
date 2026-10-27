@@ -4,7 +4,7 @@ Run the data stages from the repository root. The reports, configs, source, and 
 
 ## Current progress and handoff
 
-D0 through E00.2-D have completed their documented data, protocol, and small-sample diagnostic scopes. E00.3 full Dev inference and E01 real QLoRA training have not run; D0.4.3 validates encoded data and the Trainer DataLoader, not a real model update. The current evidence, outstanding decisions, and recommended E01 micro-overfit starting point are in [`docs/experiments/E00_阶段总结与E01交接.md`](experiments/E00_阶段总结与E01交接.md); future experiments remain candidates in [`docs/experiments/后续调优候选与实验决策.md`](experiments/后续调优候选与实验决策.md).
+D0 through E00.2-D have completed their documented data, protocol, and small-sample diagnostic scopes. E01-A training code and isolated configs are ready, but its 2026-10-27 preflight is `blocked_gpu_unavailable`; no real Qwen optimizer update or E01-B training has run. E00.3 full Dev inference also remains unrun. The E01 implementation status and machine preflight record are summarized in [`E01-A 训练可学习性验收报告`](experiments/E01-A_训练可学习性验收报告.md). Earlier E00 evidence and handoff context are in [`docs/experiments/E00_阶段总结与E01交接.md`](experiments/E00_阶段总结与E01交接.md); future experiments remain candidates in [`docs/experiments/后续调优候选与实验决策.md`](experiments/后续调优候选与实验决策.md).
 
 The team Git branch, PR review, merge, and `main` protection process is documented in [`docs/knowledge/双人Git协作与PR操作规范.md`](knowledge/双人Git协作与PR操作规范.md). `.github/workflows/ci.yml` runs `unit-cpu` on every branch push and PR to `main`; configure Required Checks only after confirming the exact successful check name in GitHub.
 
@@ -220,6 +220,53 @@ python scripts/e00_2_emotion_diag.py score --run-dir "$RUN_DIR"
 ```
 
 The runner requires actual NF4/BF16/CUDA placement with no CPU/disk offload and the archived weight identity; it does not fall back to CPU. If CUDA is unavailable, it writes a `blocked_in_codex_env` Manifest and does not create predictions. A blocked run ID is immutable; use a new one on a later attempt. Raw predictions and per-case results stay under ignored `outputs/`; only the concise report is tracked at `docs/experiments/E00.2-D_单字段情绪诊断报告.md`. The completed run `E00.2-D-emotion-003` scored 15/20 strict legal labels and 0/20 correct; its weight SHA matched the archived identity, and the report records that the configured revision itself remains unverified by the Manifest. See the experiment report for full metrics. The 20-row result is descriptive only because the prompt and output contract changed together, so it cannot establish causality or replace the A0 baseline.
+
+## E01-A — QLoRA engineering acceptance
+
+The implementation uses `configs/training/e01_a.yaml` for the independent one-step proof and 8-row Micro-overfit. `configs/training/e01_b.yaml` is a draft only; the CLI rejects B training while it remains behind the manual gate. Both configs require empty `init_adapter` and `resume_from_checkpoint` fields.
+
+Run CPU/synthetic regression first, then create a new, immutable preflight Run ID:
+
+```bash
+python -m pytest tests/test_e01_training.py tests/test_inference_protocol.py tests/test_e00_metrics.py -q
+python -m src.training.training_sft \
+  --config configs/training/e01_a.yaml \
+  --mode preflight \
+  --run-id "E01-A-preflight-$(date +%Y%m%d-%H%M%S)"
+```
+
+The preflight checks the D0.3/D0.4.3 manifests and hashes, SFT counts and Labels, P0/Tokenizer fingerprints, local Base aggregate SHA, CUDA/BF16 visibility, and the deterministic Train-only sample selection. It writes `outputs/training/<run-id>/preflight.json` and `manifest.json`. If CUDA/BF16 is unavailable, the status is explicitly blocked and no GPU work should start.
+
+After a fresh preflight passes, prove one real TRL optimizer update using an independent Run ID. Only a passing `step_proof.json` can gate Micro-overfit:
+
+```bash
+STEP_RUN_ID="E01-STEP-$(date +%Y%m%d-%H%M%S)"
+python -m src.training.training_sft \
+  --config configs/training/e01_a.yaml \
+  --mode one-step \
+  --run-id "$STEP_RUN_ID"
+
+python -m src.training.training_sft \
+  --config configs/training/e01_a.yaml \
+  --mode train \
+  --run-id "E01-A-$(date +%Y%m%d-%H%M%S)" \
+  --one-step-proof "outputs/training/$STEP_RUN_ID/step_proof.json"
+```
+
+The train mode starts a new Base + LoRA initialization, records optimizer-step losses/gradients/parameter updates, and runs Train-fitting diagnostics without placing Gold in generation prompts. It saves only this Run's Adapter and Adapter snapshots. A fixed Greedy probe is generated before release and after Base + Adapter reload; both Token IDs and Base SHA are checked. Afterward run the separate reload verifier and fixed 20-row E00.1 Smoke scorer:
+
+```bash
+python -m src.training.training_sft \
+  --config configs/training/e01_a.yaml \
+  --mode reload-check \
+  --run-root outputs/training/E01-A-<run-id>
+
+python scripts/e01_evaluate.py \
+  --run-root outputs/training/E01-A-<run-id> \
+  --scope train-and-dev-smoke
+```
+
+Raw training generations, predictions, runner reports, and scores stay under ignored `outputs/training/`. Do not commit those artifacts or use E01-A training fit as Dev generalization evidence. Review [`E01-A 训练可学习性验收报告`](experiments/E01-A_训练可学习性验收报告.md) before setting E01-B's Epoch/Steps, resource budget, and explicit start decision.
 
 ## Regression suite
 
