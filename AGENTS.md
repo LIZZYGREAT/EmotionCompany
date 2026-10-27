@@ -6,6 +6,7 @@
 - `participant/run_inference.py`, its config, and requirements are editable reference implementation files. Any changes must retain the competition contract and pass protocol tests; do not freeze the whole `participant/` directory.
 - Keep P0/F2/T1 and D0.3 split semantics stable. A semantic change requires a new protocol/data version; a bug fix requires focused regression tests.
 - Do not commit real data, model weights/cache, generated predictions, or `outputs/`. Run relevant tests and `git diff --check` before committing.
+- After editing Markdown, run `python3 .github/scripts/fix_whitespace.py --changed` before staging, then stage only the intended paths. The local pre-commit hook runs `--staged` and `git diff --cached --check`; do not bypass it with `--no-verify`.
 
 ## Team Git and PR workflow
 
