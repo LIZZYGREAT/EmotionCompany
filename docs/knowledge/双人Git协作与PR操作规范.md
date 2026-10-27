@@ -26,7 +26,16 @@ git switch -c feat/example-task
 
 ## 开发与提交
 
-保持提交小而清晰；一个提交只表达一个可审查的变化。提交前查看差异、运行相关检查，并只暂存本任务文件：
+保持提交小而清晰；一个提交只表达一个可审查的变化。修改 Markdown 后、暂存前，从仓库根目录手动运行空白修复脚本：
+
+```bash
+python3 .github/scripts/fix_whitespace.py --changed
+git diff --check
+```
+
+如只需处理一个文件，可用 `python3 .github/scripts/fix_whitespace.py --file "docs/xxx.md"`。脚本只改本次变更的 Markdown；遇到 Markdown 双空格硬换行或部分暂存文件时会停止，需先人工处理。
+
+提交前查看差异、运行相关检查，并只暂存本任务文件：
 
 ```bash
 git diff --check
@@ -39,6 +48,22 @@ git commit -m "feat(scope): summary"
 ```
 
 不要无检查地执行 `git add .` 或 `git add -A`。提交信息使用简洁类型前缀，例如 `feat(...)`、`fix(...)`、`docs(...)`、`test(...)`、`chore(...)`。
+
+### 每个本地仓库启用 pre-commit Hook（一次）
+
+先检查当前仓库是否已有自定义 Hook 路径：
+
+```bash
+git config --local --get core.hooksPath
+```
+
+只有该命令没有输出且返回非零时，才执行：
+
+```bash
+git config --local core.hooksPath .github/hooks
+```
+
+如果已经有值，先确认原配置用途，不要直接覆盖。启用后，`git commit` 会自动执行暂存 Markdown 修复及 `git diff --cached --check`；部分暂存、硬换行等无法安全自动修复时会阻止提交并提示处理方式。
 
 ## 同步 `main`/其他开发分支
 
@@ -113,4 +138,3 @@ git pull --ff-only origin main
 仓库管理员在 GitHub 为 `main` 配置一条 Active Ruleset，至少要求 PR、1 位队友批准、Required CI 通过，并禁止删除和强推。若审批后又有新提交，应要求重新审批；合并方式统一使用 Squash。
 
 首次将 CI 设为 Required 前，先让工作流在一个真实 PR 上成功运行，再将 GitHub Checks 中实际出现的 Job 名绑定为 Required Check。本仓库工作流的预期稳定 Job 名为 `unit-cpu`；确认 GitHub Checks 中确实出现后再绑定。不要提前填写不存在的检查名，以免 PR 永久等待。
-
