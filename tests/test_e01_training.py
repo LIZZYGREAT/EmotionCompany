@@ -93,6 +93,33 @@ def test_e01_trainer_path_facts_are_snapshotted_before_release():
         training._snapshot_trainer_data_path_facts(SimpleNamespace())
 
 
+def test_e01_progress_file_is_atomically_updated_with_latest_step(tmp_path):
+    run_root = tmp_path / "E01-A-progress-test"
+    run_root.mkdir()
+    training._write_training_progress(
+        run_root,
+        stage="training",
+        optimizer_step=20,
+        max_optimizer_steps=120,
+        latest_adapter_snapshot="adapter_snapshots/step_0020",
+    )
+    progress_path = run_root / "progress.json"
+    first = json.loads(progress_path.read_text(encoding="utf-8"))
+    assert first["optimizer_step"] == 20
+    assert first["latest_adapter_snapshot"] == "adapter_snapshots/step_0020"
+    training._write_training_progress(
+        run_root,
+        stage="adapter_saved",
+        optimizer_step=120,
+        max_optimizer_steps=120,
+        latest_adapter_snapshot="adapter_snapshots/step_0120",
+    )
+    latest = json.loads(progress_path.read_text(encoding="utf-8"))
+    assert latest["stage"] == "adapter_saved"
+    assert latest["optimizer_step"] == 120
+    assert latest["max_optimizer_steps"] == 120
+
+
 def test_e01_selection_is_stable_covers_labels_and_uses_unique_train_conversations():
     sft, normalized = _selected_fixture_rows()
     selected = training.deterministic_select_samples(sft, normalized, count=8)
