@@ -206,6 +206,28 @@ def _validate_runtime_compatibility(
         "id_not_in_prompt": runtime_protocol.get("id_in_prompt") is False,
         "backend_is_not_mock": run_metadata.get("backend") != "mock",
     }
+    expected_adapter = config.get("model", {}).get("adapter", {"enabled": False})
+    if not isinstance(expected_adapter, dict):
+        raise ValueError("evaluation config model.adapter must be an object")
+    observed_adapter = run_metadata.get("adapter_identity", {"enabled": False})
+    if not isinstance(observed_adapter, dict):
+        observed_adapter = {}
+    if expected_adapter.get("enabled") is True:
+        base_identity = run_metadata.get("model_weight_identity", {})
+        checks["adapter_enabled"] = observed_adapter.get("enabled") is True
+        checks["adapter_base_hash_matches"] = (
+            observed_adapter.get("base_weight_sha256") == base_identity.get("observed_weight_hash")
+            and observed_adapter.get("base_weight_sha256") == expected_adapter.get("expected_base_weight_sha256")
+        )
+        checks["adapter_weight_hash_matches"] = (
+            observed_adapter.get("weight_sha256") == expected_adapter.get("expected_adapter_weight_sha256")
+        )
+        if expected_adapter.get("expected_adapter_config_sha256") is not None:
+            checks["adapter_config_hash_matches"] = (
+                observed_adapter.get("config_sha256") == expected_adapter.get("expected_adapter_config_sha256")
+            )
+    else:
+        checks["adapter_disabled"] = observed_adapter.get("enabled", False) is False
     expected_weight_revision = config.get("model", {}).get("weight_revision")
     if expected_weight_revision is not None:
         checks["model_revision"] = run_metadata.get("model_revision") == expected_weight_revision
@@ -232,7 +254,9 @@ def _validate_runtime_compatibility(
     return {"status": "verified", "checks": checks}
 
 
-def _model_identity_verification(run_metadata: dict[str, Any], dataset_scope: str) -> dict[str, Any]:
+def _model_identity_verification(
+    run_metadata: dict[str, Any], dataset_scope: str, config: dict[str, Any] | None = None
+) -> dict[str, Any]:
     backend = run_metadata.get("backend")
     if dataset_scope != "D0.3_dev":
         return {"status": "not_applicable_synthetic_fixture", "reason": "synthetic_dataset_scope"}
@@ -247,6 +271,36 @@ def _model_identity_verification(run_metadata: dict[str, Any], dataset_scope: st
             "status": "unverified",
             "reason": identity.get("fingerprint_status", "weight_hash_not_observed"),
             "configured_revision": identity.get("configured_revision"),
+        }
+    expected_adapter = (config or {}).get("model", {}).get("adapter", {"enabled": False})
+    adapter_identity = run_metadata.get("adapter_identity", {"enabled": False})
+    if expected_adapter.get("enabled") is True:
+        adapter_verified = bool(
+            isinstance(adapter_identity, dict)
+            and adapter_identity.get("enabled") is True
+            and adapter_identity.get("base_weight_sha256") == observed_hash
+            and adapter_identity.get("base_weight_sha256") == expected_adapter.get("expected_base_weight_sha256")
+            and adapter_identity.get("weight_sha256") == expected_adapter.get("expected_adapter_weight_sha256")
+            and (
+                expected_adapter.get("expected_adapter_config_sha256") is None
+                or adapter_identity.get("config_sha256") == expected_adapter.get("expected_adapter_config_sha256")
+            )
+        )
+        if not adapter_verified:
+            return {
+                "status": "unverified",
+                "reason": "adapter_identity_does_not_match_evaluation_config",
+                "observed_weight_hash": observed_hash,
+                "adapter_identity": adapter_identity,
+            }
+        return {
+            "status": "verified_base_and_adapter",
+            "basis": "observed local Base and Adapter SHA-256 identities",
+            "observed_weight_hash": observed_hash,
+            "adapter_weight_sha256": adapter_identity.get("weight_sha256"),
+            "adapter_config_sha256": adapter_identity.get("config_sha256"),
+            "configured_revision": identity.get("configured_revision"),
+            "revision_status": identity.get("revision_status", "not_configured"),
         }
     return {
         "status": "verified",
@@ -687,12 +741,13 @@ def score_files(
         "source_verification": d03_facts,
         "runtime_compatibility": runtime_compatibility,
         "model_identity_verification": _model_identity_verification(
-            run_metadata, manifest.get("dataset_scope", "unknown")
+            run_metadata, manifest.get("dataset_scope", "unknown"), config
         ),
         "model": {
             "model_id": run_metadata.get("model_id"),
             "model_revision": run_metadata.get("model_revision"),
             "model_weight_identity": run_metadata.get("model_weight_identity"),
+            "adapter_identity": run_metadata.get("adapter_identity", {"enabled": False}),
             "quantization": run_metadata.get("quantization"),
             "generation_config": run_metadata.get("generation_config"),
             "protocol": run_metadata.get("protocol"),

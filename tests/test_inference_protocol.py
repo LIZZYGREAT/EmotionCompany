@@ -241,6 +241,39 @@ def test_i09_completion_order_and_submission_schema_are_distinct(protocol):
     assert list(json.loads(completion)) == ["emotion_label", "user_profile", "response_text", "memory_refs"]
 
 
+def test_i10_adapter_is_disabled_by_default_and_rejects_invalid_declarations(protocol, tmp_path):
+    config, *_ = protocol
+    assert runner.validate_adapter_config(config.get("adapter"), "transformers") == {"enabled": False}
+    with pytest.raises(ValueError, match="expected_base_weight_sha256"):
+        runner.validate_adapter_config({"enabled": True, "path": "outputs/training/a/adapter"}, "transformers")
+    valid_shape = {
+        "enabled": True,
+        "path": "outputs/training/a/adapter",
+        "expected_base_weight_sha256": "a" * 64,
+        "expected_adapter_weight_sha256": "b" * 64,
+    }
+    with pytest.raises(ValueError, match="仅支持 backend=transformers"):
+        runner.validate_adapter_config(valid_shape, "openai_compatible")
+    with pytest.raises(ValueError, match="64 位 SHA-256"):
+        runner.validate_adapter_config({**valid_shape, "expected_adapter_weight_sha256": "wrong"}, "transformers")
+
+
+def test_i11_adapter_identity_is_separate_and_base_reference_is_checked(tmp_path):
+    adapter_dir = tmp_path / "adapter"
+    adapter_dir.mkdir()
+    config_path = adapter_dir / "adapter_config.json"
+    config_path.write_text(json.dumps({"base_model_name_or_path": "Qwen/Qwen3-1.7B"}), encoding="utf-8")
+    weights = adapter_dir / "adapter_model.safetensors"
+    weights.write_bytes(b"synthetic adapter weights")
+    identity, adapter_config = runner.adapter_weight_identity(adapter_dir)
+    assert identity["identity_status"] == "observed"
+    assert identity["weight_sha256"]
+    assert identity["config_sha256"] == runner.sha256(config_path)
+    assert runner.validate_adapter_base_reference(adapter_config, "Qwen/Qwen3-1.7B", tmp_path / "base") == "Qwen/Qwen3-1.7B"
+    with pytest.raises(ValueError, match="does not match configured model"):
+        runner.validate_adapter_base_reference({"base_model_name_or_path": "Qwen/other"}, "Qwen/Qwen3-1.7B", tmp_path / "base")
+
+
 def test_i10_budget_preflight_rejects_p_plus_g_over_k(tmp_path, monkeypatch):
     config = json.loads((ROOT / "participant/configs/inference_config.json").read_text(encoding="utf-8"))
     config["context"]["serving_context_limit"] = 2000

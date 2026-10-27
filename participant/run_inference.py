@@ -154,6 +154,7 @@ def load_config(config_path: Path | None = None) -> dict[str, Any]:
             raise ValueError("request_timeout_seconds 必须为正数")
         if not isinstance(config.get("api_options", {}), dict):
             raise ValueError("api_options 必须为 JSON object")
+    validate_adapter_config(config.get("adapter"), config["backend"])
     quantization = config.get("quantization", {})
     if not isinstance(quantization, dict):
         raise ValueError("quantization 必须为 JSON object")
@@ -494,6 +495,106 @@ def _weight_identity(model_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
         "aggregate_sha256": fingerprint,
         "files": files,
     }
+
+
+def validate_adapter_config(adapter: Any, backend: str) -> dict[str, Any]:
+    """Validate an explicit optional PEFT Adapter declaration."""
+    if adapter is None:
+        return {"enabled": False}
+    if not isinstance(adapter, dict):
+        raise ValueError("adapter 必须为 JSON object")
+    enabled = adapter.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("adapter.enabled 必须为 boolean")
+    if not enabled:
+        return {"enabled": False}
+    if backend != "transformers":
+        raise ValueError("PEFT Adapter 仅支持 backend=transformers；不会静默忽略 Adapter")
+    for name in ("path", "expected_base_weight_sha256", "expected_adapter_weight_sha256"):
+        value = adapter.get(name)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"adapter.enabled=true 时必须提供 adapter.{name}")
+    for name in ("expected_base_weight_sha256", "expected_adapter_weight_sha256"):
+        value = adapter[name].lower()
+        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+            raise ValueError(f"adapter.{name} 必须是 64 位 SHA-256")
+    expected_config_sha = adapter.get("expected_adapter_config_sha256")
+    if expected_config_sha is not None and (
+        not isinstance(expected_config_sha, str)
+        or len(expected_config_sha) != 64
+        or any(character not in "0123456789abcdef" for character in expected_config_sha.lower())
+    ):
+        raise ValueError("adapter.expected_adapter_config_sha256 必须是 64 位 SHA-256")
+    return {**adapter, "enabled": True}
+
+
+def adapter_weight_identity(adapter_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Fingerprint local Adapter weights separately from its config and Base."""
+    adapter_dir = adapter_dir.expanduser().resolve()
+    config_path = adapter_dir / "adapter_config.json"
+    if not adapter_dir.is_dir() or not config_path.is_file():
+        raise FileNotFoundError(f"Adapter directory/config missing: {adapter_dir}")
+    adapter_config = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(adapter_config, dict):
+        raise ValueError("adapter_config.json must contain a JSON object")
+    candidates = sorted(
+        path for path in adapter_dir.iterdir()
+        if path.is_file() and (
+            path.name == "adapter_model.safetensors"
+            or path.name == "adapter_model.bin"
+            or re.fullmatch(r"adapter_model-[0-9]+-of-[0-9]+\.safetensors", path.name)
+        )
+    )
+    if not candidates or any(path.stat().st_size <= 0 for path in candidates):
+        raise FileNotFoundError(f"Adapter weights missing or empty: {adapter_dir}")
+    files = [
+        {"path": path.name, "size_bytes": path.stat().st_size, "sha256": sha256(path)}
+        for path in candidates
+    ]
+    weight_sha = hashlib.sha256(
+        json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    config_sha = sha256(config_path)
+    config_summary = {
+        name: adapter_config.get(name)
+        for name in (
+            "peft_type", "task_type", "r", "lora_alpha", "lora_dropout",
+            "target_modules", "bias", "inference_mode", "base_model_name_or_path",
+        )
+        if name in adapter_config
+    }
+    return {
+        "identity_status": "observed",
+        "local_path": str(adapter_dir),
+        "weight_sha256": weight_sha,
+        "config_sha256": config_sha,
+        "config_summary": config_summary,
+        "files": files,
+    }, adapter_config
+
+
+def validate_adapter_base_reference(adapter_config: dict[str, Any], model_id: str, model_dir: Path) -> str:
+    """Reject an Adapter declaring a different Base model reference."""
+    declared = adapter_config.get("base_model_name_or_path")
+    if not isinstance(declared, str) or not declared.strip():
+        raise ValueError("adapter_config.json 缺少 base_model_name_or_path")
+    accepted = {model_id}
+    accepted_paths = {str(model_dir.resolve())}
+    if declared in accepted:
+        return declared
+    try:
+        declared_path = Path(declared).expanduser()
+        if not declared_path.is_absolute():
+            declared_path = WORKSPACE_ROOT / declared_path
+        if declared_path.resolve() in {model_dir.resolve(), model_dir.absolute()}:
+            return declared
+    except (OSError, RuntimeError):
+        pass
+    if declared not in accepted_paths:
+        raise ValueError(
+            f"Adapter Base reference does not match configured model {model_id}: {declared}"
+        )
+    return declared
 
 
 def resolve_raw_output_path(result_dir: Path, submission_path: Path) -> Path | None:
@@ -1058,6 +1159,34 @@ def main() -> None:
         )
         tokenizer, tokenizer_facts = load_runtime_tokenizer(config, local_model)
         weight_identity = _weight_identity(local_model, config)
+        adapter_config = validate_adapter_config(config.get("adapter"), backend)
+        adapter_identity = {"enabled": False, "status": "not_enabled"}
+        if adapter_config["enabled"]:
+            if weight_identity.get("identity_status") != "observed" or (
+                weight_identity.get("observed_weight_hash") != adapter_config["expected_base_weight_sha256"]
+            ):
+                raise RuntimeError(
+                    "Adapter expected Base SHA-256 does not match the observed local Base weights"
+                )
+            adapter_path_value = Path(adapter_config["path"]).expanduser()
+            adapter_path = (
+                adapter_path_value
+                if adapter_path_value.is_absolute()
+                else WORKSPACE_ROOT / adapter_path_value
+            ).resolve()
+            adapter_identity, adapter_metadata = adapter_weight_identity(adapter_path)
+            if adapter_identity["weight_sha256"] != adapter_config["expected_adapter_weight_sha256"]:
+                raise RuntimeError("Adapter weight SHA-256 differs from the explicitly configured identity")
+            expected_adapter_config_sha = adapter_config.get("expected_adapter_config_sha256")
+            if expected_adapter_config_sha and adapter_identity["config_sha256"] != expected_adapter_config_sha:
+                raise RuntimeError("Adapter config SHA-256 differs from the explicitly configured identity")
+            validate_adapter_base_reference(adapter_metadata, config.get("model_id", ""), local_model)
+            adapter_identity.update({
+                "enabled": True,
+                "status": "verified_local_adapter",
+                "base_model_id": config.get("model_id"),
+                "base_weight_sha256": weight_identity["observed_weight_hash"],
+            })
         model_load_kwargs = {
             "trust_remote_code": trust_remote_code,
             "local_files_only": True,
@@ -1069,6 +1198,17 @@ def main() -> None:
             model_load_kwargs["quantization_config"] = quantization_config
         model_load_started = time.perf_counter()
         model = model_loader.from_pretrained(local_model, **model_load_kwargs)
+        if adapter_config["enabled"]:
+            try:
+                from peft import PeftModel
+            except ImportError as exc:
+                raise RuntimeError("Adapter 加载需要安装 PEFT") from exc
+            model = PeftModel.from_pretrained(
+                model,
+                str(adapter_path),
+                is_trainable=False,
+                local_files_only=True,
+            )
         model.eval()
         model_load_seconds = time.perf_counter() - model_load_started
         quantization_facts = inspect_quantization_runtime(model, config, torch)
@@ -1091,6 +1231,7 @@ def main() -> None:
             "model_type": model_config.model_type,
             "model_loader": model_loader.__name__,
             "model_weight_identity": weight_identity,
+            "adapter_identity": adapter_identity,
             "quantization": quantization_facts,
             "model_load_seconds": round(model_load_seconds, 6),
             "cuda_memory_after_model_load": memory_after_load,
@@ -1118,6 +1259,7 @@ def main() -> None:
                 "revision_status": "unverified_revision" if config.get("model_revision") else "not_configured",
                 "observed_weight_hash": None,
             },
+            "adapter_identity": {"enabled": False, "status": "not_enabled"},
             "quantization": {"applied": False, "method": "configured by external server; not observed"},
             "template_equivalence": "BLOCKED_NOT_RUN_exact_server_token_ids_not_observable",
         }
@@ -1257,6 +1399,7 @@ def main() -> None:
 
     report = {
         **backend_report,
+        "adapter_identity": backend_report.get("adapter_identity", {"enabled": False, "status": "not_enabled"}),
         "backend": backend,
         "run_id": run_id,
         "experiment_id": experiment_id,

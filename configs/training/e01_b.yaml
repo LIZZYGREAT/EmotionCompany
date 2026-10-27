@@ -1,0 +1,80 @@
+version: E01-training-v1
+experiment_id: E01-B
+status: draft_manual_gate
+
+base_model:
+  model_id: Qwen/Qwen3-1.7B
+  revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  local_path: participant/model
+  expected_weight_sha256: 005d20550c04f4e246e5b434448786b44a0196b47d758d0acc77aba279e5bbc5
+
+data:
+  split: train
+  train_path: data/processed/sft/v1/train.jsonl
+  dev_path: data/processed/sft/v1/dev.jsonl
+  normalized_train_path: data/processed/v1/train.jsonl
+  sft_manifest: outputs/sft_data/v1/manifest.json
+  d03_manifest: outputs/data_pipeline/v1/manifest.json
+  d042_manifest: outputs/token_audit/v1/manifest.json
+  expected_train_rows: 16192
+  expected_dev_rows: 1821
+  expected_source_train_rows: 16312
+  output_root: outputs/training
+  init_adapter: null
+  resume_from_checkpoint: null
+
+protocol:
+  prompt_path: configs/prompts/p0.txt
+  p0_sha256: d427e4996d0075a3adfe03ae25881d093687a6565f5b037f605accecc84c70b2
+  runner_config: participant/configs/inference_config.json
+  tokenizer_id: Qwen/Qwen3-1.7B
+  tokenizer_revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  tokenizer_signature_sha256: 1662c9e99c6185441026a168b2dd6b09af103dc6dc3563b72f598411f14d1913
+  chat_template_sha256: a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8
+  eos_token_id: 151645
+  max_train_seq_length: 2048
+  max_prompt_tokens: 1280
+  history_policy: T1_recent_contiguous_complete_message_suffix
+  format_version: F2
+  thinking: false
+  packing: false
+  padding_free: false
+
+quantization:
+  method: bitsandbytes_4bit
+  quant_type: nf4
+  compute_dtype: bfloat16
+  use_double_quant: true
+  device_map: auto
+  cpu_disk_offload: false
+
+lora:
+  r: 8
+  alpha: 16
+  dropout: 0.0
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  bias: none
+
+optimizer:
+  name: AdamW
+  learning_rate: null
+  weight_decay: null
+
+training:
+  seed: 42
+  per_device_micro_batch_size: 1
+  gradient_accumulation_steps: 4
+  max_optimizer_steps: null
+  epochs: null
+  save_interval_steps: null
+  gradient_checkpointing: true
+  evaluation_interval_steps: null
+  sample_selection: null
+  execution_gate: manual_approval_after_E01_A_report
+
+evaluation:
+  max_new_tokens: 1200
+  do_sample: false
+  full_dev_generation_rows: 1833
+  sft_dev_loss_rows: 1821
+  full_dev_base_paired_comparison: not_run

@@ -294,6 +294,59 @@ def test_transformers_runtime_requires_recomputed_weight_file_hashes(tmp_path):
         _validate_runtime_compatibility(run, config, "D0.3_dev")
 
 
+def test_runtime_and_score_identity_bind_adapter_to_verified_base(tmp_path):
+    config = yaml.safe_load((ROOT / "configs/evaluation/e00.yaml").read_text(encoding="utf-8"))
+    weight_path = tmp_path / "model.safetensors"
+    weight_path.write_bytes(b"tiny weight fixture")
+    base_identity = _weight_identity(tmp_path, {"model_id": config["model"]["model_id"]})
+    adapter_identity = {
+        "enabled": True,
+        "status": "verified_local_adapter",
+        "base_model_id": config["model"]["model_id"],
+        "base_weight_sha256": base_identity["observed_weight_hash"],
+        "weight_sha256": "b" * 64,
+        "config_sha256": "c" * 64,
+    }
+    config["model"]["adapter"] = {
+        "enabled": True,
+        "expected_base_weight_sha256": base_identity["observed_weight_hash"],
+        "expected_adapter_weight_sha256": "b" * 64,
+        "expected_adapter_config_sha256": "c" * 64,
+    }
+    run = {
+        "model_id": config["model"]["model_id"],
+        "backend": "transformers",
+        "model_weight_identity": base_identity,
+        "adapter_identity": adapter_identity,
+        "quantization": {
+            "applied": True, "quant_type": "nf4", "compute_dtype": "bfloat16",
+            "use_double_quant": config["quantization"]["planned"]["use_double_quant"],
+            "real_nf4_verified": True, "linear4bit_module_count": 1,
+            "device_map_observed": True, "placement_verified": True, "offload_devices": [],
+        },
+        "generation_config": dict(config["generation"]),
+        "protocol": {
+            "prompt": {"sha256": config["protocol"]["prompt_sha256"]},
+            "tokenizer": {
+                "signature_sha256": config["protocol"]["tokenizer_signature_sha256"],
+                "template_sha256": config["protocol"]["chat_template_sha256"],
+            },
+            "history_strategy": "T1_recent_contiguous_complete_message_suffix",
+            "completion_field_order": ["emotion_label", "user_profile", "response_text", "memory_refs"],
+            "id_in_prompt": False,
+        },
+        "budget": {"P_max_prompt_tokens": config["protocol"]["max_prompt_tokens"]},
+    }
+    assert _validate_runtime_compatibility(run, config, "D0.3_dev")["status"] == "verified"
+    identity = _model_identity_verification(run, "D0.3_dev", config)
+    assert identity["status"] == "verified_base_and_adapter"
+    assert identity["adapter_weight_sha256"] == "b" * 64
+
+    run["adapter_identity"]["base_weight_sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="adapter_base_hash_matches"):
+        _validate_runtime_compatibility(run, config, "D0.3_dev")
+
+
 def test_raw_diagnostics_separate_strict_json_from_runner_repair():
     enums = schema_enums(load_submission_schema(ROOT))
     good = json.dumps({
