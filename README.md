@@ -33,6 +33,8 @@ bash /root/participant/start.sh /root/test_inference_data.jsonl /root/result
 
 仓库协作约束见 [`AGENTS.md`](AGENTS.md)，赛事文件保护范围、官方运行接口和 Schema 指纹见[赛事文件边界与运行契约](docs/competition/赛事文件边界与运行契约.md)。日常修改前先查看 `git status --short`；只暂存本任务明确修改的文件，再提交，例如 `git add <明确的文件路径>`、`git commit -m "<type>: <summary>"`。不要提交原始赛事数据、模型权重/缓存或 `outputs/` 产物。
 
+当前阶段进度与下一阶段入口见 [`E00 阶段总结与 E01 交接`](docs/experiments/E00_阶段总结与E01交接.md)；候选调优方向见 [`后续调优候选与实验决策`](docs/experiments/后续调优候选与实验决策.md)。
+
 
 ## 内部技术专家评审所需资料
 1. 需要提交技术方案、实验设计和报告；

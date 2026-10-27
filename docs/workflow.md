@@ -2,6 +2,10 @@
 
 Run the data stages from the repository root. The reports, configs, source, and tests are versioned; reproducible machine outputs under `outputs/` and normalized datasets under `data/processed/` are local artifacts.
 
+## Current progress and handoff
+
+D0 through E00.2-D have completed their documented data, protocol, and small-sample diagnostic scopes. E00.3 full Dev inference and E01 real QLoRA training have not run; D0.4.3 validates encoded data and the Trainer DataLoader, not a real model update. The current evidence, outstanding decisions, and recommended E01 micro-overfit starting point are in [`docs/experiments/E00_阶段总结与E01交接.md`](experiments/E00_阶段总结与E01交接.md); future experiments remain candidates in [`docs/experiments/后续调优候选与实验决策.md`](experiments/后续调优候选与实验决策.md).
+
 ## Environment setup
 
 ```bash
@@ -164,7 +168,7 @@ source .venv/bin/activate
 python scripts/e00_2_smoke.py --run-id "E00.2-$(date +%Y%m%d-%H%M%S)" --execute
 ```
 
-Greedy uses `do_sample=false`; Sampling uses `do_sample=true, temperature=0.7, top_p=0.8, top_k=20` with base seed 42 and a stable per-ID seed. Runner reports include effective runner/evaluation config hashes, model shard identity, actual NF4 module/device-map evidence, model-load time, CUDA allocator usage, cold first-sample timing, and per-sample diagnostics. Raw model text and per-case comparison files stay under ignored `outputs/evaluation/e00_2/`; the tracked report contains no conversation text. Twenty Smoke rows are exploratory and cannot establish a generally better decoding strategy. Do not start E00.3 until the local run and both E00 scorer validations pass. The current execution state is documented in `docs/experiments/E00.2_真实模型Smoke与解码对照报告.md`.
+Greedy uses `do_sample=false`; Sampling uses `do_sample=true, temperature=0.7, top_p=0.8, top_k=20` with base seed 42 and a stable per-ID seed. Runner reports include effective runner/evaluation config hashes, model shard identity, actual NF4 module/device-map evidence, model-load time, CUDA allocator usage, cold first-sample timing, and per-sample diagnostics. Raw model text and per-case comparison files stay under ignored `outputs/evaluation/e00_2/`; the tracked report contains no conversation text. Twenty Smoke rows are exploratory and cannot establish a generally better decoding strategy. The E00.2 report records the original decision not to proceed directly to E00.3; full Dev timing remains an open decision, not an automatic next run. Current evidence and E01 handoff are summarized in `docs/experiments/E00_阶段总结与E01交接.md`.
 
 After a completed real Smoke, run the offline diagnosis against its immutable artifacts:
 
