@@ -29,4 +29,3 @@ def test_start_script_preserves_entry_arguments_and_fixed_environment_contract()
     assert 'TEST_FILE="$1"' in script
     assert 'RESULT_DIR="$2"' in script
     assert '"$SCRIPT_DIR/run_inference.py" "$TEST_FILE" "$RESULT_DIR"' in script
-

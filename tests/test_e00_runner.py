@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -195,9 +195,6 @@ def test_weight_identity_keeps_revision_declaration_separate_from_observed_hash(
 
 
 def test_transformers_timer_synchronizes_before_and_after_the_measured_region(tmp_path, monkeypatch):
-    import torch
-    import transformers
-
     input_path = tmp_path / "input.jsonl"
     input_path.write_text(json.dumps({
         "id": "test_000001_t0", "history": [{"role": "user", "content": "一条消息"}],
@@ -224,6 +221,26 @@ def test_transformers_timer_synchronizes_before_and_after_the_measured_region(tm
         def from_pretrained(cls, *_args, **_kwargs):
             return cls()
 
+    torch_module = ModuleType("torch")
+    torch_module.cuda = SimpleNamespace(is_available=lambda: False)
+    transformers_module = ModuleType("transformers")
+    transformers_module.__path__ = []
+    transformers_module.AutoConfig = FakeAutoConfig
+    transformers_module.AutoModelForCausalLM = FakeModel
+    transformers_module.AutoModelForImageTextToText = FakeModel
+    transformers_module.AutoTokenizer = object
+    models_module = ModuleType("transformers.models")
+    models_module.__path__ = []
+    auto_module = ModuleType("transformers.models.auto")
+    auto_module.__path__ = []
+    modeling_auto_module = ModuleType("transformers.models.auto.modeling_auto")
+    modeling_auto_module.MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES = {}
+    monkeypatch.setitem(sys.modules, "torch", torch_module)
+    monkeypatch.setitem(sys.modules, "transformers", transformers_module)
+    monkeypatch.setitem(sys.modules, "transformers.models", models_module)
+    monkeypatch.setitem(sys.modules, "transformers.models.auto", auto_module)
+    monkeypatch.setitem(sys.modules, "transformers.models.auto.modeling_auto", modeling_auto_module)
+
     monkeypatch.setattr(runner, "parse_args", lambda: SimpleNamespace(test_file=input_path, result_dir=result_dir))
     monkeypatch.setattr(runner, "load_config", lambda: config)
     schema = runner.load_submission_schema()
@@ -242,14 +259,6 @@ def test_transformers_timer_synchronizes_before_and_after_the_measured_region(tm
     clock_values = iter([1.0, 1.1, 10.0, 10.25])
     monkeypatch.setattr(runner.time, "perf_counter", lambda: (events.append("clock"), next(clock_values))[1])
     monkeypatch.setattr(runner, "generate_transformers_sample", lambda *_args: (events.append("generate") or _completion(), {"generated_tokens": 2, "stop_reason": "eos"}))
-    monkeypatch.setattr(transformers, "AutoConfig", FakeAutoConfig)
-    monkeypatch.setattr(transformers, "AutoModelForCausalLM", FakeModel)
-    monkeypatch.setattr(transformers, "AutoModelForImageTextToText", FakeModel)
-    monkeypatch.setattr(
-        transformers.models.auto.modeling_auto,
-        "MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES",
-        {},
-    )
     monkeypatch.delenv("EVALUATION_RAW_OUTPUT_PATH", raising=False)
 
     runner.main()
