@@ -6,3 +6,9 @@
 - `participant/run_inference.py`, its config, and requirements are editable reference implementation files. Any changes must retain the competition contract and pass protocol tests; do not freeze the whole `participant/` directory.
 - Keep P0/F2/T1 and D0.3 split semantics stable. A semantic change requires a new protocol/data version; a bug fix requires focused regression tests.
 - Do not commit real data, model weights/cache, generated predictions, or `outputs/`. Run relevant tests and `git diff --check` before committing.
+
+## Team Git and PR workflow
+
+- Follow [双人 Git 协作与 PR 操作规范](data/knowledge/双人Git协作与PR操作规范.md) for task branches, explicit staging, commits, syncing, reviews, and merges.
+- Integrate into `main` through a teammate-reviewed PR after the `unit-cpu` CI check passes. Do not push or force-push directly to `main`.
+- Keep the GitHub PR template and CI workflow aligned with the Required Check configured for `main`.

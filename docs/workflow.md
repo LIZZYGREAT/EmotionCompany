@@ -6,6 +6,8 @@ Run the data stages from the repository root. The reports, configs, source, and 
 
 D0 through E00.2-D have completed their documented data, protocol, and small-sample diagnostic scopes. E00.3 full Dev inference and E01 real QLoRA training have not run; D0.4.3 validates encoded data and the Trainer DataLoader, not a real model update. The current evidence, outstanding decisions, and recommended E01 micro-overfit starting point are in [`docs/experiments/E00_阶段总结与E01交接.md`](experiments/E00_阶段总结与E01交接.md); future experiments remain candidates in [`docs/experiments/后续调优候选与实验决策.md`](experiments/后续调优候选与实验决策.md).
 
+The team Git branch, PR review, merge, and `main` protection process is documented in [`data/knowledge/双人Git协作与PR操作规范.md`](../data/knowledge/双人Git协作与PR操作规范.md). The CPU CI workflow is `.github/workflows/ci.yml`; use its actual successful GitHub Check name when configuring Required Checks.
+
 ## Environment setup
 
 ```bash

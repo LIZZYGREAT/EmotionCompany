@@ -76,6 +76,8 @@ git push -u origin task-branch-name
 - 尚未验证的内容、失败或环境阻断；
 - 可能的影响和需要审查的边界。
 
+可按仓库模板 `.github/PULL_REQUEST_TEMPLATE.md` 填写，避免遗漏验证和风险信息。
+
 审查者应实际检查差异、行为和风险，指出需要修改的内容并确认已解决。新的提交使旧审批失效时，由另一位队友重新审查。
 
 ## 合并与收尾
@@ -101,7 +103,7 @@ git pull --ff-only origin main
 
 仓库管理员在 GitHub 为 `main` 配置一条 Active Ruleset，至少要求 PR、1 位队友批准、Required CI 通过，并禁止删除和强推。若审批后又有新提交，应要求重新审批；合并方式统一使用 Squash。
 
-首次将 CI 设为 Required 前，先让工作流在一个真实 PR 上成功运行，再将 GitHub Checks 中实际出现的 Job 名绑定为 Required Check。不要提前填写不存在的检查名，以免 PR 永久等待。
+首次将 CI 设为 Required 前，先让工作流在一个真实 PR 上成功运行，再将 GitHub Checks 中实际出现的 Job 名绑定为 Required Check。本仓库工作流的预期稳定 Job 名为 `unit-cpu`；确认 GitHub Checks 中确实出现后再绑定。不要提前填写不存在的检查名，以免 PR 永久等待。
 
 ## 常见故障处理
 
