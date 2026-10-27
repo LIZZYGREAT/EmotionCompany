@@ -5,8 +5,11 @@ __pycache__/
 .pytest_cache/
 
 # Dataset
-data/train/
-data/val/
+# Keep the official schemas available to fresh CI checkouts; never add raw JSONL data.
+/data/train/**
+!/data/train/train_public.schema.json
+/data/val/**
+!/data/val/val_public.schema.json
 data/processed/
 
 # Training artifacts
