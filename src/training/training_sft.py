@@ -477,9 +477,7 @@ def _load_train_model(config: dict[str, Any], base_path: Path, *, adapter_path: 
     if adapter_path is not None:
         model = PeftModel.from_pretrained(model, str(adapter_path), is_trainable=False, local_files_only=True)
         model.eval()
-        facts = inference.inspect_quantization_runtime(model, {
-            "quantization": {"use_double_quant": bool(quant_cfg["use_double_quant"])},
-        }, torch)
+        facts = inference.inspect_quantization_runtime(model, _training_quantization_inspection_config(config), torch)
         return model, torch, facts
     prepare_kwargs: dict[str, Any] = {"use_gradient_checkpointing": bool(config["training"]["gradient_checkpointing"])}
     try:
@@ -522,9 +520,7 @@ def _load_train_model(config: dict[str, Any], base_path: Path, *, adapter_path: 
     if not set(target_modules) <= target_names:
         raise RuntimeError(f"LoRA target modules were not injected: expected={target_modules}, observed={sorted(target_names)}")
     model.train()
-    facts = inference.inspect_quantization_runtime(model, {
-        "quantization": {"use_double_quant": bool(quant_cfg["use_double_quant"])},
-    }, torch)
+    facts = inference.inspect_quantization_runtime(model, _training_quantization_inspection_config(config), torch)
     if not facts.get("real_nf4_verified") or facts.get("offload_devices"):
         raise RuntimeError("NF4/BF16/CUDA placement failed or offload was observed")
     facts["trainable_parameter_count"] = sum(parameter.numel() for _name, parameter in trainable)
@@ -535,6 +531,18 @@ def _load_train_model(config: dict[str, Any], base_path: Path, *, adapter_path: 
     facts["observed_lora_targets"] = sorted(target_names)
     facts["all_trainable_parameters_are_lora"] = True
     return model, torch, facts
+
+
+def _training_quantization_inspection_config(config: dict[str, Any]) -> dict[str, Any]:
+    quantization = config["quantization"]
+    if quantization.get("method") != "bitsandbytes_4bit" or quantization.get("quant_type") != "nf4":
+        raise ValueError("E01 training runtime inspection requires bitsandbytes NF4")
+    return {
+        "quantization": {
+            "enabled": True,
+            "use_double_quant": bool(quantization["use_double_quant"]),
+        }
+    }
 
 
 def _trainable_parameters(model: Any) -> list[tuple[str, Any]]:
@@ -806,7 +814,7 @@ def _capture_probe(model: Any, tokenizer: Any, prompt_ids: list[int], *, max_new
 
 def _check_cuda_placement(model: Any) -> dict[str, Any]:
     import torch
-    facts = inference.inspect_quantization_runtime(model, {"quantization": {"use_double_quant": True}}, torch)
+    facts = inference.inspect_quantization_runtime(model, {"quantization": {"enabled": True, "use_double_quant": True}}, torch)
     if not facts.get("real_nf4_verified") or facts.get("offload_devices"):
         raise RuntimeError("model placement is not verified NF4/BF16/CUDA without offload")
     return facts

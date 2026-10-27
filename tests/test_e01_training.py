@@ -73,6 +73,17 @@ def test_e01_configs_lock_the_same_base_and_isolate_b():
         training.validate_training_mode(config_b, "train")
 
 
+def test_e01_training_enables_nf4_runtime_inspection():
+    config, _ = training.load_config("configs/training/e01_a.yaml")
+    assert training._training_quantization_inspection_config(config) == {
+        "quantization": {"enabled": True, "use_double_quant": True},
+    }
+    invalid = json.loads(json.dumps(config))
+    invalid["quantization"]["quant_type"] = "fp4"
+    with pytest.raises(ValueError, match="requires bitsandbytes NF4"):
+        training._training_quantization_inspection_config(invalid)
+
+
 def test_e01_selection_is_stable_covers_labels_and_uses_unique_train_conversations():
     sft, normalized = _selected_fixture_rows()
     selected = training.deterministic_select_samples(sft, normalized, count=8)
