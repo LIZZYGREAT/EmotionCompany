@@ -193,7 +193,7 @@ On the local WSL machine with CUDA available and the verified model mount, creat
 
 ```bash
 set -e
-RUN_ID='E00.2-D-emotion-002'
+RUN_ID="E00.2-D-emotion-$(date +%Y%m%d-%H%M%S)"
 RUN_DIR="outputs/evaluation/e00_2/emotion_diag/$RUN_ID"
 python scripts/e00_2_emotion_diag.py run \
   --config configs/evaluation/e00_2_emotion_diag.yaml \
@@ -213,7 +213,7 @@ PY
 python scripts/e00_2_emotion_diag.py score --run-dir "$RUN_DIR"
 ```
 
-The runner requires actual NF4/BF16/CUDA placement with no CPU/disk offload and the archived weight identity; it does not fall back to CPU. If CUDA is unavailable, it writes a `blocked_in_codex_env` Manifest and does not create predictions. A blocked run ID is immutable; use a new one on a later attempt. Raw predictions and per-case results stay under ignored `outputs/`; only the concise report is tracked at `docs/experiments/E00.2-D_单字段情绪诊断报告.md`. The 20-row result is descriptive only because the prompt and output contract changed together, so it cannot establish causality or replace the A0 baseline.
+The runner requires actual NF4/BF16/CUDA placement with no CPU/disk offload and the archived weight identity; it does not fall back to CPU. If CUDA is unavailable, it writes a `blocked_in_codex_env` Manifest and does not create predictions. A blocked run ID is immutable; use a new one on a later attempt. Raw predictions and per-case results stay under ignored `outputs/`; only the concise report is tracked at `docs/experiments/E00.2-D_单字段情绪诊断报告.md`. The completed run `E00.2-D-emotion-003` scored 15/20 strict legal labels and 0/20 correct; its weight SHA matched the archived identity, and the report records that the configured revision itself remains unverified by the Manifest. See the experiment report for full metrics. The 20-row result is descriptive only because the prompt and output contract changed together, so it cannot establish causality or replace the A0 baseline.
 
 ## Regression suite
 
