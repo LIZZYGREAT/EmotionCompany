@@ -4,7 +4,7 @@ Run the data stages from the repository root. The reports, configs, source, and 
 
 ## Current progress and handoff
 
-D0 through E00.2-D have completed their documented data, protocol, and small-sample diagnostic scopes. E01-A Run `E01-A-20261027-223703` passed after 120 optimizer updates, train diagnostics, Adapter save, and exact reload verification. The next step is independent reload-check and the fixed 20-row Dev Smoke; E01-B training and E00.3 full Dev inference remain unrun. Current evidence and the earlier finalization failure are in [`E01-A 训练可学习性验收报告`](experiments/E01-A_训练可学习性验收报告.md). Earlier E00 evidence and handoff context are in [`docs/experiments/E00_阶段总结与E01交接.md`](experiments/E00_阶段总结与E01交接.md); future experiments remain candidates in [`docs/experiments/后续调优候选与实验决策.md`](experiments/后续调优候选与实验决策.md).
+D0 through E00.2-D have completed their documented data, protocol, and small-sample diagnostic scopes. E01-A Run `E01-A-20261027-223703` passed after 120 optimizer updates, train diagnostics, Adapter save, and exact reload verification. Its standalone reload-check also passed; the fixed 20-row Dev Smoke is the next step. E01-B training and E00.3 full Dev inference remain unrun. Current evidence and the earlier finalization failure are in [`E01-A 训练可学习性验收报告`](experiments/E01-A_训练可学习性验收报告.md). Earlier E00 evidence and handoff context are in [`docs/experiments/E00_阶段总结与E01交接.md`](experiments/E00_阶段总结与E01交接.md); future experiments remain candidates in [`docs/experiments/后续调优候选与实验决策.md`](experiments/后续调优候选与实验决策.md).
 
 The team Git branch, PR review, merge, and `main` protection process is documented in [`docs/knowledge/双人Git协作与PR操作规范.md`](knowledge/双人Git协作与PR操作规范.md). `.github/workflows/ci.yml` runs `unit-cpu` on every branch push and PR to `main`; configure Required Checks only after confirming the exact successful check name in GitHub.
 
@@ -273,10 +273,11 @@ python -m src.training.training_sft \
 
 python scripts/e01_evaluate.py \
   --run-root outputs/training/E01-A-<run-id> \
-  --scope train-and-dev-smoke
+  --scope train-and-dev-smoke \
+  --attempt-id "dev-smoke-$(date +%Y%m%d-%H%M%S)"
 ```
 
-Raw training generations, predictions, runner reports, and scores stay under ignored `outputs/training/`. Do not commit those artifacts or use E01-A training fit as Dev generalization evidence. Review [`E01-A 训练可学习性验收报告`](experiments/E01-A_训练可学习性验收报告.md) before setting E01-B's Epoch/Steps, resource budget, and explicit start decision.
+The evaluation attempt writes to `outputs/training/E01-A-<run-id>/evaluation/dev_smoke/<attempt-id>/`. It records a `running` `run_manifest.json` before launching inference and updates it with inference/scoring status. A new attempt ID gives each retry an independent output directory; the CLI also generates a unique ID if `--attempt-id` is omitted. Raw training generations, predictions, runner reports, and scores stay under ignored `outputs/training/`. Do not commit those artifacts or use E01-A training fit as Dev generalization evidence. Review [`E01-A 训练可学习性验收报告`](experiments/E01-A_训练可学习性验收报告.md) before setting E01-B's Epoch/Steps, resource budget, and explicit start decision.
 
 ## Regression suite
 
