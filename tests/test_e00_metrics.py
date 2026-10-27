@@ -429,4 +429,3 @@ def test_score_rejects_leaked_target_even_when_all_hashes_are_consistent(tmp_pat
     run_path.write_text(json.dumps(run, indent=2) + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="可能泄漏真值"):
         score_files(config=config, config_sha256=config_sha, references_path=fixture_dir / "references.jsonl", submission_path=fixture_dir / "submission.jsonl", raw_path=None, output_dir=fixture_dir / "bad")
-

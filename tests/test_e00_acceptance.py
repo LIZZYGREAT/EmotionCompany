@@ -54,4 +54,3 @@ def test_mock_acceptance_cli_builds_and_scores_an_explicit_synthetic_fixture(tmp
     assert metrics["response"]["bert_score"]["f1"] is None
     assert "0.750000" in report
     assert "not_run" in report
-

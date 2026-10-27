@@ -78,6 +78,15 @@ git push -u origin task-branch-name
 
 可按仓库模板 `.github/PULL_REQUEST_TEMPLATE.md` 填写，避免遗漏验证和风险信息。
 
+## 首次 CI 与 `main` 保护验收
+
+1. 从最新 `main` 创建任务分支并推送。`.github/workflows/ci.yml` 会在每次分支 push 后运行 `unit-cpu`；发起目标为 `main` 的 PR 时也会运行该检查。每次 push 的运行会各自保留，不会因后续 push 而取消。
+2. 等待 GitHub Actions 中该 PR 的 `unit-cpu` 检查完成。先在真实 PR 上确认工作流成功，并记下 GitHub Checks 显示的准确检查名；本地 pytest 通过不能替代这一步。
+3. 管理员再为 `main` 启用 Ruleset：要求 PR、至少 1 位队友批准、上述准确名称的 CI 检查成功，并禁止删除和强推。审批后有新提交时要求重新审批，合并使用 Squash。
+4. 确认规则确实阻止未获批准或 CI 未通过的 PR，并允许已获队友批准且 CI 通过的 PR 合并。不要为了完成验收而合并未经队友审查的 PR。
+
+`unit-cpu` 只验证 CPU 合成回归和代码检查；它不验证 GPU、原始数据、模型权重或真实训练/推理环境。
+
 审查者应实际检查差异、行为和风险，指出需要修改的内容并确认已解决。新的提交使旧审批失效时，由另一位队友重新审查。
 
 ## 合并与收尾
