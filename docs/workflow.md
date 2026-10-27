@@ -235,25 +235,35 @@ python -m src.training.training_sft \
   --run-id "E01-A-preflight-$(date +%Y%m%d-%H%M%S)"
 ```
 
-The preflight checks the D0.3/D0.4.3 manifests and hashes, SFT counts and Labels, P0/Tokenizer fingerprints, local Base aggregate SHA, CUDA/BF16 visibility, and the deterministic Train-only sample selection. It writes `outputs/training/<run-id>/preflight.json` and `manifest.json`. If CUDA/BF16 is unavailable, the status is explicitly blocked and no GPU work should start.
+The preflight checks the D0.3/D0.4.3 manifests and hashes, SFT counts and Labels, P0/Tokenizer fingerprints, local Base aggregate SHA, CUDA/BF16 visibility, and the deterministic Train-only sample selection. It writes `outputs/training/<run-id>/preflight.json` and `manifest.json`. If CUDA/BF16 is unavailable, the status is explicitly blocked and no GPU work should start. Preflight may return exit code 0 for a blocked status, so inspect the JSON and proceed only when `status` is `passed`.
 
 After a fresh preflight passes, prove one real TRL optimizer update using an independent Run ID. Only a passing `step_proof.json` can gate Micro-overfit:
 
 ```bash
 STEP_RUN_ID="E01-STEP-$(date +%Y%m%d-%H%M%S)"
-python -m src.training.training_sft \
+STEP_PROOF="outputs/training/$STEP_RUN_ID/step_proof.json"
+A_RUN_ID="E01-A-$(date +%Y%m%d-%H%M%S)"
+if python -m src.training.training_sft \
   --config configs/training/e01_a.yaml \
   --mode one-step \
-  --run-id "$STEP_RUN_ID"
-
-python -m src.training.training_sft \
-  --config configs/training/e01_a.yaml \
-  --mode train \
-  --run-id "E01-A-$(date +%Y%m%d-%H%M%S)" \
-  --one-step-proof "outputs/training/$STEP_RUN_ID/step_proof.json"
+  --run-id "$STEP_RUN_ID"; then
+  if [ -s "$STEP_PROOF" ] && python -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1]))["status"] == "passed" else 1)' "$STEP_PROOF"; then
+    python -m src.training.training_sft \
+      --config configs/training/e01_a.yaml \
+      --mode train \
+      --run-id "$A_RUN_ID" \
+      --one-step-proof "$STEP_PROOF"
+  else
+    echo "one-step proof missing or not passed; train was not started" >&2
+    false
+  fi
+else
+  echo "one-step failed; train was not started" >&2
+  false
+fi
 ```
 
-The train mode starts a new Base + LoRA initialization, records optimizer-step losses/gradients/parameter updates, and runs Train-fitting diagnostics without placing Gold in generation prompts. It saves only this Run's Adapter and Adapter snapshots. A fixed Greedy probe is generated before release and after Base + Adapter reload; both Token IDs and Base SHA are checked. Afterward run the separate reload verifier and fixed 20-row E00.1 Smoke scorer:
+The train mode starts a new Base + LoRA initialization, records optimizer-step losses/gradients/parameter updates, and runs Train-fitting diagnostics without placing Gold in generation prompts. It saves only this Run's Adapter and Adapter snapshots. A fixed Greedy probe is generated before release and after Base + Adapter reload; both Token IDs and Base SHA are checked. Run train only after `one-step` exits successfully and its `step_proof.json` has `status: passed`; an interactive shell can continue to the next pasted command after a failed command. Afterward run the separate reload verifier and fixed 20-row E00.1 Smoke scorer:
 
 ```bash
 python -m src.training.training_sft \
