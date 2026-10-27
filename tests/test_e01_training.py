@@ -84,6 +84,15 @@ def test_e01_training_enables_nf4_runtime_inspection():
         training._training_quantization_inspection_config(invalid)
 
 
+def test_e01_trainer_path_facts_are_snapshotted_before_release():
+    trainer = SimpleNamespace(e01_data_path_facts={"labels_equal": True, "packing": False})
+    facts = training._snapshot_trainer_data_path_facts(trainer)
+    del trainer
+    assert facts == {"labels_equal": True, "packing": False}
+    with pytest.raises(RuntimeError, match="data path evidence is missing"):
+        training._snapshot_trainer_data_path_facts(SimpleNamespace())
+
+
 def test_e01_selection_is_stable_covers_labels_and_uses_unique_train_conversations():
     sft, normalized = _selected_fixture_rows()
     selected = training.deterministic_select_samples(sft, normalized, count=8)

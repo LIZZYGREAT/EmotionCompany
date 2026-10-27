@@ -647,6 +647,13 @@ def _build_sft_trainer(
     return trainer
 
 
+def _snapshot_trainer_data_path_facts(trainer: Any) -> dict[str, Any]:
+    facts = getattr(trainer, "e01_data_path_facts", None)
+    if not isinstance(facts, dict):
+        raise RuntimeError("SFTTrainer data path evidence is missing")
+    return dict(facts)
+
+
 def _optimizer_evidence_callback(
     model: Any,
     trainable: list[tuple[str, Any]],
@@ -1066,6 +1073,7 @@ def execute_one_step(config: dict[str, Any], config_path: Path, run_id: str) -> 
             model, tokenizer, sample_rows, collator, config, max_steps=1,
             callback=callback, run_root=run_root,
         )
+        trainer_data_path_facts = _snapshot_trainer_data_path_facts(trainer)
         trainer.train(resume_from_checkpoint=None)
         if len(callback.steps) != 1:
             raise RuntimeError(f"expected one real optimizer update, observed {len(callback.steps)}")
@@ -1092,7 +1100,7 @@ def execute_one_step(config: dict[str, Any], config_path: Path, run_id: str) -> 
             "base_weight_sha256": base_identity["observed_weight_hash"],
             "base_weights_unchanged": True,
             "model_facts": model_facts,
-            "trainer_data_path": trainer.e01_data_path_facts,
+            "trainer_data_path": trainer_data_path_facts,
             "adapter_identity": adapter_facts,
             "optimizer_step_seconds": proof["optimizer_step_seconds"],
             "cuda_memory": proof["cuda_memory"],
@@ -1157,6 +1165,7 @@ def execute_training(config: dict[str, Any], config_path: Path, run_id: str, ste
             SFTDataCollator(tokenizer.pad_token_id, max_sequence_length=int(config["protocol"]["max_train_seq_length"])),
             config, max_steps=max_steps, callback=callback, run_root=run_root,
         )
+        trainer_data_path_facts = _snapshot_trainer_data_path_facts(trainer)
         probe_prompt = _make_probe_prompt(samples, tokenizer, prompt, int(config["protocol"]["max_prompt_tokens"]))
         probe_token_budget = int(config["evaluation"]["probe_max_new_tokens"])
         trainer.train(resume_from_checkpoint=None)
@@ -1176,7 +1185,7 @@ def execute_training(config: dict[str, Any], config_path: Path, run_id: str, ste
         adapter_dir = run_root / "adapter"
         adapter_facts = _save_adapter(model, adapter_dir, config)
         base_before = inference._weight_identity(base_path, {"model_id": config["base_model"]["model_id"], "model_revision": config["base_model"].get("revision")})
-        del trainer, model
+        del trainer, model, callback, trainable
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         reloaded, torch, reload_model_facts = _load_train_model(config, base_path, adapter_path=adapter_dir)
@@ -1209,7 +1218,7 @@ def execute_training(config: dict[str, Any], config_path: Path, run_id: str, ste
             base_weight_sha256=base_after.get("observed_weight_hash"),
             adapter_identity=adapter_facts,
             selected_samples_sha256=canonical_sha256(selected_metadata),
-            trainer_data_path=trainer.e01_data_path_facts,
+            trainer_data_path=trainer_data_path_facts,
             optimizer_steps=len(log_rows),
             fit_status=fit_status,
             initial_generation_metrics=pre_metrics,
