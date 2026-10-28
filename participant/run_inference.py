@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import re
 import statistics
 import sys
@@ -17,6 +18,7 @@ import time
 import uuid
 import urllib.error
 import urllib.request
+from contextlib import ExitStack
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -605,9 +607,10 @@ def resolve_raw_output_path(result_dir: Path, submission_path: Path) -> Path | N
     outputs_root = (WORKSPACE_ROOT / "outputs").resolve()
     if not raw_path.is_relative_to(outputs_root):
         raise ValueError(f"原始生成文本只能写入 outputs/ 下: {raw_path}")
-    if raw_path in {submission_path.resolve(), (result_dir / "performance_report.json").resolve()}:
+    if raw_path in {submission_path.resolve(), (result_dir / "performance_report.json").resolve(), (result_dir / "run_progress.json").resolve()}:
         raise ValueError("原始诊断路径不得覆盖官方提交或性能报告")
-    if raw_path.exists():
+    resume_enabled = os.environ.get("EVALUATION_RESUME", "").strip().lower() in {"1", "true", "yes"}
+    if raw_path.exists() and not resume_enabled:
         raise FileExistsError(f"原始诊断输出已存在，拒绝覆盖: {raw_path}")
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     return raw_path
@@ -629,6 +632,123 @@ def _write_jsonl_atomic(path: Path, rows: list[dict[str, Any]]) -> None:
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
+
+
+def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _read_jsonl_for_resume(path: Path) -> tuple[list[dict[str, Any]], list[bytes]]:
+    if not path.is_file():
+        return [], []
+    rows: list[dict[str, Any]] = []
+    complete_lines: list[bytes] = []
+    with path.open("rb") as handle:
+        for raw_line in handle:
+            if not raw_line.endswith(b"\n"):
+                break
+            try:
+                row = json.loads(raw_line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                break
+            if not isinstance(row, dict):
+                break
+            rows.append(row)
+            complete_lines.append(raw_line)
+    return rows, complete_lines
+
+
+def _prepare_resume_prefix(
+    *,
+    result_dir: Path,
+    submission_path: Path,
+    raw_path: Path | None,
+    samples: list[dict[str, Any]],
+    test_file: Path,
+    config: dict[str, Any],
+    run_id: str,
+    experiment_id: str,
+) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    if raw_path is None:
+        raise ValueError("可恢复评测必须启用 EVALUATION_RAW_OUTPUT_PATH")
+    report_path = result_dir / "performance_report.json"
+    if report_path.exists():
+        raise FileExistsError("性能报告已存在；完成的推理 Run 不可 resume 或覆盖")
+    progress_path = result_dir / "run_progress.json"
+    effective_config_sha = hashlib.sha256(
+        json.dumps(config, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    identity = {
+        "run_id": run_id,
+        "experiment_id": experiment_id,
+        "test_file_sha256": sha256(test_file),
+        "effective_config_sha256": effective_config_sha,
+        "sample_count": len(samples),
+        "sample_ids_sha256": hashlib.sha256(
+            "\n".join(sample["id"] for sample in samples).encode("utf-8")
+        ).hexdigest(),
+        "raw_output_path": str(raw_path.resolve()),
+    }
+    if progress_path.is_file():
+        progress = json.loads(progress_path.read_text(encoding="utf-8"))
+        if any(progress.get(key) != value for key, value in identity.items()):
+            raise ValueError("resume input, model config, Run ID, or output path differs from the interrupted Run")
+        completed = progress.get("completed_samples")
+        if not isinstance(completed, int) or isinstance(completed, bool) or not 0 <= completed <= len(samples):
+            raise ValueError("resume progress has an invalid completed_samples count")
+    else:
+        if any(path.exists() and path.stat().st_size for path in (submission_path, raw_path)):
+            raise FileExistsError("existing prediction files have no resumable progress record; refusing to overwrite")
+        completed = 0
+        progress = {**identity, "status": "running", "completed_samples": 0}
+
+    submissions, submission_lines = _read_jsonl_for_resume(submission_path)
+    raw_rows, raw_lines = _read_jsonl_for_resume(raw_path)
+    if len(submissions) < completed or len(raw_rows) < completed:
+        raise ValueError("resumable prediction files are shorter than the last committed progress record")
+    expected_ids = [sample["id"] for sample in samples[:completed]]
+    if [row.get("id") for row in submissions[:completed]] != expected_ids:
+        raise ValueError("resumable Submission IDs do not match the committed input prefix")
+    if [row.get("id") for row in raw_rows[:completed]] != expected_ids:
+        raise ValueError("resumable Raw IDs do not match the committed input prefix")
+    if len(submission_lines) < completed or len(raw_lines) < completed:
+        raise ValueError("resumable prediction JSONL has a corrupt committed prefix")
+    submission_bytes = b"".join(submission_lines[:completed])
+    raw_bytes = b"".join(raw_lines[:completed])
+    for key, data in (("submission_prefix_sha256", submission_bytes), ("raw_prefix_sha256", raw_bytes)):
+        if completed and progress.get(key) != hashlib.sha256(data).hexdigest():
+            raise ValueError("committed resume prediction prefix hash changed")
+        progress[key] = hashlib.sha256(data).hexdigest()
+    # A crash between the two file appends may leave one file ahead; trim both to
+    # the last atomic progress record before continuing.
+    submission_path.write_bytes(submission_bytes)
+    raw_path.write_bytes(raw_bytes)
+    progress.update(status="running", attempt=int(progress.get("attempt", 0)) + 1, updated_at_epoch_seconds=time.time())
+    _write_json_atomic(progress_path, progress)
+    return completed, submissions[:completed], raw_rows[:completed], progress
+
+
+def _bind_resume_runtime(progress_path: Path, progress: dict[str, Any], backend_report: dict[str, Any], tokenizer_facts: dict[str, Any]) -> dict[str, Any]:
+    runtime = {
+        "base_weight_sha256": backend_report.get("model_weight_identity", {}).get("observed_weight_hash"),
+        "adapter_identity": backend_report.get("adapter_identity", {"enabled": False}),
+        "tokenizer_signature_sha256": tokenizer_facts.get("signature_sha256"),
+        "template_sha256": tokenizer_facts.get("template_sha256"),
+        "runtime_environment": backend_report.get("runtime_environment"),
+    }
+    if progress.get("runtime_identity") is not None and progress["runtime_identity"] != runtime:
+        raise ValueError("actual Base/Adapter/Tokenizer identity changed since the interrupted inference")
+    progress["runtime_identity"] = runtime
+    _write_json_atomic(progress_path, progress)
+    return progress
 
 
 def model_path(config: dict[str, Any]) -> Path:
@@ -1117,9 +1237,31 @@ def main() -> None:
     configuration_provenance = run_configuration_provenance()
     run_id = os.environ.get("EVALUATION_RUN_ID", "").strip() or uuid.uuid4().hex
     experiment_id = os.environ.get("EVALUATION_EXPERIMENT_ID", config.get("experiment_id", "unspecified"))
+    resume_value = os.environ.get("EVALUATION_RESUME", "").strip().lower()
+    if resume_value not in {"", "0", "false", "no", "1", "true", "yes"}:
+        raise ValueError("EVALUATION_RESUME must be true or false")
+    resume_mode = resume_value in {"1", "true", "yes"}
     backend = config["backend"]
     samples = read_jsonl(test_file)
+    completed_samples = 0
+    previous_submission_rows: list[dict[str, Any]] = []
+    previous_raw_rows: list[dict[str, Any]] = []
+    resume_identity: dict[str, Any] | None = None
+    progress_path = result_dir / "run_progress.json"
+    if resume_mode:
+        completed_samples, previous_submission_rows, previous_raw_rows, resume_identity = _prepare_resume_prefix(
+            result_dir=result_dir,
+            submission_path=submission_path,
+            raw_path=raw_output_path,
+            samples=samples,
+            test_file=test_file,
+            config=config,
+            run_id=run_id,
+            experiment_id=experiment_id,
+        )
     prompt_text, submission_schema, enums, prompt_facts = load_runtime_protocol(config)
+    for row in previous_submission_rows:
+        validate_submission_prediction(row, submission_schema)
     context = config["context"]
     prompt_cap = context["max_prompt_tokens"]
     generation = dict(config["generation"])
@@ -1159,6 +1301,8 @@ def main() -> None:
         )
         tokenizer, tokenizer_facts = load_runtime_tokenizer(config, local_model)
         weight_identity = _weight_identity(local_model, config)
+        if config.get("expected_weight_sha256") is not None and weight_identity.get("observed_weight_hash") != config["expected_weight_sha256"]:
+            raise RuntimeError("observed Base weights differ from the frozen evaluation identity")
         adapter_config = validate_adapter_config(config.get("adapter"), backend)
         adapter_identity = {"enabled": False, "status": "not_enabled"}
         if adapter_config["enabled"]:
@@ -1231,6 +1375,12 @@ def main() -> None:
             "model_type": model_config.model_type,
             "model_loader": model_loader.__name__,
             "model_weight_identity": weight_identity,
+            "runtime_environment": {
+                "python": sys.version.split()[0], "platform": platform.platform(),
+                "torch": getattr(torch, "__version__", None),
+                "cuda_version": getattr(getattr(torch, "version", None), "cuda", None),
+                "cuda_devices": [torch.cuda.get_device_name(index) for index in range(torch.cuda.device_count())] if torch.cuda.is_available() else [],
+            },
             "adapter_identity": adapter_identity,
             "quantization": quantization_facts,
             "model_load_seconds": round(model_load_seconds, 6),
@@ -1264,19 +1414,45 @@ def main() -> None:
             "template_equivalence": "BLOCKED_NOT_RUN_exact_server_token_ids_not_observable",
         }
 
-    latencies: list[float] = []
-    prediction_count = 0
-    parse_failure_ids: list[str] = []
-    invalid_label_ids: list[str] = []
-    prompt_overflow_ids: list[str] = []
-    template_equivalence_failure_ids: list[str] = []
-    server_prompt_token_mismatch_ids: list[str] = []
-    sample_diagnostics: list[dict[str, Any]] = []
-    statuses: list[str] = []
-    raw_predictions: list[dict[str, Any]] = []
-
-    with submission_path.open("w", encoding="utf-8", newline="\n") as submission_handle:
-        for index, sample in enumerate(samples, 1):
+    if resume_mode and resume_identity is not None:
+        resume_identity = _bind_resume_runtime(progress_path, resume_identity, backend_report, tokenizer_facts)
+    latencies: list[float] = [
+        float(row["latency_ms"])
+        for index, row in enumerate(previous_raw_rows, 1)
+        if index <= int(config["performance_rounds"])
+        and isinstance(row.get("latency_ms"), (int, float))
+        and not isinstance(row.get("latency_ms"), bool)
+    ]
+    prediction_count = completed_samples
+    parse_failure_ids = [row["id"] for row in previous_raw_rows if row.get("status") == "parse_failure"]
+    invalid_label_ids = [row["id"] for row in previous_raw_rows if row.get("status") == "invalid_label"]
+    prompt_overflow_ids = [row["id"] for row in previous_raw_rows if row.get("status") == "prompt_floor_exceeds_cap"]
+    template_equivalence_failure_ids = [row["id"] for row in previous_raw_rows if row.get("status") == "template_equivalence_failure"]
+    server_prompt_token_mismatch_ids = [row["id"] for row in previous_raw_rows if row.get("status") == "server_prompt_token_mismatch"]
+    sample_diagnostics: list[dict[str, Any]] = [{
+        "id": row["id"],
+        "status": row.get("status"),
+        "client_prompt_tokens": row.get("prompt_tokens"),
+        "prompt_cap": prompt_cap,
+        "original_history_messages": len(samples[index]["history"]),
+        "retained_history_messages": len(samples[index]["history"]) - int(row.get("removed_history_messages", 0)),
+        "removed_history_messages": row.get("removed_history_messages", 0),
+        "generated_tokens": row.get("generated_tokens"),
+        "stop_reason": row.get("stop_reason"),
+        "sampling_seed": None,
+        "is_first_sample_cold_start": index == 0 and backend == "transformers",
+        "server_prompt_tokens": None,
+        "server_completion_tokens": None,
+    } for index, row in enumerate(previous_raw_rows)]
+    statuses: list[str] = [str(row.get("status", "unknown")) for row in previous_raw_rows]
+    raw_predictions: list[dict[str, Any]] = list(previous_raw_rows)
+    submission_mode = "a" if resume_mode else "w"
+    submission_digest = hashlib.sha256(submission_path.read_bytes() if resume_mode else b"")
+    raw_digest = hashlib.sha256(raw_output_path.read_bytes() if resume_mode and raw_output_path else b"")
+    with ExitStack() as streams:
+        submission_handle = streams.enter_context(submission_path.open(submission_mode, encoding="utf-8", newline="\n"))
+        raw_handle_context = streams.enter_context(raw_output_path.open("a", encoding="utf-8", newline="\n")) if resume_mode and raw_output_path else None
+        for index, sample in enumerate(samples[completed_samples:], completed_samples + 1):
             if backend == "transformers":
                 synchronize(torch)
             started = time.perf_counter()
@@ -1333,11 +1509,15 @@ def main() -> None:
                         else:
                             can_parse_output = True
                 except TemplateEquivalenceError:
+                    if resume_mode:
+                        raise
                     prediction = empty_prediction(sample["id"], enums)
                     status = "template_equivalence_failure"
                     template_equivalence_failure_ids.append(sample["id"])
                     stop_reason = "not_generated_template_equivalence_failure"
                 except Exception as exc:
+                    if resume_mode:
+                        raise
                     prediction = empty_prediction(sample["id"], enums)
                     status = "generation_failure"
                     error_type = type(exc).__name__
@@ -1371,12 +1551,13 @@ def main() -> None:
                 "generated_tokens": generated_tokens,
                 "stop_reason": stop_reason,
                 "sampling_seed": sampling_seed,
-                "is_first_sample_cold_start": index == 1 and backend == "transformers",
+                "is_first_sample_cold_start": index == completed_samples + 1 and backend == "transformers",
                 "server_prompt_tokens": server_details.get("server_prompt_tokens"),
                 "server_completion_tokens": server_details.get("server_completion_tokens"),
             })
+            raw_record = None
             if raw_output_path is not None:
-                raw_predictions.append({
+                raw_record = {
                     "id": sample["id"],
                     "raw_text": raw_text,
                     "status": status,
@@ -1387,14 +1568,36 @@ def main() -> None:
                     "removed_history_messages": removed_messages,
                     "backend": backend,
                     "error_type": error_type,
+                }
+                raw_predictions.append(raw_record)
+            submission_line = json.dumps(prediction, ensure_ascii=False, separators=(",", ":")) + "\n"
+            submission_handle.write(submission_line)
+            if resume_mode:
+                submission_handle.flush()
+                os.fsync(submission_handle.fileno())
+                if raw_handle_context is None or raw_record is None or resume_identity is None:
+                    raise RuntimeError("resumable inference lost its Raw output stream or identity")
+                raw_line = json.dumps(raw_record, ensure_ascii=False, separators=(",", ":")) + "\n"
+                raw_handle_context.write(raw_line)
+                raw_handle_context.flush()
+                os.fsync(raw_handle_context.fileno())
+                submission_digest.update(submission_line.encode("utf-8"))
+                raw_digest.update(raw_line.encode("utf-8"))
+                _write_json_atomic(progress_path, {
+                    **resume_identity,
+                    "status": "running",
+                    "completed_samples": index,
+                    "last_completed_id": sample["id"],
+                    "submission_prefix_sha256": submission_digest.hexdigest(),
+                    "raw_prefix_sha256": raw_digest.hexdigest(),
+                    "updated_at_epoch_seconds": time.time(),
                 })
-            submission_handle.write(json.dumps(prediction, ensure_ascii=False, separators=(",", ":")) + "\n")
             print(f"[{index}/{len(samples)}] {sample['id']}: {elapsed_ms:.3f} ms ({status})", flush=True)
 
     if prediction_count != len(samples):
         raise RuntimeError(f"提交行数不守恒: input={len(samples)}, output={prediction_count}")
 
-    if raw_output_path is not None:
+    if raw_output_path is not None and not resume_mode:
         _write_jsonl_atomic(raw_output_path, raw_predictions)
 
     report = {
@@ -1404,7 +1607,8 @@ def main() -> None:
         "run_id": run_id,
         "experiment_id": experiment_id,
         "configuration": configuration_provenance,
-        "complete": len(latencies) == config["performance_rounds"],
+        "complete": len(latencies) == config["performance_rounds"] and completed_samples == 0,
+        "resumption": {"enabled": resume_mode, "reused_samples": completed_samples, "attempt": (resume_identity or {}).get("attempt", 1), "performance_is_single_uninterrupted_run": completed_samples == 0},
         "required_rounds": config["performance_rounds"],
         "rounds": len(latencies),
         "average_latency_ms": round(statistics.fmean(latencies), 6),
@@ -1489,7 +1693,16 @@ def main() -> None:
         },
         "sample_diagnostics": sample_diagnostics,
     }
-    (result_dir / "performance_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _write_json_atomic(result_dir / "performance_report.json", report)
+    if resume_mode and resume_identity is not None:
+        _write_json_atomic(progress_path, {
+            **resume_identity,
+            "status": "complete",
+            "completed_samples": len(samples),
+            "submission_prefix_sha256": submission_digest.hexdigest(),
+            "raw_prefix_sha256": raw_digest.hexdigest(),
+            "updated_at_epoch_seconds": time.time(),
+        })
     print(f"PASS: {submission_path}")
     print(f"PASS: {result_dir / 'performance_report.json'}")
 

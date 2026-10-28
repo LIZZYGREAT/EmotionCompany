@@ -44,6 +44,7 @@ jobs:
         run: |
           python -m compileall -q src scripts participant tests
           bash -n participant/start.sh
+          bash -n scripts/e01_b_pilot.sh
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
             git diff --check "$PR_BASE_SHA...$PR_HEAD_SHA"
           elif [[ "$BEFORE_SHA" =~ ^0+$ ]]; then
@@ -60,5 +61,7 @@ jobs:
             tests/test_data_pipeline.py \
             tests/test_e00_metrics.py \
             tests/test_e00_runner.py \
+            tests/test_inference_resume.py \
+            tests/test_e01_b_evaluate.py \
             tests/test_e00_2_diagnose.py \
             tests/test_e00_2_emotion_diag.py
