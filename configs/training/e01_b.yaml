@@ -1,6 +1,8 @@
 version: E01-training-v1
 experiment_id: E01-B
 status: draft_manual_gate
+training_scope: full_train
+approval: null
 
 base_model:
   model_id: Qwen/Qwen3-1.7B
@@ -58,23 +60,35 @@ lora:
 optimizer:
   name: AdamW
   learning_rate: null
+  lr_scheduler: constant
+  warmup_steps: 0
   weight_decay: null
 
 training:
   seed: 42
   per_device_micro_batch_size: 1
+  per_device_eval_batch_size: 1
   gradient_accumulation_steps: 4
   max_optimizer_steps: null
   epochs: null
   save_interval_steps: null
+  save_total_limit: 2
   gradient_checkpointing: true
   evaluation_interval_steps: null
+  parameter_check_interval_steps: 20
+  max_training_seconds: null
+  min_free_disk_gb: 2
+  checkpointing: true
+  train_sampling_strategy: random
   sample_selection: null
-  execution_gate: manual_approval_after_E01_A_report
+  execution_gate: manual_approval_after_pilot_report
 
 evaluation:
   max_new_tokens: 1200
+  probe_max_new_tokens: 64
   do_sample: false
   full_dev_generation_rows: 1833
   sft_dev_loss_rows: 1821
   full_dev_base_paired_comparison: not_run
+  bert_score: not_run
+  formal_performance: not_run

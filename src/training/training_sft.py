@@ -8,6 +8,7 @@ Adapter or Trainer checkpoint for the E01-A baseline.
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import importlib.metadata
 import json
@@ -16,6 +17,7 @@ import os
 import platform
 import random
 import re
+import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -50,6 +52,11 @@ def canonical_sha256(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def approved_config_sha256(config: dict[str, Any]) -> str:
+    """Hash the frozen training payload; the approval receipt is stored separately."""
+    return canonical_sha256({key: value for key, value in config.items() if key != "approval"})
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -76,22 +83,46 @@ def load_config(config_path: str | Path) -> tuple[dict[str, Any], Path]:
     required = {"experiment_id", "status", "base_model", "data", "protocol", "quantization", "lora", "optimizer", "training", "evaluation"}
     if not required <= set(config):
         raise ValueError(f"训练配置缺少字段: {sorted(required - set(config))}")
-    if config["experiment_id"] not in {"E01-A", "E01-B"}:
-        raise ValueError("experiment_id 只允许 E01-A 或 E01-B")
+    if config["experiment_id"] not in {"E01-A", "E01-B", "E01-B-PILOT"}:
+        raise ValueError("experiment_id 只允许 E01-A、E01-B 或 E01-B-PILOT")
     if config["data"].get("init_adapter") is not None or config["data"].get("resume_from_checkpoint") is not None:
         raise ValueError("E01 baseline 必须从 Base + 新 LoRA 初始化；init_adapter/resume_from_checkpoint 必须为空")
     if config["data"].get("split") != "train":
         raise ValueError("QLoRA 更新数据必须限定为 D0.4.3 Train")
+    if not _resolve(config["data"]["output_root"]).is_relative_to((PROJECT_ROOT / "outputs/training").resolve()):
+        raise ValueError("training CLI output_root must remain under outputs/training, separate from Base weights")
     if config["protocol"].get("packing") is not False or config["protocol"].get("padding_free") is not False:
         raise ValueError("E01 必须沿用 D0.4.3 packing=false、padding_free=false")
-    if config["experiment_id"] == "E01-B" and config.get("status") != "draft_manual_gate":
-        raise ValueError("E01-B 配置必须保持 draft_manual_gate，不能自动启动")
+    if config["experiment_id"] == "E01-B":
+        if config.get("status") not in {"draft_manual_gate", "approved_for_full_training"} or config.get("training_scope") != "full_train":
+            raise ValueError("E01-B Full requires full_train and an explicit draft/approval status")
+        if config.get("status") == "approved_for_full_training":
+            approval = config.get("approval") or {}
+            if (
+                approval.get("scope") != "E01-B-FULL"
+                or not approval.get("approved_by")
+                or not approval.get("approved_at_utc")
+                or approval.get("config_sha256") != approved_config_sha256(config)
+            ):
+                raise ValueError("Full B approval receipt is missing or does not match the frozen config hash")
+    if config["experiment_id"] == "E01-B-PILOT" and (
+        config.get("status") != "ready_for_pilot" or config.get("training_scope") != "pilot"
+    ):
+        raise ValueError("E01-B-PILOT 配置必须保持 pilot / ready_for_pilot")
     return config, resolved
 
 
-def validate_training_mode(config: dict[str, Any], mode: str) -> None:
+def validate_training_mode(config: dict[str, Any], mode: str, *, allow_full_training: bool = False) -> None:
     if config["experiment_id"] == "E01-B" and mode != "preflight":
-        raise ValueError("E01-B 仍是待审批草案；当前入口只允许 preflight，禁止启动全量训练")
+        if config.get("status") != "approved_for_full_training" or not allow_full_training:
+            raise ValueError("E01-B 尚未获人工批准或缺少 --allow-full-training；禁止启动全量训练")
+        approval = config.get("approval") or {}
+        if approval.get("config_sha256") != approved_config_sha256(config):
+            raise ValueError("Full B approval does not match this configuration")
+        if mode not in {"train", "resume", "reload-check"}:
+            raise ValueError("Full B supports preflight, train, resume and reload-check only")
+    if config["experiment_id"] == "E01-B-PILOT" and mode not in {"preflight", "train", "resume", "reload-check"}:
+        raise ValueError("E01-B-PILOT supports preflight, train, resume and reload-check")
     if config["experiment_id"] == "E01-A" and config.get("status") != "ready_for_e01_a":
         raise ValueError("E01-A 配置 status 必须为 ready_for_e01_a")
 
@@ -114,11 +145,16 @@ def _count_jsonl(path: Path) -> int:
     return count
 
 
-def validate_train_row(row: dict[str, Any], *, expected_eos_token_id: int | None = None) -> None:
+def validate_train_row(
+    row: dict[str, Any], *, expected_eos_token_id: int | None = None, expected_split: str = "train"
+) -> None:
     if set(row) != TRAIN_ROW_FIELDS:
         raise ValueError(f"D0.4.3 row fields differ from locked contract: {sorted(row)}")
-    if row.get("source_split") != "train" or not str(row.get("sample_id", "")).startswith("train:"):
-        raise ValueError("Training row is not from the D0.4.3 Train split")
+    if expected_split not in {"train", "dev"}:
+        raise ValueError("expected_split must be train or dev")
+    # Dev is held out from official Train, so its stable D0.3 IDs retain train:.
+    if row.get("source_split") != expected_split or not str(row.get("sample_id", "")).startswith("train:"):
+        raise ValueError(f"Training row is not from the D0.4.3 {expected_split.title()} split")
     input_ids = row.get("input_ids")
     labels = row.get("labels")
     prompt_length = row.get("prompt_length")
@@ -214,6 +250,98 @@ def deterministic_select_samples(
     return selected
 
 
+def deterministic_select_pilot_samples(
+    sft_metadata: list[dict[str, Any]],
+    normalized_metadata: list[dict[str, Any]],
+    *,
+    count: int,
+    seed: int,
+    length_bins: int = 10,
+) -> list[dict[str, Any]]:
+    """Select a reproducible, length-stratified Train subset with label coverage."""
+    if count <= 0 or count > len(sft_metadata):
+        raise ValueError("Pilot sample count must be positive and no larger than effective Train")
+    if length_bins < 2 or length_bins > count:
+        raise ValueError("Pilot length_bins must be between 2 and sample count")
+    source_by_id: dict[str, dict[str, Any]] = {}
+    for row in normalized_metadata:
+        sample_id = row.get("sample_id")
+        if not isinstance(sample_id, str) or sample_id in source_by_id:
+            raise ValueError(f"D0.3 Train sample_id missing or duplicated: {sample_id!r}")
+        source_by_id[sample_id] = row
+
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in sft_metadata:
+        sample_id = row.get("sample_id")
+        if not isinstance(sample_id, str) or sample_id in seen:
+            raise ValueError(f"D0.4.3 Train sample_id missing or duplicated: {sample_id!r}")
+        seen.add(sample_id)
+        source = source_by_id.get(sample_id)
+        if source is None:
+            raise ValueError(f"D0.4.3 Train sample not found in D0.3 Train: {sample_id}")
+        if row.get("source_split") != "train" or row.get("conversation_id") != source.get("conversation_id"):
+            raise ValueError(f"D0.4.3 and D0.3 Train identity differs: {sample_id}")
+        profile = source.get("target", {}).get("user_profile")
+        if not isinstance(profile, dict):
+            raise ValueError(f"D0.3 target profile invalid: {sample_id}")
+        candidates.append({
+            "sample_id": sample_id,
+            "conversation_id": row["conversation_id"],
+            "emotion_label": source.get("target", {}).get("emotion_label"),
+            "profile_empty": all(not profile.get(name) for name in ("personality_traits", "interests", "style")),
+            "prompt_length": int(row.get("prompt_length", 0)),
+            "completion_length": int(row.get("completion_length", 0)),
+            "sequence_length": int(row.get("prompt_length", 0)) + int(row.get("completion_length", 0)),
+        })
+
+    by_id = {row["sample_id"]: row for row in candidates}
+    length_order = sorted(candidates, key=lambda row: (row["sequence_length"], row["sample_id"]))
+    for rank, row in enumerate(length_order):
+        row["length_bin"] = min(length_bins - 1, rank * length_bins // len(length_order))
+
+    def tie_key(row: dict[str, Any]) -> str:
+        return hashlib.sha256(f"{seed}:{row['sample_id']}".encode("utf-8")).hexdigest()
+
+    selected_ids: set[str] = {length_order[0]["sample_id"], length_order[-1]["sample_id"]}
+    for emotion in sorted({row["emotion_label"] for row in candidates if row["emotion_label"] is not None}):
+        selected_ids.add(min(
+            (row for row in candidates if row["emotion_label"] == emotion), key=tie_key
+        )["sample_id"])
+    for empty_value in (True, False):
+        group = [row for row in candidates if row["profile_empty"] is empty_value]
+        if group:
+            selected_ids.add(min(group, key=tie_key)["sample_id"])
+    if len(selected_ids) > count:
+        raise ValueError("Pilot sample count is too small to preserve required label and profile coverage")
+
+    quotas = [count // length_bins + (1 if index < count % length_bins else 0) for index in range(length_bins)]
+    for bin_index, quota in enumerate(quotas):
+        group = [row for row in candidates if row["length_bin"] == bin_index]
+        already = [row for row in group if row["sample_id"] in selected_ids]
+        if len(already) > quota:
+            continue
+        remaining = sorted(
+            (row for row in group if row["sample_id"] not in selected_ids), key=tie_key
+        )
+        selected_ids.update(row["sample_id"] for row in remaining[:quota - len(already)])
+
+    if len(selected_ids) < count:
+        remaining = sorted((row for row in candidates if row["sample_id"] not in selected_ids), key=tie_key)
+        selected_ids.update(row["sample_id"] for row in remaining[:count - len(selected_ids)])
+    if len(selected_ids) != count:
+        raise ValueError(f"Pilot selection count mismatch: expected={count}, actual={len(selected_ids)}")
+    selected = [by_id[sample_id] for sample_id in selected_ids]
+    selected.sort(key=lambda row: (row["length_bin"], tie_key(row)))
+    if len({row["length_bin"] for row in selected}) != length_bins:
+        raise ValueError("Pilot selection does not cover every configured sequence-length decile")
+    if {row["profile_empty"] for row in selected} != {True, False}:
+        raise ValueError("Pilot selection must include empty and non-empty profile targets")
+    if {row["emotion_label"] for row in selected} != {row["emotion_label"] for row in candidates}:
+        raise ValueError("Pilot selection does not cover all Train emotion labels")
+    return selected
+
+
 def _training_rows(config: dict[str, Any]) -> tuple[Path, Path, Path, dict[str, Any]]:
     data = config["data"]
     train_path = _resolve(data["train_path"])
@@ -261,11 +389,42 @@ def _select_real_samples(config: dict[str, Any], train_path: Path, normalized_pa
     normalized_metadata = []
     for row in _iter_jsonl(normalized_path):
         normalized_metadata.append({key: row.get(key) for key in ("sample_id", "conversation_id", "target")})
-    selected = deterministic_select_samples(
-        sft_metadata,
-        normalized_metadata,
-        count=int(config["training"]["sample_selection"]["count"]),
-    )
+    if config["experiment_id"] == "E01-A":
+        selected = deterministic_select_samples(
+            sft_metadata,
+            normalized_metadata,
+            count=int(config["training"]["sample_selection"]["count"]),
+        )
+    elif config["experiment_id"] == "E01-B-PILOT":
+        selection = config["training"]["sample_selection"]
+        if selection.get("method") != "seeded_length_deciles_v1":
+            raise ValueError("E01-B-PILOT requires the seeded_length_deciles_v1 selection algorithm")
+        selected = deterministic_select_pilot_samples(
+            sft_metadata,
+            normalized_metadata,
+            count=int(selection["count"]),
+            seed=int(selection["seed"]),
+            length_bins=int(selection["length_bins"]),
+        )
+    elif config["experiment_id"] == "E01-B":
+        sources = {row["sample_id"]: row for row in normalized_metadata}
+        if len(sources) != len(normalized_metadata):
+            raise ValueError("D0.3 Train contains duplicate sample IDs")
+        selected = []
+        for row in sft_metadata:
+            source = sources.get(row["sample_id"])
+            if source is None or row["source_split"] != "train" or row["conversation_id"] != source["conversation_id"]:
+                raise ValueError("Full B must select every effective Train row from its verified D0.3 Train source")
+            selected.append({
+                **row,
+                "emotion_label": source["target"]["emotion_label"],
+                "profile_empty": all(not values for values in source["target"]["user_profile"].values()),
+                "sequence_length": row["prompt_length"] + row["completion_length"],
+            })
+        if len(selected) != int(config["data"]["expected_train_rows"]) or len({row["sample_id"] for row in selected}) != len(selected):
+            raise ValueError("Full B selection must contain all 16,192 unique effective Train IDs")
+    else:
+        raise ValueError("Unknown training experiment")
     selected_ids = {row["sample_id"] for row in selected}
     selected_sources = {row["sample_id"]: row for row in _iter_jsonl(normalized_path) if row.get("sample_id") in selected_ids}
     selected_encoded = {row["sample_id"]: row for row in _iter_jsonl(train_path) if row.get("sample_id") in selected_ids}
@@ -276,16 +435,41 @@ def _select_real_samples(config: dict[str, Any], train_path: Path, normalized_pa
     for metadata in selected:
         sample_id = metadata["sample_id"]
         encoded = selected_encoded[sample_id]
-        validate_train_row(encoded, expected_eos_token_id=eos)
+        validate_train_row(encoded, expected_eos_token_id=eos, expected_split="train")
         source = selected_sources[sample_id]
         if not isinstance(source.get("history"), list) or not source["history"]:
             raise ValueError(f"selected D0.3 history is invalid: {sample_id}")
         result.append({"selection": metadata, "source": source, "encoded": encoded})
     selected_manifest = [{key: row[key] for key in (
         "sample_id", "conversation_id", "emotion_label", "profile_empty", "prompt_length",
-        "completion_length", "sequence_length",
-    )} for row in selected]
+        "completion_length", "sequence_length", "length_bin",
+    ) if key in row} for row in selected]
     return result, selected_manifest
+
+
+def _select_sft_dev_rows(config: dict[str, Any], dev_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    count = int(config["evaluation"].get("sft_dev_loss_rows", 0))
+    seed = int(config["evaluation"].get("sft_dev_loss_seed", config["training"]["seed"]))
+    candidates = []
+    for row in _iter_jsonl(dev_path):
+        validate_train_row(row, expected_eos_token_id=int(config["protocol"]["eos_token_id"]), expected_split="dev")
+        candidates.append(row)
+    if not candidates:
+        raise ValueError("SFT Dev Loss dataset is empty")
+    if count <= 0 or count > len(candidates):
+        raise ValueError(f"SFT Dev Loss row count must be between 1 and {len(candidates)}")
+    selected = sorted(
+        candidates,
+        key=lambda row: hashlib.sha256(f"{seed}:{row['sample_id']}".encode("utf-8")).hexdigest(),
+    )[:count]
+    facts = {
+        "selection_rule": "sha256_seeded_sample_id_order_v1",
+        "seed": seed,
+        "rows": len(selected),
+        "sample_ids_sha256": canonical_sha256([row["sample_id"] for row in selected]),
+        "labels_are_teacher_forced_eval_only": True,
+    }
+    return selected, facts
 
 
 def _package_versions() -> dict[str, str | None]:
@@ -296,6 +480,10 @@ def _package_versions() -> dict[str, str | None]:
         except importlib.metadata.PackageNotFoundError:
             versions[package] = None
     return versions
+
+
+def _model_file_inventory(base_path: Path) -> list[dict[str, Any]]:
+    return [{"path": path.relative_to(base_path).as_posix(), "size_bytes": path.stat().st_size} for path in sorted(base_path.rglob("*")) if path.is_file()]
 
 
 def _preflight(config: dict[str, Any], *, include_model_hash: bool = True) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -328,10 +516,10 @@ def _preflight(config: dict[str, Any], *, include_model_hash: bool = True) -> tu
         expected_dev = int(config["data"]["expected_dev_rows"])
         if train_count != expected_train or dev_count != expected_dev:
             raise ValueError(f"D0.4.3 counts differ: train={train_count}, dev={dev_count}")
-        if config["experiment_id"] == "E01-A":
-            samples, selected_metadata = _select_real_samples(config, train_path, normalized_path)
-        else:
-            samples, selected_metadata = [], []
+        samples, selected_metadata = _select_real_samples(config, train_path, normalized_path)
+        dev_selection_facts = None
+        if config["experiment_id"] != "E01-A":
+            _dev_rows, dev_selection_facts = _select_sft_dev_rows(config, dev_path)
         p0_path = _resolve(config["protocol"]["prompt_path"])
         p0_hash = sha256_file(p0_path)
         if p0_hash != config["protocol"]["p0_sha256"]:
@@ -340,6 +528,8 @@ def _preflight(config: dict[str, Any], *, include_model_hash: bool = True) -> tu
         if runner_config.get("prompt", {}).get("sha256") != p0_hash:
             raise ValueError("runner P0 fingerprint differs from the locked E01 protocol")
         base_path = _resolve(config["base_model"]["local_path"])
+        if (base_path / "adapter_config.json").exists():
+            raise ValueError("participant/model must contain the original Base, without an Adapter")
         for required_name in ("config.json", "model.safetensors.index.json"):
             if not (base_path / required_name).is_file():
                 raise FileNotFoundError(f"base model missing {required_name}: {base_path}")
@@ -371,6 +561,13 @@ def _preflight(config: dict[str, Any], *, include_model_hash: bool = True) -> tu
             "d043_manifest_sha256": sha256_file(_resolve(config["data"]["sft_manifest"])),
             "selected_samples": selected_metadata,
             "selected_samples_sha256": canonical_sha256(selected_metadata),
+            "training_scope": config.get("training_scope", "micro_overfit"),
+            "selection_algorithm": (
+                config["training"].get("sample_selection", {}).get("method")
+                if config["experiment_id"] == "E01-B-PILOT"
+                else "e01_a_greedy_short_unique_v1" if config["experiment_id"] == "E01-A" else "all_valid_train_in_jsonl_order_v1"
+            ),
+            "sft_dev_loss_selection": dev_selection_facts,
             "only_train_used_for_selection_and_updates": True,
             "dev_loaded_for_training": False,
             "official_val_used": False,
@@ -390,6 +587,7 @@ def _preflight(config: dict[str, Any], *, include_model_hash: bool = True) -> tu
             "revision": config["base_model"].get("revision"),
             "expected_weight_sha256": config["base_model"]["expected_weight_sha256"],
             "identity": model_identity,
+            "file_inventory": _model_file_inventory(base_path),
             "status": "verified" if observed_hash == config["base_model"]["expected_weight_sha256"] else "not_computed",
         }
         checks["output"] = {
@@ -397,6 +595,15 @@ def _preflight(config: dict[str, Any], *, include_model_hash: bool = True) -> tu
             "base_model_is_read_only_source": True,
             "adapter_output_is_separate": True,
         }
+        if config["experiment_id"] != "E01-A":
+            disk_path = _resolve(config["data"]["output_root"])
+            while not disk_path.exists():
+                disk_path = disk_path.parent
+            disk_free = shutil.disk_usage(disk_path).free
+            minimum_free = float(config["training"]["min_free_disk_gb"]) * 1024 ** 3
+            checks["output"].update(available_disk_bytes=disk_free, required_minimum_free_bytes=minimum_free)
+            if disk_free < minimum_free:
+                raise ValueError("insufficient free disk for the configured Trainer checkpoint reserve")
         checks["datasets"] = {"train_rows": train_count, "dev_rows": dev_count}
         # The loaded tokenizer and selected examples are intentionally not serialized.
         del tokenizer, samples
@@ -456,7 +663,7 @@ def _load_train_model(config: dict[str, Any], base_path: Path, *, adapter_path: 
     if not torch.cuda.is_available():
         raise RuntimeError("blocked_gpu_unavailable: CUDA is required for real QLoRA")
     if not torch.cuda.is_bf16_supported():
-        raise RuntimeError("blocked_bf16_unavailable: E01-A requires BF16 CUDA support")
+        raise RuntimeError("blocked_bf16_unavailable: E01 requires BF16 CUDA support")
     quant_cfg = config["quantization"]
     quantization = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -478,6 +685,8 @@ def _load_train_model(config: dict[str, Any], base_path: Path, *, adapter_path: 
         model = PeftModel.from_pretrained(model, str(adapter_path), is_trainable=False, local_files_only=True)
         model.eval()
         facts = inference.inspect_quantization_runtime(model, _training_quantization_inspection_config(config), torch)
+        if not facts.get("real_nf4_verified") or facts.get("offload_devices"):
+            raise RuntimeError("reloaded Adapter failed NF4/BF16/CUDA placement verification")
         return model, torch, facts
     prepare_kwargs: dict[str, Any] = {"use_gradient_checkpointing": bool(config["training"]["gradient_checkpointing"])}
     try:
@@ -556,6 +765,31 @@ def _model_device(model: Any) -> Any:
     return model.get_input_embeddings().weight.device
 
 
+class _TrainingCounters:
+    """Count batches at training_step, after loader prefetch and outside Dev eval."""
+
+    def __init__(self, previous_logs: list[dict[str, Any]] | None = None):
+        logs = previous_logs or []
+        self.samples_seen = sum(int(row.get("samples_seen", 0)) for row in logs)
+        self.input_tokens_seen = sum(int(row.get("input_tokens_seen", 0)) for row in logs)
+        self.completion_tokens_seen = sum(int(row.get("completion_tokens", 0)) for row in logs)
+        self.micro_batches_seen = sum(int(row.get("micro_batches_seen", 0)) for row in logs)
+
+    def record(self, batch: dict[str, Any]) -> None:
+        self.samples_seen += int(batch["input_ids"].shape[0])
+        self.input_tokens_seen += int(batch["attention_mask"].sum().item())
+        self.completion_tokens_seen += int((batch["labels"] != -100).sum().item())
+        self.micro_batches_seen += 1
+
+    def counts(self) -> dict[str, int]:
+        return {
+            "samples_seen": self.samples_seen,
+            "input_tokens_seen": self.input_tokens_seen,
+            "completion_tokens_seen": self.completion_tokens_seen,
+            "micro_batches_seen": self.micro_batches_seen,
+        }
+
+
 def _build_sft_trainer(
     model: Any,
     tokenizer: Any,
@@ -566,6 +800,9 @@ def _build_sft_trainer(
     max_steps: int,
     callback: Any,
     run_root: Path,
+    eval_rows: list[dict[str, Any]] | None = None,
+    training_counts: _TrainingCounters | None = None,
+    _cpu_fixture: bool = False,
 ) -> Any:
     """Build the pinned TRL path without allowing it to retokenize or truncate."""
     from datasets import Dataset
@@ -573,26 +810,41 @@ def _build_sft_trainer(
 
     optimizer = config["optimizer"]
     training = config["training"]
+    checkpointing = bool(training.get("checkpointing", False))
+    save_interval = int(training.get("save_interval_steps") or 0)
+    eval_interval = int(training.get("evaluation_interval_steps") or 0)
+    if checkpointing and save_interval <= 0:
+        raise ValueError("checkpointing=true requires positive save_interval_steps")
+    if eval_rows is not None and (not eval_rows or eval_interval <= 0):
+        raise ValueError("SFT Dev Loss requires non-empty rows and positive evaluation_interval_steps")
     args = SFTConfig(
-        output_dir=str(run_root / "trainer_tmp"),
+        output_dir=str(run_root / ("trainer" if checkpointing else "trainer_tmp")),
         do_train=True,
-        do_eval=False,
-        use_cpu=False,
+        do_eval=bool(eval_rows),
+        use_cpu=_cpu_fixture,
         per_device_train_batch_size=int(training["per_device_micro_batch_size"]),
+        per_device_eval_batch_size=int(training.get("per_device_eval_batch_size", 1)),
         gradient_accumulation_steps=int(training["gradient_accumulation_steps"]),
         max_steps=max_steps,
-        num_train_epochs=1,
+        num_train_epochs=float(training.get("epochs", 1) or 1),
         learning_rate=float(optimizer["learning_rate"]),
         lr_scheduler_type=optimizer.get("lr_scheduler", "constant"),
         weight_decay=float(optimizer.get("weight_decay", 0.0)),
         optim="adamw_torch",
-        bf16=True,
+        bf16=not _cpu_fixture,
         gradient_checkpointing=False,
         logging_strategy="steps",
         logging_steps=1,
         logging_first_step=True,
-        save_strategy="no",
-        eval_strategy="no",
+        save_strategy="steps" if checkpointing else "no",
+        save_steps=save_interval if checkpointing else 500,
+        save_total_limit=int(training.get("save_total_limit", 2)) if checkpointing else None,
+        save_only_model=False,
+        eval_strategy="steps" if eval_rows else "no",
+        eval_steps=eval_interval if eval_rows else None,
+        prediction_loss_only=True,
+        eval_accumulation_steps=1,
+        warmup_steps=int(optimizer.get("warmup_steps", 0)),
         report_to="none",
         seed=int(training["seed"]),
         data_seed=int(training["seed"]),
@@ -603,15 +855,24 @@ def _build_sft_trainer(
         completion_only_loss=False,
         assistant_only_loss=False,
         remove_unused_columns=False,
-        train_sampling_strategy="sequential",
+        train_sampling_strategy=training.get("train_sampling_strategy", "sequential"),
         dataloader_num_workers=0,
+        dataloader_pin_memory=not _cpu_fixture,
         include_num_input_tokens_seen=True,
     )
-    trainer = SFTTrainer(
+    class RecordedSFTTrainer(SFTTrainer):
+        def training_step(self, *args, **kwargs):
+            inputs = kwargs.get("inputs") if "inputs" in kwargs else args[1]
+            if training_counts is not None:
+                training_counts.record(inputs)
+            return super().training_step(*args, **kwargs)
+
+    trainer = RecordedSFTTrainer(
         model=model,
         args=args,
         data_collator=collator,
         train_dataset=Dataset.from_list(rows),
+        eval_dataset=Dataset.from_list(eval_rows) if eval_rows else None,
         processing_class=tokenizer,
         callbacks=[callback],
     )
@@ -619,31 +880,70 @@ def _build_sft_trainer(
         raise RuntimeError("SFTTrainer must preserve the pre-tokenized D0.4.3 dataset and custom collator")
     if trainer.args.max_length is not None or trainer.args.packing or trainer.args.padding_free:
         raise RuntimeError("SFTTrainer must keep max_length=None, packing=False, and padding_free=False")
-    if trainer.args.do_eval or trainer.args.resume_from_checkpoint:
-        raise RuntimeError("training must not evaluate SFT Dev or resume a checkpoint")
+    if bool(trainer.args.do_eval) != bool(eval_rows) or trainer.args.resume_from_checkpoint:
+        raise RuntimeError("Trainer evaluation configuration differs from the declared run scope")
     import torch
     batch_size = int(training["per_device_micro_batch_size"])
     verify_rows = min(len(rows), batch_size * int(training["gradient_accumulation_steps"]))
     iterator = iter(trainer.get_train_dataloader())
-    for offset in range(0, verify_rows, batch_size):
-        observed_batch = next(iterator)
-        expected_batch = collator(rows[offset:offset + batch_size])
+    sequential = training.get("train_sampling_strategy", "sequential") == "sequential"
+    verified_ids: list[str] = []
+    if sequential:
+        batches_to_check = [
+            (next(iterator), rows[offset:offset + batch_size])
+            for offset in range(0, verify_rows, batch_size)
+        ]
+    else:
+        row_lookup: dict[tuple[tuple[int, ...], tuple[int, ...]], dict[str, Any]] = {}
+        for row in rows:
+            key = (tuple(row["input_ids"]), tuple(row["labels"]))
+            row_lookup.setdefault(key, row)
+        batches_to_check = []
+        batches_remaining = min(4, max(1, math.ceil(verify_rows / batch_size)))
+        for _ in range(batches_remaining):
+            observed = next(iterator)
+            lengths = observed["attention_mask"].sum(dim=1).tolist()
+            matched_rows = []
+            for row_index, length in enumerate(lengths):
+                size = int(length)
+                key = (
+                    tuple(observed["input_ids"][row_index, :size].cpu().tolist()),
+                    tuple(observed["labels"][row_index, :size].cpu().tolist()),
+                )
+                if key not in row_lookup:
+                    raise RuntimeError("random Trainer batch differs from the pre-encoded D0.4.3 rows")
+                verified_ids.append(str(row_lookup[key]["sample_id"]))
+                matched_rows.append(row_lookup[key])
+            batches_to_check.append((observed, matched_rows))
+    for offset, (observed_batch, source_rows) in enumerate(batches_to_check):
+        expected_batch = collator(source_rows)
         if set(observed_batch) != {"input_ids", "attention_mask", "labels"}:
             raise RuntimeError(f"SFTTrainer passed unexpected fields to model: {sorted(observed_batch)}")
         for name in ("input_ids", "attention_mask", "labels"):
             if not torch.equal(observed_batch[name].cpu(), expected_batch[name].cpu()):
-                raise RuntimeError(f"SFTTrainer changed pre-encoded {name} at train row {offset}")
+                raise RuntimeError(f"SFTTrainer changed pre-encoded {name} in verified batch {offset}")
     trainer.e01_data_path_facts = {
         "skip_prepare_dataset": trainer._skip_prepare_dataset,
         "max_length": trainer.args.max_length,
         "packing": trainer.args.packing,
         "padding_free": trainer.args.padding_free,
-        "micro_batches_verified_against_collator": verify_rows // batch_size,
+        "micro_batches_verified_against_collator": len(batches_to_check),
+        "train_sampling_strategy": training.get("train_sampling_strategy", "sequential"),
+        "verified_random_sample_ids": verified_ids,
         "input_ids_equal": True,
         "attention_mask_equal": True,
         "labels_equal": True,
         "model_batch_fields": ["input_ids", "attention_mask", "labels"],
     }
+    if config["experiment_id"] != "E01-A":
+        if int(trainer.args.world_size) != 1:
+            raise ValueError("this E01-B baseline requires the reviewed single-process training schedule")
+        micro_batches = len(trainer.get_train_dataloader())
+        steps_per_epoch = math.ceil(micro_batches / int(training["gradient_accumulation_steps"]))
+        expected_steps = steps_per_epoch * int(training["epochs"])
+        if max_steps != expected_steps:
+            raise ValueError(f"frozen optimizer-step budget differs from actual DataLoader schedule: configured={max_steps}, actual={expected_steps}")
+        trainer.e01_data_path_facts.update(train_micro_batches_per_epoch=micro_batches, optimizer_steps_per_epoch=steps_per_epoch, configured_optimizer_steps=max_steps, data_seed=int(training["seed"]))
     return trainer
 
 
@@ -672,6 +972,70 @@ def _write_training_progress(
     })
 
 
+def _checkpoint_file_facts(checkpoint: Path) -> list[dict[str, Any]]:
+    facts = []
+    for path in sorted(checkpoint.rglob("*")):
+        if path.is_symlink():
+            raise ValueError(f"Trainer checkpoint must not contain symlinks: {path}")
+        if path.is_file() and path.name != "checkpoint_manifest.json":
+            facts.append({
+                "path": path.relative_to(checkpoint).as_posix(),
+                "size_bytes": path.stat().st_size,
+                "sha256": sha256_file(path),
+            })
+    return facts
+
+
+def _write_checkpoint_manifest(checkpoint: Path, facts: dict[str, Any]) -> dict[str, Any]:
+    files = _checkpoint_file_facts(checkpoint)
+    names = {item["path"] for item in files}
+    required = {"optimizer.pt", "scheduler.pt", "trainer_state.json", "rng_state.pth", "adapter_config.json"}
+    if not required <= names:
+        raise RuntimeError(f"Trainer checkpoint is incomplete: missing={sorted(required - names)}")
+    model_files = {name for name in names if name.startswith("adapter_model") or name.startswith("model")}
+    if not model_files:
+        raise RuntimeError("Trainer checkpoint does not include saved model/Adapter weights")
+    record = {
+        **facts,
+        "created_at_utc": _now(),
+        "checkpoint_path": checkpoint.name,
+        "files": files,
+        "files_sha256": canonical_sha256(files),
+        "status": "complete",
+    }
+    _write_json(checkpoint / "checkpoint_manifest.json", record)
+    return record
+
+
+def _verify_checkpoint(
+    checkpoint: Path,
+    *,
+    expected: dict[str, Any],
+    run_id: str,
+) -> dict[str, Any]:
+    checkpoint = checkpoint.resolve()
+    manifest_path = checkpoint / "checkpoint_manifest.json"
+    if not manifest_path.is_file():
+        raise ValueError("checkpoint manifest is missing; refusing resume")
+    record = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if record.get("status") != "complete" or record.get("run_id") != run_id:
+        raise ValueError("checkpoint status or Run ID does not match the requested resume")
+    for key, value in expected.items():
+        if record.get(key) != value:
+            raise ValueError(f"checkpoint {key} does not match the current Run")
+    if record.get("files_sha256") != canonical_sha256(record.get("files")):
+        raise ValueError("checkpoint file manifest hash is invalid")
+    actual = _checkpoint_file_facts(checkpoint)
+    if actual != record.get("files"):
+        raise ValueError("checkpoint file hash or size changed after it was recorded")
+    state_path = checkpoint / "trainer_state.json"
+    trainer_state = json.loads(state_path.read_text(encoding="utf-8"))
+    checkpoint_step = int(checkpoint.name.removeprefix("checkpoint-"))
+    if int(trainer_state.get("global_step", -1)) != checkpoint_step or int(record.get("optimizer_step", -2)) != checkpoint_step:
+        raise ValueError("checkpoint folder, Trainer state, and checkpoint manifest steps disagree")
+    return record
+
+
 def _optimizer_evidence_callback(
     model: Any,
     trainable: list[tuple[str, Any]],
@@ -685,6 +1049,10 @@ def _optimizer_evidence_callback(
     run_root: Path,
     snapshot_adapter: bool,
     max_optimizer_steps: int | None = None,
+    collator: Any | None = None,
+    checkpoint_facts: dict[str, Any] | None = None,
+    stop_after_step: int | None = None,
+    previous_training_seconds: float = 0.0,
 ) -> Any:
     """Collect gradient/update evidence around the actual Trainer optimizer step."""
     from transformers import TrainerCallback
@@ -702,6 +1070,9 @@ def _optimizer_evidence_callback(
             self.run_root = run_root
             self.snapshot_adapter = snapshot_adapter
             self.max_optimizer_steps = max_optimizer_steps or int(config["training"]["max_optimizer_steps"])
+            self.collator = collator
+            self.checkpoint_facts = checkpoint_facts or {}
+            self.parameter_check_interval = max(1, int(config["training"].get("parameter_check_interval_steps", 1)))
             self.started = 0.0
             self.before: dict[str, Any] = {}
             self.current: dict[str, Any] = {}
@@ -709,29 +1080,59 @@ def _optimizer_evidence_callback(
             self.logged_steps: set[int] = set()
             self.token_cursor = 0
             self.latest_adapter_snapshot: str | None = None
+            self.check_parameter_update = False
+            self.last_collator_counts = self.collator.counts() if self.collator is not None else None
+            self.training_started = 0.0
+            self.stop_reason: str | None = None
+
+        def on_train_begin(self, args, state, control, **kwargs):
+            self.training_started = time.perf_counter()
+            return control
+
+        def _check_budget(self, state, control):
+            budget = config["training"].get("max_training_seconds")
+            elapsed = previous_training_seconds + time.perf_counter() - self.training_started
+            if budget is not None and elapsed >= float(budget):
+                self.stop_reason = "training_time_budget_exhausted"
+            elif stop_after_step is not None and int(state.global_step) >= stop_after_step:
+                self.stop_reason = "requested_checkpoint_pause"
+            if self.stop_reason and int(state.global_step) < self.max_optimizer_steps:
+                control.should_training_stop = True
+                control.should_save = True
+            return control
 
         def on_step_begin(self, args, state, control, **kwargs):
             self.started = time.perf_counter()
+            next_step = int(state.global_step) + 1
+            self.check_parameter_update = (
+                not self.steps
+                or next_step == 1
+                or next_step % self.parameter_check_interval == 0
+                or next_step == self.max_optimizer_steps
+            )
             return control
 
         def on_pre_optimizer_step(self, args, state, control, **kwargs):
             import torch
             gradients = [parameter.grad for _name, parameter in self.trainable if parameter.grad is not None]
-            finite = bool(gradients) and all(bool(torch.isfinite(gradient).all().item()) for gradient in gradients)
-            nonzero = sum(bool(torch.count_nonzero(gradient).item()) for gradient in gradients)
-            if not finite or not nonzero:
+            if not gradients:
                 raise RuntimeError("Trainer optimizer step has missing, non-finite, or zero LoRA gradients")
+            finite = torch.stack([torch.isfinite(gradient).all() for gradient in gradients]).all()
             norm = torch.sqrt(sum(torch.sum(gradient.detach().float() ** 2) for gradient in gradients))
-            if not bool(torch.isfinite(norm).item()) or float(norm.item()) == 0:
+            nonzero = torch.stack([gradient.ne(0).any() for gradient in gradients]).count_nonzero()
+            finite_value = bool(finite.item())
+            norm_value = float(norm.item())
+            nonzero_value = int(nonzero.item())
+            if not finite_value or not nonzero_value or not math.isfinite(norm_value):
                 raise RuntimeError("Trainer LoRA gradient norm is invalid")
-            self.before = {
+            self.before = ({
                 name: parameter.detach().to(device="cpu", copy=True)
                 for name, parameter in self.trainable
-            }
+            } if self.check_parameter_update else {})
             self.current = {
-                "finite_gradients": finite,
-                "nonzero_gradient_parameter_count": nonzero,
-                "gradient_norm": float(norm.detach().cpu().item()),
+                "finite_gradients": finite_value,
+                "nonzero_gradient_parameter_count": nonzero_value,
+                "gradient_norm": norm_value,
             }
             return control
 
@@ -739,29 +1140,48 @@ def _optimizer_evidence_callback(
             import torch
             changed_names = []
             changed_elements = 0
-            for name, parameter in self.trainable:
-                previous = self.before.get(name)
-                current = parameter.detach().to(device="cpu")
-                if previous is not None:
-                    count = int(previous.ne(current).sum().item())
-                    if count:
-                        changed_names.append(name)
-                        changed_elements += count
-            if not changed_names:
-                raise RuntimeError("Trainer optimizer.step did not change sampled LoRA parameters")
+            if self.check_parameter_update:
+                for name, parameter in self.trainable:
+                    previous = self.before.get(name)
+                    current = parameter.detach().to(device="cpu")
+                    if previous is not None:
+                        count = int(previous.ne(current).sum().item())
+                        if count:
+                            changed_names.append(name)
+                            changed_elements += count
+                if not changed_names:
+                    raise RuntimeError("Trainer optimizer.step did not change LoRA parameters at a verification step")
             next_step = int(state.global_step) + 1
-            selected_rows = []
-            for _ in range(int(self.config["training"]["gradient_accumulation_steps"])):
-                selected_rows.append(self.samples[self.token_cursor % len(self.samples)]["encoded"])
-                self.token_cursor += 1
+            token_facts: dict[str, int] = {}
+            if self.collator is not None:
+                counts = self.collator.counts()
+                token_facts = {
+                    "samples_seen": counts["samples_seen"] - (self.last_collator_counts or {}).get("samples_seen", 0),
+                    "input_tokens_seen": counts["input_tokens_seen"] - (self.last_collator_counts or {}).get("input_tokens_seen", 0),
+                    "completion_tokens": counts["completion_tokens_seen"] - (self.last_collator_counts or {}).get("completion_tokens_seen", 0),
+                    "micro_batches_seen": counts["micro_batches_seen"] - (self.last_collator_counts or {}).get("micro_batches_seen", 0),
+                    "cumulative_samples_seen": counts["samples_seen"],
+                    "cumulative_input_tokens_seen": counts["input_tokens_seen"],
+                    "cumulative_completion_tokens_seen": counts["completion_tokens_seen"],
+                }
+                self.last_collator_counts = counts
+            else:
+                selected_rows = []
+                if self.samples:
+                    for _ in range(int(self.config["training"]["gradient_accumulation_steps"])):
+                        selected_rows.append(self.samples[self.token_cursor % len(self.samples)]["encoded"])
+                        self.token_cursor += 1
+                token_facts = {
+                    "samples_seen": len(selected_rows),
+                    "completion_tokens": sum(sum(label != -100 for label in row["labels"]) for row in selected_rows),
+                }
             self.current.update({
                 "optimizer_step": next_step,
-                "completion_tokens": sum(
-                    sum(label != -100 for label in row["labels"]) for row in selected_rows
-                ),
+                **token_facts,
                 "updated_parameter_count": len(changed_names),
                 "updated_parameter_names": changed_names,
                 "updated_element_count": changed_elements,
+                "parameter_update_checked": self.check_parameter_update,
                 "optimizer_step_seconds": time.perf_counter() - self.started,
                 "cuda_memory": inference.cuda_memory_facts(torch),
             })
@@ -770,6 +1190,17 @@ def _optimizer_evidence_callback(
             return control
 
         def on_log(self, args, state, control, logs=None, **kwargs):
+            if logs and "eval_loss" in logs:
+                eval_path = self.run_root / "eval_log.jsonl"
+                eval_row = {
+                    "optimizer_step": int(state.global_step),
+                    "sft_dev_loss": float(logs["eval_loss"]),
+                    "eval_samples": int(config.get("evaluation", {}).get("sft_dev_loss_rows", 0)),
+                }
+                if not math.isfinite(eval_row["sft_dev_loss"]):
+                    raise FloatingPointError("Trainer reported non-finite SFT Dev Loss")
+                with eval_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(eval_row, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n")
             if not logs or "loss" not in logs or not self.steps:
                 return control
             evidence = self.steps[-1]
@@ -780,6 +1211,7 @@ def _optimizer_evidence_callback(
                 **evidence,
                 "loss": float(logs["loss"]),
                 "learning_rate": logs.get("learning_rate"),
+                "epoch": logs.get("epoch", state.epoch),
                 "total_input_tokens_seen": logs.get("num_input_tokens_seen"),
             }
             if not math.isfinite(row["loss"]):
@@ -789,12 +1221,15 @@ def _optimizer_evidence_callback(
                 handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n")
             evidence["loss"] = row["loss"]
             self.logged_steps.add(current_step)
-            return control
+            return self._check_budget(state, control) if self.checkpoint_facts else control
+
+        def on_evaluate(self, args, state, control, **kwargs):
+            return self._check_budget(state, control)
 
         def on_step_end(self, args, state, control, **kwargs):
             step = int(state.global_step)
-            interval = int(self.config["training"]["evaluation_interval_steps"])
-            if schema is not None and enums is not None and step % interval == 0:
+            interval = int(self.config["training"].get("evaluation_interval_steps") or 0)
+            if schema is not None and enums is not None and interval > 0 and step % interval == 0:
                 was_training = self.model.training
                 self.model.eval()
                 try:
@@ -816,6 +1251,18 @@ def _optimizer_evidence_callback(
                 max_optimizer_steps=self.max_optimizer_steps,
                 latest_adapter_snapshot=self.latest_adapter_snapshot,
             )
+            return control
+
+        def on_save(self, args, state, control, **kwargs):
+            if not self.checkpoint_facts:
+                return control
+            checkpoint = self.run_root / "trainer" / f"checkpoint-{int(state.global_step)}"
+            if checkpoint.is_dir():
+                _write_checkpoint_manifest(checkpoint, {
+                    **self.checkpoint_facts,
+                    "run_id": self.run_root.name,
+                    "optimizer_step": int(state.global_step),
+                })
             return control
 
     return EvidenceCallback()
@@ -924,12 +1371,18 @@ def _step_update(
     }
 
 
-def _serialize_selected_samples(path: Path, samples: list[dict[str, Any]]) -> dict[str, Any]:
+def _serialize_selected_samples(path: Path, samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows = [{key: item["selection"][key] for key in (
         "sample_id", "conversation_id", "emotion_label", "profile_empty", "prompt_length",
-        "completion_length", "sequence_length",
-    )} for item in samples]
-    _write_json(path, {"selection_rule": "unique conversation; greedily cover emotion and empty/non-empty profile, then shortest sequence, stable sample_id tie-break", "rows": rows, "sha256": canonical_sha256(rows)})
+        "completion_length", "sequence_length", "length_bin",
+    ) if key in item["selection"]} for item in samples]
+    rule = (
+        "seeded_length_deciles_v1; train-only; deterministic seed hash within deciles; all Train emotion labels, both profile-empty states, and min/max sequence lengths included"
+        if samples and "length_bin" in samples[0]["selection"]
+        else "all_valid_train_in_jsonl_order_v1" if len(samples) > 16
+        else "unique conversation; greedily cover emotion and empty/non-empty profile, then shortest sequence, stable sample_id tie-break"
+    )
+    _write_json(path, {"selection_rule": rule, "rows": rows, "sha256": canonical_sha256(rows)})
     return rows
 
 
@@ -1303,6 +1756,475 @@ def execute_training(config: dict[str, Any], config_path: Path, run_id: str, ste
     return run_root
 
 
+def _staged_checkpoint_identity(config: dict[str, Any], preflight: dict[str, Any], config_sha256: str) -> dict[str, Any]:
+    data_facts = preflight["checks"]["data"]
+    return {
+        "experiment_id": config["experiment_id"],
+        "training_scope": config["training_scope"],
+        "config_sha256": config_sha256,
+        "train_sha256": data_facts["train_sha256"],
+        "sft_dev_sha256": data_facts["dev_sha256"],
+        "d03_manifest_sha256": data_facts["d03_manifest_sha256"],
+        "d043_manifest_sha256": data_facts["d043_manifest_sha256"],
+        "base_weight_sha256": config["base_model"]["expected_weight_sha256"],
+        "p0_sha256": config["protocol"]["p0_sha256"],
+        "tokenizer_signature_sha256": config["protocol"]["tokenizer_signature_sha256"],
+        "chat_template_sha256": config["protocol"]["chat_template_sha256"],
+        "sample_selection_sha256": data_facts["selected_samples_sha256"],
+        "packages": preflight["checks"]["environment"]["packages"],
+        "cuda": preflight["checks"]["cuda"],
+        "training_code_sha256": canonical_sha256({
+            name: sha256_file(PROJECT_ROOT / name)
+            for name in ("src/training/training_sft.py", "src/data/sft_collator.py", "src/shared/prompting.py")
+        }),
+    }
+
+
+def _successful_staged_preflight(config: dict[str, Any], preflight_root: Path, config_sha256: str) -> dict[str, Any]:
+    root = preflight_root.resolve()
+    output_root = _resolve(config["data"]["output_root"])
+    if not root.is_relative_to(output_root):
+        raise ValueError("--preflight-run-root must be under outputs/training")
+    manifest_path = root / "manifest.json"
+    preflight_path = root / "preflight.json"
+    if not manifest_path.is_file() or not preflight_path.is_file():
+        raise FileNotFoundError("training preflight manifest or result is missing")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+    if (
+        manifest.get("experiment_id") != config["experiment_id"]
+        or manifest.get("training_scope") != config["training_scope"]
+        or manifest.get("status") != "passed"
+        or preflight.get("status") != "passed"
+    ):
+        raise ValueError("staged training requires an independently completed passed training preflight")
+    if manifest.get("config_sha256") != config_sha256:
+        raise ValueError("training preflight config hash differs from the current config")
+    if manifest.get("preflight_sha256") != sha256_file(preflight_path):
+        raise ValueError("training preflight result hash differs from its manifest")
+    return preflight
+
+
+def _read_training_log(run_root: Path) -> list[dict[str, Any]]:
+    path = run_root / "train_log.jsonl"
+    if not path.is_file():
+        return []
+    return list(_iter_jsonl(path))
+
+
+def _prepare_resume_logs(run_root: Path, step: int) -> None:
+    """Preserve the interrupted attempt, then rewind logs to its saved Trainer step."""
+    archive = run_root / "interrupted_attempts" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    for name in ("train_log.jsonl", "eval_log.jsonl"):
+        path = run_root / name
+        if not path.is_file():
+            if name == "train_log.jsonl":
+                raise ValueError("resume checkpoint has no matching optimizer-step log")
+            continue
+        data = path.read_bytes()
+        retained = []
+        for line in data.splitlines(keepends=True):
+            try:
+                row = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                break
+            if int(row.get("optimizer_step", -1)) <= step:
+                retained.append(row)
+        if name == "train_log.jsonl" and [row.get("optimizer_step") for row in retained] != list(range(1, step + 1)):
+            raise ValueError("resume log does not cover the checkpoint's exact optimizer-step prefix")
+        archive.mkdir(parents=True, exist_ok=True)
+        (archive / name).write_bytes(data)
+        path.write_text("".join(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n" for row in retained), encoding="utf-8")
+
+
+def _execute_staged_training(
+    config: dict[str, Any],
+    config_path: Path,
+    *,
+    run_root: Path,
+    resume_checkpoint: Path | None,
+    preflight: dict[str, Any] | None,
+    stop_after_step: int | None = None,
+) -> Path:
+    if config["experiment_id"] not in {"E01-B-PILOT", "E01-B"}:
+        raise ValueError("staged training accepts only E01-B-PILOT or E01-B")
+    config_sha = sha256_file(config_path)
+    if resume_checkpoint is None:
+        run_id = run_root.name
+        config_snapshot = run_root / "config_snapshot.yaml"
+        config_snapshot.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
+        if sha256_file(config_snapshot) != config_sha:
+            raise RuntimeError("training config snapshot differs from its source")
+        if preflight is None:
+            raise ValueError("staged train requires a passed preflight")
+        _write_json(run_root / "preflight.json", preflight)
+        manifest = {
+            "run_id": run_id,
+            "experiment_id": config["experiment_id"],
+            "training_scope": config["training_scope"],
+            "status": "running",
+            "stage": "initialized",
+            "created_at_utc": _now(),
+            "config_sha256": config_sha,
+            "preflight_sha256": sha256_file(run_root / "preflight.json"),
+            "preflight_status": preflight["status"],
+            "training_rows": int(config["training"]["sample_selection"]["count"]) if config["training"].get("sample_selection") else int(config["data"]["expected_train_rows"]),
+            "max_optimizer_steps": int(config["training"]["max_optimizer_steps"]),
+            "init_adapter": None,
+            "resume_from_checkpoint": None,
+            "optimizer_state_resume_enabled": True,
+            "approval": config.get("approval"),
+            "resume_history": [],
+            "training_seconds": 0.0,
+        }
+        _write_run_manifest(run_root, manifest)
+        expected_checkpoint_identity = _staged_checkpoint_identity(config, preflight, config_sha)
+        checkpoint_to_resume = None
+    else:
+        run_id = run_root.name
+        manifest_path = run_root / "manifest.json"
+        config_snapshot = run_root / "config_snapshot.yaml"
+        if not manifest_path.is_file() or not config_snapshot.is_file():
+            raise FileNotFoundError("training Run manifest/config snapshot is missing")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("run_id") != run_id or manifest.get("init_adapter") is not None or manifest.get("experiment_id") != config["experiment_id"] or manifest.get("training_scope") != config["training_scope"]:
+            raise ValueError("resume accepts only the same independently initialized Run")
+        if manifest.get("status") in {"passed", "completed"} or manifest.get("optimizer_steps", 0) >= int(config["training"]["max_optimizer_steps"]):
+            raise ValueError("completed training Run cannot be resumed")
+        if manifest.get("config_sha256") != config_sha or sha256_file(config_snapshot) != config_sha:
+            raise ValueError("resume config does not match the frozen training Run config")
+        if manifest.get("preflight_status") != "passed" or not (run_root / "preflight.json").is_file():
+            raise ValueError("resume requires the original passed training preflight")
+        if sha256_file(run_root / "preflight.json") != manifest.get("preflight_sha256"):
+            raise ValueError("saved Run preflight has changed")
+        preflight = json.loads((run_root / "preflight.json").read_text(encoding="utf-8"))
+        expected_checkpoint_identity = _staged_checkpoint_identity(config, preflight, config_sha)
+        checkpoint_to_resume = resume_checkpoint.resolve()
+        checkpoint_root = (run_root / "trainer").resolve()
+        if checkpoint_to_resume.parent != checkpoint_root:
+            raise ValueError("resume checkpoint must belong to this Run's trainer directory")
+        if not checkpoint_to_resume.is_dir() or not re.fullmatch(r"checkpoint-[1-9][0-9]*", checkpoint_to_resume.name):
+            raise ValueError("resume requires an explicit Trainer checkpoint directory")
+        checkpoint_record = _verify_checkpoint(checkpoint_to_resume, expected=expected_checkpoint_identity, run_id=run_id)
+        newer = [path for path in checkpoint_root.glob("checkpoint-*") if re.fullmatch(r"checkpoint-[0-9]+", path.name) and int(path.name.split("-")[-1]) > checkpoint_record["optimizer_step"]]
+        if newer:
+            raise ValueError("resume requires the latest checkpoint; a newer checkpoint directory would be overwritten")
+        manifest.setdefault("resume_history", []).append({
+            "checkpoint": str(checkpoint_to_resume),
+            "checkpoint_manifest_sha256": sha256_file(checkpoint_to_resume / "checkpoint_manifest.json"),
+            "optimizer_step": checkpoint_record["optimizer_step"],
+            "resumed_at_utc": _now(),
+        })
+        manifest.update(status="running", stage="resuming", resume_from_checkpoint=str(checkpoint_to_resume))
+        _write_run_manifest(run_root, manifest)
+
+    training_started: float | None = None
+    previous_training_seconds = float(manifest.get("training_seconds", 0.0))
+    try:
+        current_preflight, _ = _preflight(config)
+        if current_preflight["status"] != "passed":
+            manifest.update(status=current_preflight["status"], stage="preflight_blocked", ended_at_utc=_now())
+            _write_run_manifest(run_root, manifest)
+            return run_root
+        current_identity = _staged_checkpoint_identity(config, current_preflight, config_sha)
+        for key, value in expected_checkpoint_identity.items():
+            if current_identity.get(key) != value:
+                raise ValueError(f"current training input identity changed since preflight: {key}")
+        if checkpoint_to_resume is not None:
+            _prepare_resume_logs(run_root, int(checkpoint_to_resume.name.split("-")[-1]))
+        manifest.update(
+            current_preflight_sha256=sha256_file(run_root / "preflight.json"),
+            base_weight_sha256=config["base_model"]["expected_weight_sha256"],
+            train_sha256=current_identity["train_sha256"],
+            sft_dev_sha256=current_identity["sft_dev_sha256"],
+            selected_samples_sha256=current_identity["sample_selection_sha256"],
+            training_scope=config["training_scope"],
+            stage="loading_data",
+        )
+        _write_run_manifest(run_root, manifest)
+
+        torch = __import__("torch")
+        seed = int(config["training"]["seed"])
+        _seed_everything(seed, torch)
+        train_path, dev_path, normalized_path, _ = _training_rows(config)
+        samples, selected_metadata = _select_real_samples(config, train_path, normalized_path)
+        _serialize_selected_samples(run_root / "selected_samples.json", samples)
+        dev_rows, dev_selection_facts = _select_sft_dev_rows(config, dev_path)
+        _write_json(run_root / "sft_dev_loss_selection.json", {
+            **dev_selection_facts,
+            "sample_ids": [row["sample_id"] for row in dev_rows],
+        })
+        base_path = _resolve(config["base_model"]["local_path"])
+        tokenizer, _prompt, _schema, _enums = _load_protocol(config, base_path)
+        model, torch, model_facts = _load_train_model(config, base_path)
+        torch.cuda.reset_peak_memory_stats()
+        model_facts["cuda_peak_memory_scope"] = "reset after Base+LoRA load; includes Trainer setup, training, SFT Dev Loss and checkpoints within this attempt"
+        adapter_dir = run_root / "adapter"
+        collator = SFTDataCollator(
+            tokenizer.pad_token_id,
+            max_sequence_length=int(config["protocol"]["max_train_seq_length"]),
+        )
+        counters = _TrainingCounters(_read_training_log(run_root))
+        trainable = _trainable_parameters(model)
+        checkpoint_facts = _staged_checkpoint_identity(config, current_preflight, config_sha)
+        callback = _optimizer_evidence_callback(
+            model,
+            trainable,
+            config=config,
+            samples=[],
+            tokenizer=tokenizer,
+            prompt="",
+            schema=None,
+            enums=None,
+            run_root=run_root,
+            snapshot_adapter=False,
+            max_optimizer_steps=int(config["training"]["max_optimizer_steps"]),
+            collator=counters,
+            checkpoint_facts=checkpoint_facts,
+            stop_after_step=stop_after_step,
+            previous_training_seconds=float(manifest.get("training_seconds", 0.0)),
+        )
+        rows = [item["encoded"] for item in samples]
+        trainer = _build_sft_trainer(
+            model,
+            tokenizer,
+            rows,
+            collator,
+            config,
+            max_steps=int(config["training"]["max_optimizer_steps"]),
+            callback=callback,
+            run_root=run_root,
+            eval_rows=dev_rows,
+            training_counts=counters,
+        )
+        trainer_data_path_facts = _snapshot_trainer_data_path_facts(trainer)
+        manifest.update(
+            stage="training",
+            selected_samples_sha256=canonical_sha256(selected_metadata),
+            sft_dev_loss_selection=dev_selection_facts,
+            trainer_data_path=trainer_data_path_facts,
+            model_facts=model_facts,
+            checkpoint_identity=checkpoint_facts,
+        )
+        _write_run_manifest(run_root, manifest)
+        _seed_everything(seed, torch)
+        starting_step = int(checkpoint_to_resume.name.split("-")[-1]) if checkpoint_to_resume else 0
+        if stop_after_step is not None and not (starting_step < stop_after_step < int(config["training"]["max_optimizer_steps"])):
+            raise ValueError("--stop-after-step must precede the final optimizer step")
+        if previous_training_seconds >= float(config["training"]["max_training_seconds"]):
+            raise ValueError("the frozen training time budget has already been exhausted")
+        training_started = time.perf_counter()
+        trainer.train(resume_from_checkpoint=str(checkpoint_to_resume) if checkpoint_to_resume else None)
+        manifest["training_seconds"] = previous_training_seconds + time.perf_counter() - training_started
+        manifest.setdefault("training_attempts", []).append({
+            "starting_optimizer_step": starting_step,
+            "ending_optimizer_step": int(trainer.state.global_step),
+            "training_seconds": manifest["training_seconds"] - previous_training_seconds,
+            "cuda_memory": inference.cuda_memory_facts(torch),
+            "stop_reason": callback.stop_reason,
+        })
+        training_started = None
+        if int(trainer.state.global_step) < int(config["training"]["max_optimizer_steps"]):
+            checkpoint = run_root / "trainer" / f"checkpoint-{trainer.state.global_step}"
+            _verify_checkpoint(checkpoint, expected=checkpoint_facts, run_id=run_id)
+            manifest.update(status="interrupted", stage="checkpoint_saved", optimizer_steps=int(trainer.state.global_step), stop_reason=callback.stop_reason, last_checkpoint=str(checkpoint), ended_at_utc=_now())
+            _write_run_manifest(run_root, manifest)
+            return run_root
+        if int(trainer.state.global_step) != int(config["training"]["max_optimizer_steps"]):
+            raise RuntimeError(
+                f"E01-B Trainer stopped at {trainer.state.global_step} of {config['training']['max_optimizer_steps']} optimizer steps"
+            )
+        log_rows = _read_training_log(run_root)
+        step_ids = [int(row.get("optimizer_step", -1)) for row in log_rows]
+        expected_steps = list(range(1, int(config["training"]["max_optimizer_steps"]) + 1))
+        if step_ids != expected_steps or any(not math.isfinite(float(row.get("loss", float("nan")))) for row in log_rows):
+            raise RuntimeError("E01-B optimizer-step log is incomplete, duplicated, out of order, or non-finite")
+        manifest.update(stage="training_complete", optimizer_steps=int(trainer.state.global_step))
+        _write_run_manifest(run_root, manifest)
+        _write_training_progress(
+            run_root,
+            stage="training_complete",
+            optimizer_step=int(trainer.state.global_step),
+            max_optimizer_steps=int(config["training"]["max_optimizer_steps"]),
+        )
+        adapter_facts = _save_adapter(model, adapter_dir, config)
+        if {name for name, _ in _trainable_parameters(model)} != {name for name, _ in trainable}:
+            raise RuntimeError("trainable parameter scope changed during training")
+        base_before = inference._weight_identity(base_path, {
+            "model_id": config["base_model"]["model_id"],
+            "model_revision": config["base_model"].get("revision"),
+        })
+        probe_prompt = _make_probe_prompt(samples, tokenizer, _prompt, int(config["protocol"]["max_prompt_tokens"]))
+        probe_budget = int(config["evaluation"]["probe_max_new_tokens"])
+        probe_before = _capture_probe(model, tokenizer, probe_prompt, max_new_tokens=probe_budget)
+        _write_json(run_root / "generation_probe.json", {
+            "before_release": probe_before,
+            "prompt_token_ids": probe_prompt,
+            "max_new_tokens": probe_budget,
+            "do_sample": False,
+        })
+        evaluation_log = list(_iter_jsonl(run_root / "eval_log.jsonl")) if (run_root / "eval_log.jsonl").is_file() else []
+        training_evidence = {
+            "run_id": run_id,
+            "training_scope": config["training_scope"],
+            "stage": "training_complete",
+            "optimizer_steps": int(trainer.state.global_step),
+            "train_rows": len(rows),
+            "sft_dev_loss_rows": len(dev_rows),
+            "trainer_data_path": trainer_data_path_facts,
+            "model_facts": model_facts,
+            "adapter_identity": adapter_facts,
+            "base_weight_sha256_before_reload": base_before.get("observed_weight_hash"),
+            "training_loss_first_10": sum(float(row["loss"]) for row in log_rows[:10]) / min(10, len(log_rows)),
+            "training_loss_last_10": sum(float(row["loss"]) for row in log_rows[-10:]) / min(10, len(log_rows)),
+            "sft_dev_loss_observations": len(evaluation_log),
+            "sft_dev_loss_last": evaluation_log[-1]["sft_dev_loss"] if evaluation_log else None,
+            "checkpoint_paths": sorted(path.name for path in (run_root / "trainer").glob("checkpoint-*") if path.is_dir()),
+            "training_seconds": manifest["training_seconds"],
+            "consumed_training_batches": sum(int(row["micro_batches_seen"]) for row in log_rows),
+            "consumed_training_samples": sum(int(row["samples_seen"]) for row in log_rows),
+            "consumed_input_tokens": sum(int(row["input_tokens_seen"]) for row in log_rows),
+            "consumed_completion_tokens": sum(int(row["completion_tokens"]) for row in log_rows),
+            "runtime_environment": current_preflight["checks"]["environment"],
+            "cuda": current_preflight["checks"]["cuda"],
+            "training_attempts": manifest["training_attempts"],
+        }
+        _write_json(run_root / "training_evidence.json", training_evidence)
+        manifest.update(training_evidence)
+        _write_run_manifest(run_root, manifest)
+        del trainer, model, callback, trainable
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        reloaded, torch, reload_facts = _load_train_model(config, base_path, adapter_path=adapter_dir)
+        probe_after = _capture_probe(reloaded, tokenizer, probe_prompt, max_new_tokens=probe_budget)
+        base_after = inference._weight_identity(base_path, {
+            "model_id": config["base_model"]["model_id"],
+            "model_revision": config["base_model"].get("revision"),
+        })
+        token_match = probe_before["generated_token_ids"] == probe_after["generated_token_ids"]
+        base_unchanged = (
+            base_before.get("observed_weight_hash")
+            == base_after.get("observed_weight_hash")
+            == config["base_model"]["expected_weight_sha256"]
+            and _model_file_inventory(base_path) == current_preflight["checks"]["base_model"]["file_inventory"]
+        )
+        reload_status = "passed" if token_match and base_unchanged else "failed"
+        _write_json(run_root / "reload_check.json", {
+            "status": reload_status,
+            "token_ids_exact_match": token_match,
+            "base_weights_unchanged": base_unchanged,
+            "base_weight_sha256_before": base_before.get("observed_weight_hash"),
+            "base_weight_sha256_after": base_after.get("observed_weight_hash"),
+            "adapter_identity": adapter_facts,
+            "before_release": probe_before,
+            "after_reload": probe_after,
+            "reload_model_facts": reload_facts,
+        })
+        manifest.update(
+            status=reload_status,
+            stage="completed" if reload_status == "passed" else "reload_failed",
+            reload_check_status=reload_status,
+            base_weight_sha256=base_after.get("observed_weight_hash"),
+            base_weights_unchanged=base_unchanged,
+            dev_quality_evaluation="not_run",
+            ended_at_utc=_now(),
+        )
+        _write_run_manifest(run_root, manifest)
+        _write_training_progress(
+            run_root,
+            stage="completed" if reload_status == "passed" else "reload_failed",
+            optimizer_step=int(config["training"]["max_optimizer_steps"]),
+            max_optimizer_steps=int(config["training"]["max_optimizer_steps"]),
+        )
+        del reloaded
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except BaseException as exc:
+        if training_started is not None:
+            manifest["training_seconds"] = previous_training_seconds + time.perf_counter() - training_started
+        status = "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
+        manifest.update(status=status, stage=status, ended_at_utc=_now(), error=f"{type(exc).__name__}: {exc}")
+        _write_run_manifest(run_root, manifest)
+        raise
+    return run_root
+
+
+def execute_staged_train(
+    config: dict[str, Any], config_path: Path, run_id: str, preflight_root: Path,
+    *, allow_full_training: bool = False, stop_after_step: int | None = None,
+) -> Path:
+    validate_training_mode(config, "train", allow_full_training=allow_full_training)
+    _validate_staged_budget(config)
+    _verify_full_approval_source(config)
+    config_sha = sha256_file(config_path)
+    preflight = _successful_staged_preflight(config, preflight_root, config_sha)
+    run_root = _run_root(config, run_id)
+    return _execute_staged_training(
+        config, config_path, run_root=run_root, resume_checkpoint=None, preflight=preflight, stop_after_step=stop_after_step,
+    )
+
+
+def execute_staged_resume(
+    config: dict[str, Any], config_path: Path, run_root: Path, checkpoint: Path,
+    *, allow_full_training: bool = False, stop_after_step: int | None = None,
+) -> Path:
+    validate_training_mode(config, "resume", allow_full_training=allow_full_training)
+    _validate_staged_budget(config)
+    _verify_full_approval_source(config)
+    root = run_root.resolve()
+    output_root = _resolve(config["data"]["output_root"])
+    if not root.is_relative_to(output_root):
+        raise ValueError("--run-root must be under outputs/training")
+    return _execute_staged_training(config, config_path, run_root=root, resume_checkpoint=checkpoint, preflight=None, stop_after_step=stop_after_step)
+
+
+def _validate_staged_budget(config: dict[str, Any]) -> None:
+    if not _resolve(config["data"]["output_root"]).is_relative_to((PROJECT_ROOT / "outputs/training").resolve()):
+        raise ValueError("E01-B training output_root must remain under outputs/training")
+    reference = yaml.safe_load((PROJECT_ROOT / "configs/training/e01_a.yaml").read_text(encoding="utf-8"))
+    for key in ("base_model", "protocol", "quantization", "lora"):
+        if config[key] != reference[key]:
+            raise ValueError(f"E01-B must preserve the E01-A {key} protocol; use a new experiment for semantic changes")
+    if int(config["data"]["expected_train_rows"]) != 16192 or int(config["data"]["expected_dev_rows"]) != 1821:
+        raise ValueError("E01-B must use D0.4.3 Train 16,192 / SFT Dev 1,821")
+    integer_keys = ("per_device_micro_batch_size", "per_device_eval_batch_size", "gradient_accumulation_steps", "max_optimizer_steps", "epochs", "save_interval_steps", "evaluation_interval_steps", "parameter_check_interval_steps")
+    for key in (*integer_keys, "max_training_seconds"):
+        value = config["training"].get(key)
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+            raise ValueError(f"training.{key} requires a frozen positive budget")
+        if key in integer_keys and int(value) != value:
+            raise ValueError(f"training.{key} must be a positive integer")
+    if int(config["training"].get("save_total_limit", 0)) < 2 or not config["training"].get("checkpointing"):
+        raise ValueError("E01-B requires full Trainer checkpointing with at least two retained checkpoints")
+    if config["training"].get("train_sampling_strategy") != "random":
+        raise ValueError("E01-B requires seeded random training order")
+    lr = config["optimizer"].get("learning_rate")
+    if not isinstance(lr, (int, float)) or isinstance(lr, bool) or not math.isfinite(lr) or lr <= 0 or config["optimizer"].get("name") != "AdamW":
+        raise ValueError("E01-B requires a frozen positive AdamW learning rate")
+    decay = config["optimizer"].get("weight_decay")
+    warmup = config["optimizer"].get("warmup_steps")
+    if not isinstance(decay, (int, float)) or isinstance(decay, bool) or not math.isfinite(decay) or decay < 0:
+        raise ValueError("optimizer.weight_decay requires a frozen non-negative value")
+    if not isinstance(warmup, int) or isinstance(warmup, bool) or warmup < 0:
+        raise ValueError("optimizer.warmup_steps requires a non-negative integer")
+    if config["evaluation"].get("do_sample") is not False or config["evaluation"].get("max_new_tokens") != 1200 or not 0 < int(config["evaluation"].get("probe_max_new_tokens", 0)) <= 1200:
+        raise ValueError("E01-B diagnostics require the frozen Greedy generation budget")
+
+
+def _verify_full_approval_source(config: dict[str, Any]) -> None:
+    if config["experiment_id"] != "E01-B":
+        return
+    approval = config.get("approval") or {}
+    pilot_root = _resolve(approval.get("pilot_run_root", ""))
+    path = pilot_root / "manifest.json"
+    if not path.is_file() or sha256_file(path) != approval.get("pilot_manifest_sha256"):
+        raise ValueError("Full B approval has a missing or changed Pilot source manifest")
+    pilot = json.loads(path.read_text(encoding="utf-8"))
+    if pilot.get("experiment_id") != "E01-B-PILOT" or pilot.get("status") != "passed" or not pilot.get("resume_history") or pilot.get("base_weight_sha256") != config["base_model"]["expected_weight_sha256"]:
+        raise ValueError("Full B requires the reviewed Pilot with completed checkpoint/resume evidence")
+
+
 def _preflight_model_metrics(
     config: dict[str, Any], samples: list[dict[str, Any]], tokenizer: Any, prompt: str,
     schema: dict[str, Any], enums: dict[str, list[str]], run_root: Path, *, step: int,
@@ -1327,6 +2249,7 @@ def execute_preflight(config: dict[str, Any], config_path: Path, run_id: str) ->
     manifest = {
         "run_id": run_id,
         "experiment_id": config["experiment_id"],
+        "training_scope": config.get("training_scope", "micro_overfit"),
         "status": result["status"],
         "created_at_utc": _now(),
         "config_sha256": sha256_file(snapshot),
@@ -1349,8 +2272,15 @@ def execute_reload_check(config: dict[str, Any], run_root: Path) -> dict[str, An
         if not path.exists():
             raise FileNotFoundError(f"reload-check input missing: {path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("experiment_id") != "E01-A" or manifest.get("init_adapter") is not None or manifest.get("resume_from_checkpoint") is not None:
-        raise ValueError("reload-check accepts only an independent E01-A run")
+    if manifest.get("experiment_id") != config["experiment_id"] or manifest.get("init_adapter") is not None:
+        raise ValueError("reload-check Run identity differs from the independently initialized experiment")
+    snapshot = root / "config_snapshot.yaml"
+    if not snapshot.is_file() or sha256_file(snapshot) != manifest.get("config_sha256"):
+        raise ValueError("reload-check frozen training config snapshot changed")
+    observed_adapter, _ = inference.adapter_weight_identity(adapter_dir)
+    recorded_adapter = manifest.get("adapter_identity") or {}
+    if any(observed_adapter.get(key) != recorded_adapter.get(key) for key in ("weight_sha256", "config_sha256")):
+        raise ValueError("reload-check Adapter identity changed after training")
     probe = json.loads(probe_path.read_text(encoding="utf-8"))
     base_path = _resolve(config["base_model"]["local_path"])
     base_before = inference._weight_identity(base_path, {
@@ -1394,27 +2324,41 @@ def execute_reload_check(config: dict[str, Any], run_root: Path) -> dict[str, An
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run isolated E01 QLoRA preflight and training")
     parser.add_argument("--config", default="configs/training/e01_a.yaml")
-    parser.add_argument("--mode", choices=("preflight", "one-step", "train", "reload-check"), required=True)
+    parser.add_argument("--mode", choices=("preflight", "one-step", "train", "resume", "reload-check"), required=True)
     parser.add_argument("--run-id")
     parser.add_argument("--run-root")
     parser.add_argument("--one-step-proof")
+    parser.add_argument("--preflight-run-root")
+    parser.add_argument("--checkpoint")
+    parser.add_argument("--allow-full-training", action="store_true")
+    parser.add_argument("--stop-after-step", type=int, help="Save a full checkpoint and pause the same Run at this optimizer step")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     config, config_path = load_config(args.config)
-    validate_training_mode(config, args.mode)
+    validate_training_mode(config, args.mode, allow_full_training=args.allow_full_training)
     if args.mode == "reload-check":
         if not args.run_root:
             raise ValueError("reload-check requires --run-root")
         result = execute_reload_check(config, _resolve(args.run_root))
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["status"] == "passed" else 2
-    if not args.run_id:
+    if args.mode != "resume" and not args.run_id:
         raise ValueError(f"--run-id is required for mode={args.mode}")
     if args.mode == "preflight":
         run_root = execute_preflight(config, config_path, args.run_id)
+    elif args.mode == "resume":
+        if config["experiment_id"] not in {"E01-B-PILOT", "E01-B"}:
+            raise ValueError("resume is supported only for the same E01-B/Pilot Run")
+        if not args.run_root or not args.checkpoint:
+            raise ValueError("resume requires --run-root and explicit --checkpoint")
+        run_root = execute_staged_resume(config, config_path, _resolve(args.run_root), _resolve(args.checkpoint), allow_full_training=args.allow_full_training, stop_after_step=args.stop_after_step)
+    elif config["experiment_id"] in {"E01-B-PILOT", "E01-B"}:
+        if not args.preflight_run_root:
+            raise ValueError("E01-B train requires --preflight-run-root with status=passed")
+        run_root = execute_staged_train(config, config_path, args.run_id, _resolve(args.preflight_run_root), allow_full_training=args.allow_full_training, stop_after_step=args.stop_after_step)
     elif args.mode == "one-step":
         run_root = execute_one_step(config, config_path, args.run_id)
     else:
@@ -1423,7 +2367,9 @@ def main(argv: list[str] | None = None) -> int:
         run_root = execute_training(config, config_path, args.run_id, _resolve(args.one_step_proof))
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
     print(json.dumps({"run_root": str(run_root), "status": manifest["status"]}, ensure_ascii=False))
-    return 0 if manifest["status"] in {"passed", "blocked_gpu_unavailable", "blocked_bf16_unavailable"} else 2
+    if manifest["status"] == "passed" or manifest.get("stop_reason") == "requested_checkpoint_pause":
+        return 0
+    return 0 if config["experiment_id"] == "E01-A" and manifest["status"] in {"blocked_gpu_unavailable", "blocked_bf16_unavailable"} else 2
 
 
 if __name__ == "__main__":
