@@ -223,7 +223,7 @@ The runner requires actual NF4/BF16/CUDA placement with no CPU/disk offload and 
 
 ## E01-A — QLoRA engineering acceptance
 
-The implementation uses `configs/training/e01_a.yaml` for the independent one-step proof and 8-row Micro-overfit. `configs/training/e01_b.yaml` is a draft only; the CLI rejects B training while it remains behind the manual gate. Both configs require empty `init_adapter` and `resume_from_checkpoint` fields.
+The implementation uses `configs/training/e01_a.yaml` for the independent one-step proof and 8-row Micro-overfit. `configs/training/e01_b.yaml` remains a Full B draft; its training gate requires an independently approved config and an explicit launch flag. The separate Pilot and Full B commands are documented below. All baseline configs require empty `init_adapter` and `resume_from_checkpoint` fields; same-Run checkpoint resume is selected explicitly on the CLI.
 
 Run CPU/synthetic regression first, then create a new, immutable preflight Run ID:
 
@@ -278,6 +278,136 @@ python scripts/e01_evaluate.py \
 ```
 
 The evaluation attempt writes to `outputs/training/E01-A-<run-id>/evaluation/dev_smoke/<attempt-id>/`. It records a `running` `run_manifest.json` before launching inference and updates it with inference/scoring status. A new attempt ID gives each retry an independent output directory; the CLI also generates a unique ID if `--attempt-id` is omitted. Raw training generations, predictions, runner reports, and scores stay under ignored `outputs/training/`. Do not commit those artifacts or use E01-A training fit as Dev generalization evidence. Review [`E01-A 训练可学习性验收报告`](experiments/E01-A_训练可学习性验收报告.md) before setting E01-B's Epoch/Steps, resource budget, and explicit start decision.
+
+## E01-B — 分阶段训练与公平 Dev 评测
+
+实现次序为「训练工程完善 → Pilot 及恢复验收 → 人工冻结 Full B 预算 → 独立 Full B → 单独许可的 Base/Adapter Dev 推理 → 离线配对比较」。[训练工程完善方案](task/E0.1-B_训练工程完善任务方案.md)是[分阶段训练与公平评测方案](task/E0.1-B_分阶段训练与公平评测执行方案.md)的前置工程；完成工程不依赖 Full B 的结果，也不需要改写两份任务方案。实验验收报告待真实产物审阅后填写；本节提供实际程序和运行合同。
+
+### 1. 环境与工程回归
+
+在仓库根目录、同一个 Bash 会话中分段执行。每次实验使用新 Run ID；恢复时显式指定原 Run 和真实 Checkpoint，不搜索「最新 Adapter」。
+
+```bash
+source .venv/bin/activate
+set -euo pipefail
+python -m pip check
+python -m pytest tests/test_e01_b_training.py tests/test_e01_b_evaluate.py tests/test_inference_resume.py tests/test_e01_training.py tests/test_e01_evaluate.py -q
+```
+
+CPU 回归包含本地随机小模型的真实 Trainer 暂停/恢复，对照连续训练的 LoRA 参数、LR、数据顺序和监督 Token 计数；这些是工程机制的证据。赛事模型的 NF4/BF16/CUDA、显存和质量证据来自下面实际运行的产物。
+
+### 2. Pilot：512 条 Train，先暂停再恢复
+
+```bash
+E01_PILOT_RUN_ID="E01-B-PILOT-$(date +%Y%m%d-%H%M%S)"
+bash scripts/e01_b_pilot.sh "$E01_PILOT_RUN_ID"
+```
+
+该程序只执行 Pilot：独立 preflight → 新 Base + 新 LoRA → 32 步保存完整 Checkpoint 并暂停 → 从同一个 Run 的 `trainer/checkpoint-32` 恢复到 128 步 → 保存 Adapter、释放/重载核对 → 打印资源审阅摘要。每个环节失败立即停止，不解锁或启动 Full B。Pilot 配置集中于 `configs/training/e01_b_pilot.yaml`：512 条样本覆盖长度十分位、全部 Train 情绪及空/非空画像，包含最长序列；训练批次按 Seed 随机打乱。SFT Dev Loss 使用独立、固定的 256 条 Dev，Micro Batch / Eval Batch 均为 1，累计 4；Trainer 时间预算为两小时，含训练中的验证和 Checkpoint，按 Step 边界检查。
+
+主要产物位于 `outputs/training/$E01_PILOT_RUN_ID/`：`manifest.json`、`selected_samples.json`、`train_log.jsonl`、`eval_log.jsonl`、`progress.json`、`trainer/checkpoint-*/checkpoint_manifest.json`、`training_evidence.json`、`adapter/` 和 `reload_check.json`。Checkpoint 同时保存 Adapter、Optimizer、Scheduler、Trainer State 和 RNG；保留最近两个 Checkpoint。仅首步、固定间隔及末步比较全部 LoRA 参数，常规 Step 不复制全部参数到 CPU。
+
+可另行复核最终 Adapter 重载，并重新打印审阅摘要：
+
+```bash
+python -m src.training.training_sft \
+  --config configs/training/e01_b_pilot.yaml --mode reload-check \
+  --run-root "outputs/training/$E01_PILOT_RUN_ID"
+python scripts/e01_b_config.py review \
+  --pilot-run-root "outputs/training/$E01_PILOT_RUN_ID"
+```
+
+`review` 只读产物，打印实测长序列范围、Loss、Token 吞吐、显存、Checkpoint 占用和磁盘余量。其 Full B 时长按实测 Token 吞吐估算，不能消除长序列计算成本、全量 Dev Loss 与保存间隔带来的误差，也不构成批准。
+
+### 3. 可选的 Pilot Dev 160 条质量诊断
+
+先用原 E00 适配器构建独立的 160 条 Smoke，固定 Seed 和样本 ID，覆盖情绪、画像和历史长度特征。完整 D0.3 Dev 身份仍为 1,833 条；160 条只作为 Pilot 诊断，不用于正式泛化结论。推理子进程只收到 `id+history` 文件；References 由后续评分读取。
+
+```bash
+python -m src.evaluation.prepare_dev --config configs/evaluation/e01_b_pilot.yaml
+E01_PILOT_BASE_ID="E01-B-PILOT-BASE-$(date +%Y%m%d-%H%M%S)"
+E01_PILOT_EVAL_ID="E01-B-PILOT-EVAL-$(date +%Y%m%d-%H%M%S)"
+python scripts/e01_b_evaluate.py --scope pilot-dev --model base \
+  --run-id "$E01_PILOT_BASE_ID" --hardware-label local-rtx4060-laptop-8gb
+python scripts/e01_b_evaluate.py --scope pilot-dev --model adapter \
+  --training-run-root "outputs/training/$E01_PILOT_RUN_ID" \
+  --run-id "$E01_PILOT_EVAL_ID" --hardware-label local-rtx4060-laptop-8gb
+python scripts/e01_b_evaluate.py --scope compare \
+  --base-run-root "outputs/evaluation/e01_b/pilot/$E01_PILOT_BASE_ID" \
+  --adapter-run-root "outputs/evaluation/e01_b/pilot/$E01_PILOT_EVAL_ID" \
+  --output-dir "outputs/evaluation/e01_b/comparison/pilot-$(date +%Y%m%d-%H%M%S)"
+```
+
+### 4. 审阅 Pilot 后显式批准 Full B 配置
+
+只有审阅真实 Pilot 长序列、显存、恢复结果、时长估算和磁盘后再执行这一段。下面学习率 `1e-4`、1 Epoch、每 256 步保存/验证是候选示例；操作人应根据 Pilot 明确选择预算。脚本要求操作人名字、时间预算及 `--approve-full-training`，生成新的批准快照，记录日期、范围、Pilot Manifest SHA 和配置内容 SHA；不会启动训练。仓库中的 `configs/training/e01_b.yaml` 继续保持 `draft_manual_gate`。
+
+```bash
+read -r -p 'Full B 批准人：' E01_APPROVED_BY
+read -r -p '根据 Pilot 批准的 Full B Trainer 总时间上限（小时）：' E01_FULL_GPU_HOURS
+E01_FULL_CONFIG="outputs/training/configs/E01-B-approved-$(date +%Y%m%d-%H%M%S).yaml"
+python scripts/e01_b_config.py approve \
+  --pilot-run-root "outputs/training/$E01_PILOT_RUN_ID" \
+  --output-config "$E01_FULL_CONFIG" --approved-by "$E01_APPROVED_BY" \
+  --learning-rate 0.0001 --epochs 1 --save-steps 256 --eval-steps 256 \
+  --max-training-hours "$E01_FULL_GPU_HOURS" --approve-full-training
+```
+
+Full B 同时检查 `approved_for_full_training`、批准配置 Hash、已审阅 Pilot 的身份和 `--allow-full-training`。修改批准快照的预算会使批准 Hash 失效；不得静默改变现有 Run 的配置。Full B 只用 Pilot 的审阅记录，不读取其 Adapter 或 Optimizer。16,192 条 Train、Batch 1、累计 4、1 Epoch 的候选为 4,048 个 Optimizer Steps，启动时再次与实际 DataLoader 调度核对。
+
+### 5. Full B 独立训练
+
+```bash
+E01_FULL_RUN_ID="E01-B-FULL-$(date +%Y%m%d-%H%M%S)"
+E01_FULL_PREFLIGHT_ID="${E01_FULL_RUN_ID}-preflight"
+python -m src.training.training_sft --config "$E01_FULL_CONFIG" \
+  --mode preflight --run-id "$E01_FULL_PREFLIGHT_ID"
+python -m src.training.training_sft --config "$E01_FULL_CONFIG" \
+  --mode train --run-id "$E01_FULL_RUN_ID" \
+  --preflight-run-root "outputs/training/$E01_FULL_PREFLIGHT_ID" \
+  --allow-full-training
+python -m src.training.training_sft --config "$E01_FULL_CONFIG" \
+  --mode reload-check --run-root "outputs/training/$E01_FULL_RUN_ID" \
+  --allow-full-training
+```
+
+训练 Manifest 的 `training_scope=full_train`，全部 16,192 条有效 Train 更新 LoRA；1,821 条 SFT Dev 只用于 Teacher-forced Loss。最终 Adapter 与基础文件指纹、数据与协议、LR、实际样本/Token 数、Checkpoint 和重载结果分别保存。生成评测不会随训练成功自动启动。
+
+如果训练中断，仅从原 Run 的明确 Checkpoint 恢复；不能给已完成 Run 续训。选择实际存在、完整且属于该 Run 的最后一个 Checkpoint，替换下方输入步骤。中断后超出 Checkpoint 的日志会先保存至 `interrupted_attempts/`，再恢复标准日志的 Step 连续性；不会重复计入丢失的更新。冻结的累计 Trainer 时间预算继续生效。
+
+```bash
+read -r -p '原 Full B Run 中实际 Checkpoint 的 Step：' E01_CHECKPOINT_STEP
+python -m src.training.training_sft --config "$E01_FULL_CONFIG" \
+  --mode resume --run-root "outputs/training/$E01_FULL_RUN_ID" \
+  --checkpoint "outputs/training/$E01_FULL_RUN_ID/trainer/checkpoint-$E01_CHECKPOINT_STEP" \
+  --allow-full-training
+```
+
+### 6. Full Dev Base 与 B 分别执行，再离线配对
+
+Full B 完成且重载通过后，单独决定这两次 GPU 推理的资源许可。完整输入复用 E00.1 的 1,833 条无标签 Dev；如果本机尚未生成，则先执行 `python -m src.evaluation.prepare_dev --config configs/evaluation/e00.yaml`。两组均使用同一 Base/Tokenizer、P0/F2/T1、P=1280、G=1200、Greedy、NF4/BF16 和评分器，只改变 Adapter 是否启用。
+
+```bash
+E01_BASE_DEV_ID="E00.3-BASE-$(date +%Y%m%d-%H%M%S)"
+E01_ADAPTER_DEV_ID="E01-B-EVAL-$(date +%Y%m%d-%H%M%S)"
+python scripts/e01_b_evaluate.py --scope full-dev --model base \
+  --run-id "$E01_BASE_DEV_ID" --hardware-label local-rtx4060-laptop-8gb \
+  --allow-full-dev
+python scripts/e01_b_evaluate.py --scope full-dev --model adapter \
+  --training-run-root "outputs/training/$E01_FULL_RUN_ID" \
+  --run-id "$E01_ADAPTER_DEV_ID" --hardware-label local-rtx4060-laptop-8gb \
+  --allow-full-dev
+python scripts/e01_b_evaluate.py --scope compare \
+  --base-run-root "outputs/evaluation/e01_b/full/$E01_BASE_DEV_ID" \
+  --adapter-run-root "outputs/evaluation/e01_b/full/$E01_ADAPTER_DEV_ID" \
+  --output-dir "outputs/evaluation/e01_b/comparison/full-$(date +%Y%m%d-%H%M%S)"
+```
+
+每次生成前持久化 `run_manifest.json`，随后逐条提交 Raw/Submission 和带内容 Hash 的 `runner/run_progress.json`，同时在终端及 `runner.log` 输出进度。生成异常会停止；已经提交的前缀保留。发生中断时，使用完全相同的原命令追加 `--resume`（Full Dev 仍需 `--allow-full-dev`）；配置、代码/依赖、数据、Base/Adapter 身份必须一致。恢复会截去上次未提交的尾行，再从下一个 ID 生成。已评分 Run 不允许覆盖；新实验或重新开始用新 Run ID。`--render-only` 可只冻结并查看配置，再用同一命令追加 `--resume` 启动。
+
+`compare` 只读取既有预测并复用 E00 Scorer 重新核验与评分，不训练、不生成。它要求两组完整 ID/Reference Hash、协议、解码、硬件标签、代码/依赖一致，拒绝 Pilot/Full 混比和部分完成结果。产物 `comparison_summary.json`、`report.md`、`comparison_cases.jsonl` 汇总情绪逐类指标/混淆矩阵、画像 33 标签及逐维/非空 Gold Recall、Raw 严格 JSON/A0 Schema 与错误分布、Submission Schema、BLEU-4/ROUGE-L、Token/延迟/显存及配对迁移；情绪差值附固定 Seed 的会话簇配对 Bootstrap 区间。逐 ID 表只含 ID 和诊断统计。
+
+BERTScore 按冻结配置为 `not_run`；官方性能口径为 `not_run`。恢复后的计时包含多个模型加载后的首条冷启动，不能作为单次连续官方性能结果。空画像会抬高 Exact Match，必须结合非空 Gold Recall 与标签 Micro-F1 解读。所有权重、Raw、预测和报告产物仍在忽略目录；真实结果审阅后再填写两份方案要求的版本化验收报告。
 
 ## Regression suite
 
