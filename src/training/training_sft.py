@@ -33,6 +33,12 @@ from src.shared.prompting import build_messages, encode_inference_prompt
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_PACKAGES = ("torch", "transformers", "trl", "peft", "bitsandbytes", "datasets", "accelerate")
+# This exact pre-fix training implementation is compatible with the dtype-preserving
+# resume loader below. All data, config, model, protocol, package, and CUDA identities
+# are still checked before a checkpoint carrying this code fingerprint is accepted.
+RESUME_COMPATIBLE_TRAINING_CODE_SHA256 = frozenset({
+    "565a2f8f8a926aade8a7ee0218751c49eda214404c184880d5ca93bf6882bc14",
+})
 TRAIN_ROW_FIELDS = {
     "sample_id", "conversation_id", "source_split", "source", "prompt_length",
     "completion_length", "input_ids", "labels",
@@ -867,6 +873,37 @@ def _build_sft_trainer(
                 training_counts.record(inputs)
             return super().training_step(*args, **kwargs)
 
+        def _load_from_checkpoint(self, resume_from_checkpoint, model=None):
+            import inspect
+            from types import MethodType
+
+            target_model = self.model if model is None else model
+            load_adapter = getattr(target_model, "load_adapter", None)
+            if not callable(load_adapter):
+                return super()._load_from_checkpoint(resume_from_checkpoint, model=model)
+            try:
+                supports_dtype_control = "autocast_adapter_dtype" in inspect.signature(load_adapter).parameters
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("Cannot verify PEFT load_adapter dtype controls; refusing unsafe checkpoint resume") from exc
+            if not supports_dtype_control:
+                raise RuntimeError("PEFT load_adapter cannot preserve the checkpoint's adapter dtype")
+
+            missing = object()
+            previous_instance_method = target_model.__dict__.get("load_adapter", missing)
+
+            def _load_adapter_without_autocast(_model, *args, **kwargs):
+                kwargs["autocast_adapter_dtype"] = False
+                return load_adapter(*args, **kwargs)
+
+            target_model.load_adapter = MethodType(_load_adapter_without_autocast, target_model)
+            try:
+                return super()._load_from_checkpoint(resume_from_checkpoint, model=model)
+            finally:
+                if previous_instance_method is missing:
+                    delattr(target_model, "load_adapter")
+                else:
+                    target_model.load_adapter = previous_instance_method
+
     trainer = RecordedSFTTrainer(
         model=model,
         args=args,
@@ -1012,6 +1049,7 @@ def _verify_checkpoint(
     *,
     expected: dict[str, Any],
     run_id: str,
+    compatible_training_code_sha256: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     checkpoint = checkpoint.resolve()
     manifest_path = checkpoint / "checkpoint_manifest.json"
@@ -1021,6 +1059,12 @@ def _verify_checkpoint(
     if record.get("status") != "complete" or record.get("run_id") != run_id:
         raise ValueError("checkpoint status or Run ID does not match the requested resume")
     for key, value in expected.items():
+        if (
+            key == "training_code_sha256"
+            and record.get(key) != value
+            and record.get(key) in compatible_training_code_sha256
+        ):
+            continue
         if record.get(key) != value:
             raise ValueError(f"checkpoint {key} does not match the current Run")
     if record.get("files_sha256") != canonical_sha256(record.get("files")):
@@ -1061,6 +1105,7 @@ def _optimizer_evidence_callback(
         def __init__(self):
             self.model = model
             self.trainable = trainable
+            self.expected_trainable_names = tuple(name for name, _parameter in trainable)
             self.config = config
             self.samples = samples
             self.tokenizer = tokenizer
@@ -1086,6 +1131,12 @@ def _optimizer_evidence_callback(
             self.stop_reason: str | None = None
 
         def on_train_begin(self, args, state, control, **kwargs):
+            # Trainer restores PEFT adapter weights before this callback. Rebind to
+            # the live Parameters in case the backend replaced their objects.
+            current = _trainable_parameters(self.model)
+            if {name for name, _parameter in current} != set(self.expected_trainable_names):
+                raise RuntimeError("Trainer checkpoint restore changed the trainable LoRA parameter set")
+            self.trainable = current
             self.training_started = time.perf_counter()
             return control
 
@@ -1905,7 +1956,12 @@ def _execute_staged_training(
             raise ValueError("resume checkpoint must belong to this Run's trainer directory")
         if not checkpoint_to_resume.is_dir() or not re.fullmatch(r"checkpoint-[1-9][0-9]*", checkpoint_to_resume.name):
             raise ValueError("resume requires an explicit Trainer checkpoint directory")
-        checkpoint_record = _verify_checkpoint(checkpoint_to_resume, expected=expected_checkpoint_identity, run_id=run_id)
+        checkpoint_record = _verify_checkpoint(
+            checkpoint_to_resume,
+            expected=expected_checkpoint_identity,
+            run_id=run_id,
+            compatible_training_code_sha256=RESUME_COMPATIBLE_TRAINING_CODE_SHA256,
+        )
         newer = [path for path in checkpoint_root.glob("checkpoint-*") if re.fullmatch(r"checkpoint-[0-9]+", path.name) and int(path.name.split("-")[-1]) > checkpoint_record["optimizer_step"]]
         if newer:
             raise ValueError("resume requires the latest checkpoint; a newer checkpoint directory would be overwritten")
@@ -1913,6 +1969,7 @@ def _execute_staged_training(
             "checkpoint": str(checkpoint_to_resume),
             "checkpoint_manifest_sha256": sha256_file(checkpoint_to_resume / "checkpoint_manifest.json"),
             "optimizer_step": checkpoint_record["optimizer_step"],
+            "compatible_legacy_training_code": checkpoint_record.get("training_code_sha256") in RESUME_COMPATIBLE_TRAINING_CODE_SHA256,
             "resumed_at_utc": _now(),
         })
         manifest.update(status="running", stage="resuming", resume_from_checkpoint=str(checkpoint_to_resume))

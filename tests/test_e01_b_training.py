@@ -107,6 +107,31 @@ def test_checkpoint_integrity_rejects_wrong_run_data_and_modified_optimizer(tmp_
         training._verify_checkpoint(checkpoint, expected={}, run_id="pilot-one")
 
 
+def test_resume_accepts_only_explicitly_compatible_legacy_training_code_hash(tmp_path):
+    checkpoint = tmp_path / "checkpoint-2"
+    checkpoint.mkdir()
+    for name in ("optimizer.pt", "scheduler.pt", "rng_state.pth", "adapter_config.json", "adapter_model.safetensors"):
+        (checkpoint / name).write_bytes(b"synthetic checkpoint fixture")
+    (checkpoint / "trainer_state.json").write_text('{"global_step":2}')
+    training._write_checkpoint_manifest(checkpoint, {
+        "run_id": "pilot-one",
+        "optimizer_step": 2,
+        "training_code_sha256": "known-compatible-old-code",
+    })
+    training._verify_checkpoint(
+        checkpoint,
+        expected={"training_code_sha256": "current-code"},
+        run_id="pilot-one",
+        compatible_training_code_sha256=frozenset({"known-compatible-old-code"}),
+    )
+    with pytest.raises(ValueError, match="training_code_sha256"):
+        training._verify_checkpoint(
+            checkpoint,
+            expected={"training_code_sha256": "current-code"},
+            run_id="pilot-one",
+        )
+
+
 def test_resume_archives_uncheckpointed_log_tail_and_preserves_step_prefix(tmp_path):
     root = tmp_path / "pilot"
     root.mkdir()
@@ -167,3 +192,21 @@ def test_actual_cpu_trainer_resume_preserves_lora_lr_rng_order_and_labels(tmp_pa
     expected = dict(continuous_model.named_parameters())
     for name, parameter in resumed_model.named_parameters():
         assert torch.equal(parameter, expected[name]), name
+
+
+def test_peft_resume_preserves_bfloat16_adapter_parameter_objects(tmp_path):
+    trainer, model, callback = _tiny_trainer(tmp_path / "dtype-resume")
+    initial_trainable = training._trainable_parameters(model)
+    for _name, parameter in initial_trainable:
+        parameter.data = parameter.data.to(torch.bfloat16)
+    initial_ids = {name: id(parameter) for name, parameter in initial_trainable}
+
+    checkpoint = tmp_path / "bfloat16-adapter-checkpoint"
+    model.save_pretrained(checkpoint, safe_serialization=True)
+    trainer._load_from_checkpoint(str(checkpoint))
+
+    restored = training._trainable_parameters(model)
+    assert {name: id(parameter) for name, parameter in restored} == initial_ids
+    assert {parameter.dtype for _name, parameter in restored} == {torch.bfloat16}
+    callback.on_train_begin(None, None, None)
+    assert {name: id(parameter) for name, parameter in callback.trainable} == initial_ids
