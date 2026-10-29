@@ -2,7 +2,32 @@
 set -euo pipefail
 
 # 启动虚拟环境conda_env, 名称固定，不要修改
-source activate conda_env
+activate_project_conda_env() {
+  if [[ "${CONDA_DEFAULT_ENV:-}" == "conda_env" && -n "${CONDA_PREFIX:-}" ]]; then
+    return 0
+  fi
+
+  local conda_command="${CONDA_EXE:-}"
+  if [[ -z "$conda_command" || ! -x "$conda_command" ]]; then
+    conda_command="$(type -P conda || true)"
+  fi
+  if [[ -z "$conda_command" || ! -x "$conda_command" ]]; then
+    echo "ERROR: 找不到 Conda 可执行文件；请确保 conda 在 PATH 中，或设置 CONDA_EXE。入口需要环境 conda_env。" >&2
+    exit 1
+  fi
+
+  local conda_hook
+  if ! conda_hook="$("$conda_command" shell.bash hook 2>/dev/null)"; then
+    echo "ERROR: 无法初始化 Conda shell hook: $conda_command" >&2
+    exit 1
+  fi
+  eval "$conda_hook"
+  if ! conda activate conda_env; then
+    echo "ERROR: 无法激活 Conda 环境 conda_env。请检查该环境是否已创建。" >&2
+    exit 1
+  fi
+}
+activate_project_conda_env
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"

@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 from pathlib import Path
+import shlex
+import subprocess
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +29,8 @@ def test_official_schemas_and_submission_template_keep_the_reviewed_fingerprints
 def test_start_script_preserves_entry_arguments_and_fixed_environment_contract():
     script = (ROOT / "participant/start.sh").read_text(encoding="utf-8")
 
-    assert "source activate conda_env" in script
+    assert 'conda activate conda_env' in script
+    assert 'shell.bash hook' in script
     assert '[[ $# -ne 2 ]]' in script
     assert 'TEST_FILE="$1"' in script
     assert 'RESULT_DIR="$2"' in script
@@ -38,3 +44,67 @@ def test_start_script_keeps_lora_opt_in_and_checks_the_requested_server_route():
     assert 'VLLM_ARGS+=(--enable-lora --lora-modules "$LORA_NAME=$LORA_PATH" --max-lora-rank "$MAX_LORA_RANK")' in script
     assert 'scripts/e02_vllm_probe.py" models' in script
     assert 'export EVALUATION_API_MODEL="$REQUEST_MODEL_NAME"' in script
+
+
+def test_start_script_bootstraps_conda_from_declared_executable(tmp_path):
+    fake_conda = tmp_path / "conda"
+    fake_conda.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = shell.bash ] && [ \"$2\" = hook ]; then\n"
+        "  cat <<'HOOK'\n"
+        "conda() {\n"
+        "  [ \"$1\" = activate ] && [ \"$2\" = conda_env ] || return 2\n"
+        "  export CONDA_DEFAULT_ENV=conda_env\n"
+        "  export CONDA_PREFIX=/synthetic/conda_env\n"
+        "}\n"
+        "HOOK\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    fake_conda.chmod(0o755)
+
+    config_path = tmp_path / "inference.json"
+    config_path.write_text(json.dumps({"backend": "transformers", "model_path": "unused"}), encoding="utf-8")
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text("{}\n", encoding="utf-8")
+    capture_path = tmp_path / "runner_args.txt"
+    python_wrapper = tmp_path / "python-wrapper"
+    python_wrapper.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"${1:-}\" == */participant/run_inference.py ]]; then\n"
+        "  printf '%s\\n' \"$@\" > \"$RUNNER_CAPTURE\"\n"
+        "  exit 0\n"
+        "fi\n"
+        f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    python_wrapper.chmod(0o755)
+
+    environment = {
+        **os.environ,
+        "CONDA_EXE": str(fake_conda),
+        "CONDA_DEFAULT_ENV": "",
+        "CONDA_PREFIX": "",
+        "EVALUATION_INFERENCE_CONFIG": str(config_path),
+        "PYTHON_BIN": str(python_wrapper),
+        "RUNNER_CAPTURE": str(capture_path),
+    }
+    result_dir = tmp_path / "result"
+    completed = subprocess.run(
+        ["bash", str(ROOT / "participant/start.sh"), str(input_path), str(result_dir)],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert capture_path.read_text(encoding="utf-8").splitlines() == [
+        str(ROOT / "participant/run_inference.py"),
+        str(input_path),
+        str(result_dir),
+    ]
