@@ -4,13 +4,15 @@
 > 训练 Run：`E01-B-PILOT-20261028-092248`
 > 评测范围：固定 160 条 `pilot-dev`；本报告不代表完整 Dev 泛化结果。
 
+> **后续进度**：Full B 已完成独立 16,192 条训练，Full Dev Base/Adapter 的 1,833 条配对评测也已完成。Pilot 的 159/160 画像全空仍是该 160 条范围内的历史结果；Full B 画像指标见[正式报告](E01-B_正式SFT与Dev对照验收报告.md)，逐标签诊断见[深度报告](E01-B_Full_深度诊断与证据整理.md)。
+
 ## 1. 验收结论
 
 E01-B Pilot 训练、同 Run Checkpoint 恢复、Adapter 重载，以及 160 条 Base/Adapter 配对生成与离线评分均已完成。训练 Run 状态为 `passed`，两个评测 Run 状态均为 `scored`，配对比较状态为 `completed`。
 
 Pilot Dev 上，Adapter 的情绪识别、Raw JSON/A0 格式合法率和回复本地代理指标均有改善；但画像 33 标签 Micro-F1 从 `0.0648` 降至 `0.0077`，几乎所有画像输出都为空。这是需要跟进的质量风险信号，不能由三维 Exact Match 的表面上升抵消。
 
-本结果满足 Pilot 工程与诊断阶段的记录要求，**不等于批准 Full B，不等于完整 Dev 验收，也不构成官方比赛得分**。Pilot 质量指标按训练工程方案仅作为风险信号，不据此自动改变模型、Prompt、标签语义或训练损失。
+在 Pilot 报告形成时，本结果满足工程与诊断阶段的记录要求，**本身不构成 Full B 批准、完整 Dev 验收或官方比赛得分**。之后的 Full B 与完整 Dev 已通过独立 Run 完成，见本报告首屏的后续进度。Pilot 质量指标当时仅作为风险信号，不据此自动改变模型、Prompt、标签语义或训练损失。
 
 ## 2. Pilot 训练与恢复
 
@@ -31,7 +33,7 @@ Pilot Dev 上，Adapter 的情绪识别、Raw JSON/A0 格式合法率和回复�
 | Adapter Reload Check | `passed` |
 | Base 权重未改变 | 是；SHA-256 `005d20550c04f4e246e5b434448786b44a0196b47d758d0acc77aba279e5bbc5` |
 
-训练 Manifest 记录了两次从同一 Run 的 `checkpoint-32` 恢复尝试，最终运行完成到 Step 128。恢复过程曾触发 LoRA 梯度检查异常；修复后的续训和最终重载检查均通过。最终 Adapter 权重 SHA-256 为 `f2fde06fcccbc668bceca74ff76fae56531f35c4291d37a1c3ea06de369374b2`，Adapter 配置 SHA-256 为 `b5c2bbe706e7e92f7a9eb16ecec477748fa4814758ce99a455adc630cf08bfe7`。
+Pilot 从同一 Run 的 `checkpoint-32` 恢复并完成至 Step 128，最终 Adapter 重载检查通过。Adapter 权重 SHA-256 为 `f2fde06fcccbc668bceca74ff76fae56531f35c4291d37a1c3ea06de369374b2`，Adapter 配置 SHA-256 为 `b5c2bbe706e7e92f7a9eb16ecec477748fa4814758ce99a455adc630cf08bfe7`。
 
 供复核的训练身份指纹：Pilot Manifest SHA-256 `f19fe4fa852b2ca60f75bcb7640677abaa66b8f80ecd3509b0f012192dea36be`；训练配置 SHA-256 `5c33502ead211096ca6de4fe0aa6365ab255b9172e0297951e8751447765a68c`；D0.4.3 SFT Train SHA-256 `072076d1a74fe1e29e89a598d2e6acee7188624de0738bfecfe3ea19267f1e79`；512 样本选择文件 SHA-256 `b53336224071914500aa91a4ad82c6f9e6334b11eb5a69231a6b4e20ba09314e`；Tokenizer 签名 SHA-256 `1662c9e99c6185441026a168b2dd6b09af103dc6dc3563b72f598411f14d1913`。
 
@@ -152,9 +154,9 @@ outputs/evaluation/e01_b/comparison/pilot-20261028-101136/
 
 配对汇总报告为 `outputs/evaluation/e01_b/comparison/pilot-20261028-101136/report.md`；本报告只保留聚合指标、身份指纹和解释，不复制逐 ID 原始输出或对话。
 
-## 8. 下一阶段
+## 8. Pilot 时点提出的后续步骤（已由后续阶段更新）
 
 1. 训练目标序列核查已完成：没有发现 Prompt Mask、Completion 对齐或监督目标序列化错误。当前证据提示回复 Token 占比远高于画像字段，但不足以单独证明这是画像塌缩的原因；暂不改 P0、标签定义或标准 Loss。
-2. 如果目标仍是建立标准 E01-B 基线，按 [`docs/workflow.md`](../workflow.md) 的审批步骤人工冻结 Full B 总预算、学习率、Epoch 和保存/验证间隔，再用独立的新 LoRA 运行 16,192 条 Full Train。Full B 不继承 Pilot Adapter 或其优化器状态。
-3. Full B 完成且重载通过后，另行决定并执行 1,833 条完整 Dev 的 Base 与 Adapter 生成，固定相同 ID、Prompt、Tokenizer、Greedy 解码与 Scorer，再作配对比较。
-4. 根据完整 Dev 结果判断画像问题是否仍然存在，再决定是否设计单变量实验。Pilot 的 160 条结果不足以批准模型切换、Prompt 更改、额外分类头或加权损失。
+2. Pilot 当时建议在独立 Full B Run 上使用 16,192 条有效 Train；该阶段现已完成，训练 Run 为 `E01-B-FULL-20261028-133805`，不继承 Pilot Adapter 或优化器状态。
+3. Pilot 当时建议在完整 1,833 条 Dev 上配对 Base 与 Adapter；该阶段现已完成，详见[Full B 正式验收报告](E01-B_正式SFT与Dev对照验收报告.md)。
+4. 当前是否启动单变量实验仍待审阅 Full B 逐类诊断并另行决策。Pilot 的 160 条结果不批准模型切换、Prompt 更改、额外分类头或加权损失；候选状态见[后续调优候选](后续调优候选与实验决策.md)。

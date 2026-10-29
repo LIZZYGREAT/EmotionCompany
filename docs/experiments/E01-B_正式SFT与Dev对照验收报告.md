@@ -6,6 +6,8 @@
 > Adapter Run：`E01-B-EVAL-20261028-223105`<br>
 > 配对比较：`full-20261029-062541`
 
+> 逐类情绪混淆、33 个画像标签、Raw 解析失败与长度/延迟分组见[Full 深度诊断报告](E01-B_Full_深度诊断与证据整理.md)；阶段背景与后续待验收项见[当前交接](../context/E01_当前状态与后续交接.md)。本文件仍是正式 Run 和总体对照的权威验收摘要。
+
 ## 1. 验收结论
 
 E01-B Full 训练、最终 Adapter 独立重载，以及 1,833 条完整 Dev 的 Base/Adapter 生成、评分和配对比较均已完成。训练 Manifest、两个评测 Run 和配对比较状态分别为 `passed`、`scored` 和 `completed`。两组使用相同的 Dev ID 集；References 没有进入生成器。
@@ -34,8 +36,6 @@ Full B Adapter 在本地代理指标上显著优于未经微调的 Base：情绪
 | GPU | NVIDIA GeForce RTX 4060 Laptop GPU，8 GiB |
 | 最终 Run 状态 | `passed`；`training_scope=full_train` |
 | 最终独立 Adapter 重载 | `passed`；64 个 Greedy Token IDs 完全一致，Base SHA 未变 |
-
-训练结束时的内置重载检查曾因训练与 Adapter 重载的量化 Base 精度准备路径不一致而失败。修复加载路径后，现有 Adapter 的独立重载检查通过；没有重跑训练。原始失败记录保留在 Run 的 `reload_check.json`，通过记录在 `reload_check_standalone.json`，Manifest 记录最终状态与检查历史。
 
 训练身份指纹：
 

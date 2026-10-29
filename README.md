@@ -47,11 +47,13 @@
 | E01-A 训练 | 工程验收通过 | 真实 QLoRA 完成 120 步并通过 Adapter 重载；8 条训练样本的拟合不能代表泛化，20 条 Dev Smoke 质量指标偏低。 |
 | E01-B Pilot | 训练与恢复通过 | Run `E01-B-PILOT-20261028-092248` 完成 512 条、128 步训练，从同一 Run 的 step-32 Checkpoint 恢复；Adapter 重载通过，Base 权重未变。固定 256 条 SFT Dev Loss 从 step 32 的 1.915 降至 step 128 的 1.779。 |
 | E01-B Pilot Dev 生成评测 | 已完成（160 条诊断） | Emotion Accuracy 从 0.106 升至 0.406，Raw A0 从 0.013 升至 0.913；Profile Micro-F1 从 0.0648 降至 0.0077，画像几乎恒为空。仅为 Pilot 风险信号，不是完整 Dev 结论；见 [Pilot 验收报告](docs/experiments/E01-B_训练工程与Pilot验收报告.md)。 |
-| E01-B Full、完整 Dev 与部署 | 未完成 / 有人工门禁 | Full B 配置仍为草案；完整 1,833 条 Base/Adapter 对照、官方性能轮次、vLLM 等价性及不超过 50 GB 的离线 Docker 镜像尚未验收。 |
+| E01-B Full 训练 | 已完成 | Run `E01-B-FULL-20261028-133805`：16,192 条有效 Train、4,048 步、1 Epoch；独立 Adapter 重载最终通过，Base 权重未变。 |
+| E01-B 完整 Dev 对照 | 已完成（1,833 条） | Base/Adapter 使用相同 D0.3 Dev IDs。情绪 Accuracy 0.1282→0.6536，画像 33 标签 Micro-F1 0.0782→0.4223，Raw A0 Schema 0.0093→0.9809；均为本地代理指标。见[正式验收报告](docs/experiments/E01-B_正式SFT与Dev对照验收报告.md)和[深度诊断](docs/experiments/E01-B_Full_深度诊断与证据整理.md)。 |
+| 部署 / 官方指标 | 未完成 | BERTScore、官方性能、目标服务 vLLM/K/Token 等价、官方 `start.sh` 和 ≤50GB 离线 Docker 均未验收。 |
 
 Pilot 的训练 Loss 和 SFT Dev Loss 只说明模型在 Completion-only 训练目标上的变化，不替代情绪、画像、Raw JSON/Schema、回复和性能评测。Pilot Run 的 Manifest、日志、Checkpoint 和权重保存在忽略目录 `outputs/training/`，以上摘要来自执行机上的真实结果，不是 Git 中的实验产物。
 
-Full B 不会因 Pilot 通过而自动启动。只有人工审核 Pilot、冻结预算并生成批准配置后，才能通过审批配置和 `--allow-full-training` 启动；完整 Dev Base 和 Adapter 推理也有独立资源门禁。具体执行顺序与命令见 [`docs/workflow.md`](docs/workflow.md) 的 E01-B 章节。
+Full B 与完整 Dev 对照已有实际 Run；README 中的下一阶段是**结果审阅与部署验收决策**，不是再次启动 Full B。实际 Run 路径、诊断命令和未来新 Run 的资源门禁/执行配方见 [`docs/workflow.md`](docs/workflow.md) 与[当前状态交接](docs/context/E01_当前状态与后续交接.md)。
 
 ## 仓库结构
 
@@ -114,11 +116,14 @@ bash /root/participant/start.sh TEST_FILE RESULT_DIR
 
 | 想了解 | 文档 |
 |---|---|
+| 唯一当前阶段入口与后续交接 | [E01 当前状态与后续交接](docs/context/E01_当前状态与后续交接.md) |
 | A0 架构、建模任务与实验原则 | [A0 技术架构与实验方案](docs/task/A0_技术架构与实验方案.md) |
 | 分阶段命令、运行产物和人工门禁 | [项目工作流](docs/workflow.md) |
 | 原始数据审计、处理政策与数据构建 | [D0.1 报告](docs/data/D0.1_数据质量审计报告.md)、[D0.3 报告](docs/data/D0.3_数据构建报告.md)、[D0.4.3 报告](docs/data/D0.4.3_监督数据构建与Batch验收报告.md)及其引用文档 |
 | E00 基线背景与阶段总结 | [E00 阶段总结与 E01 交接](docs/experiments/E00_阶段总结与E01交接.md) |
 | E01-A 真实训练和 Dev Smoke 结果 | [E01-A 验收报告](docs/experiments/E01-A_训练可学习性验收报告.md) |
 | E01-B Pilot 训练和 160 条配对评测结果 | [E01-B Pilot 验收报告](docs/experiments/E01-B_训练工程与Pilot验收报告.md) |
+| E01-B Full 与 1,833 条 Dev 权威汇总 | [E01-B 正式验收报告](docs/experiments/E01-B_正式SFT与Dev对照验收报告.md) |
+| E01-B 逐类情绪、逐标签画像、Raw 与延迟诊断 | [E01-B Full 深度诊断](docs/experiments/E01-B_Full_深度诊断与证据整理.md) |
 | E01-B 训练工程和公平评测方案 | [训练工程完善方案](docs/task/E0.1-B_训练工程完善任务方案.md)、[分阶段训练与公平评测方案](docs/task/E0.1-B_分阶段训练与公平评测执行方案.md) |
 | 开发环境、Git/PR 和 P/F/T 协议 | [环境复现指南](docs/完整环境配置与复现指南.md)、[协作规范](docs/knowledge/双人Git协作与PR操作规范.md)、[PFT 笔记](docs/knowledge/PFT_输入协议设计与版本演进笔记.md) |

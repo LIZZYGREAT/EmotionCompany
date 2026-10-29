@@ -4,7 +4,7 @@ Run the data stages from the repository root. The reports, configs, source, and 
 
 ## Current progress and handoff
 
-D0 through E00.2-D have completed their documented data, protocol, and small-sample diagnostic scopes. E01-A Run `E01-A-20261027-223703` passed its 120-step engineering and reload checks. Its fixed 20-row Dev Smoke completed with verified Base/Adapter identity, but low local metrics: emotion accuracy 0.10 (equal to the Train majority baseline), raw A0 schema validity 0.35, and profile-tag Micro-F1 0.00. This Smoke is diagnostic and does not establish generalization. E01-B Pilot Run `E01-B-PILOT-20261028-092248` completed 128 optimizer steps, same-Run Checkpoint recovery, Adapter reload, and its 160-row paired Pilot Dev comparison; see [`E01-B Pilot 验收报告`](experiments/E01-B_训练工程与Pilot验收报告.md). The independent Full B Run `E01-B-FULL-20261028-133805` completed 4,048 optimizer steps over all 16,192 Train rows and passed the standalone Adapter reload check. Full Dev Base `E00.3-BASE-20261028-223105` and Adapter `E01-B-EVAL-20261028-223105` both scored the same 1,833 IDs; the paired comparison completed. On local proxy metrics, emotion Accuracy was 0.1282 → 0.6536 and profile 33-label Micro-F1 was 0.0782 → 0.4223. These are not official competition scores; BERTScore and official performance remain `not_run`. See [`E01-B Full SFT 与 Dev 配对验收报告`](experiments/E01-B_正式SFT与Dev对照验收报告.md). Earlier E00 evidence and handoff context are in [`docs/experiments/E00_阶段总结与E01交接.md`](experiments/E00_阶段总结与E01交接.md); future experiments remain candidates in [`docs/experiments/后续调优候选与实验决策.md`](experiments/后续调优候选与实验决策.md).
+D0 through E00.2-D have completed their documented data, protocol, and small-sample diagnostic scopes. E01-A Run `E01-A-20261027-223703` passed its 120-step engineering and reload checks; its fixed 20-row Dev Smoke had low local metrics and does not establish generalization. E01-B Pilot Run `E01-B-PILOT-20261028-092248` completed 128 optimizer steps, same-Run Checkpoint recovery, Adapter reload, and its 160-row paired Pilot Dev comparison; see [`E01-B Pilot 验收报告`](experiments/E01-B_训练工程与Pilot验收报告.md). The independent Full B Run `E01-B-FULL-20261028-133805` completed 4,048 optimizer steps over all 16,192 Train rows and passed the standalone Adapter reload check. Full Dev Base `E00.3-BASE-20261028-223105` and Adapter `E01-B-EVAL-20261028-223105` both scored the same 1,833 IDs; the paired comparison completed. On local proxy metrics, emotion Accuracy was 0.1282 → 0.6536 and profile 33-label Micro-F1 was 0.0782 → 0.4223. These are not official competition scores; BERTScore and official performance remain `not_run`. See [`E01-B Full SFT 与 Dev 配对验收报告`](experiments/E01-B_正式SFT与Dev对照验收报告.md), [深度诊断报告](experiments/E01-B_Full_深度诊断与证据整理.md) and the [唯一当前交接入口](context/E01_当前状态与后续交接.md). Earlier E00 evidence and handoff context remain historical in [`E00 阶段总结与 E01 交接`](experiments/E00_阶段总结与E01交接.md); future experiments remain candidates in [`后续调优候选与实验决策`](experiments/后续调优候选与实验决策.md).
 
 The team Git branch, PR review, merge, and `main` protection process is documented in [`docs/knowledge/双人Git协作与PR操作规范.md`](knowledge/双人Git协作与PR操作规范.md). `.github/workflows/ci.yml` runs `unit-cpu` on every branch push and PR to `main`; configure Required Checks only after confirming the exact successful check name in GitHub.
 
@@ -223,7 +223,7 @@ The runner requires actual NF4/BF16/CUDA placement with no CPU/disk offload and 
 
 ## E01-A — QLoRA engineering acceptance
 
-The implementation uses `configs/training/e01_a.yaml` for the independent one-step proof and 8-row Micro-overfit. `configs/training/e01_b.yaml` remains a Full B draft; its training gate requires an independently approved config and an explicit launch flag. The separate Pilot and Full B commands are documented below. All baseline configs require empty `init_adapter` and `resume_from_checkpoint` fields; same-Run checkpoint resume is selected explicitly on the CLI.
+The implementation uses `configs/training/e01_a.yaml` for the independent one-step proof and 8-row Micro-overfit. `configs/training/e01_b.yaml` remains the protected Full B draft; the completed Full B Run used a separately approved snapshot recorded in its local `config_snapshot.yaml` and Manifest. The commands below are fresh-Run reproduction recipes, not the command history for that existing Run. All baseline configs require empty `init_adapter` and `resume_from_checkpoint` fields; same-Run checkpoint resume is selected explicitly on the CLI.
 
 Run CPU/synthetic regression first, then create a new, immutable preflight Run ID:
 
@@ -281,7 +281,25 @@ The evaluation attempt writes to `outputs/training/E01-A-<run-id>/evaluation/dev
 
 ## E01-B — 分阶段训练与公平 Dev 评测
 
-实现次序为「训练工程完善 → Pilot 及恢复验收 → 人工冻结 Full B 预算 → 独立 Full B → 单独许可的 Base/Adapter Dev 推理 → 离线配对比较」。[训练工程完善方案](task/E0.1-B_训练工程完善任务方案.md)是[分阶段训练与公平评测方案](task/E0.1-B_分阶段训练与公平评测执行方案.md)的前置工程；完成工程不依赖 Full B 的结果，也不需要改写两份任务方案。实验验收报告待真实产物审阅后填写；本节提供实际程序和运行合同。
+本节后面的命令是建立**新 Run**时的执行配方；不得用相同 Run ID 覆盖既有产物。当前已执行的真实 Run 如下。两份 E01-B 任务方案解释实现来源和执行门禁，不表示 Full B 仍待启动。
+
+| 已执行事项 | Run / 结果目录 | 状态 |
+|---|---|---|
+| Pilot 训练 | `outputs/training/E01-B-PILOT-20261028-092248/` | 512 Train、128 steps、恢复与 Adapter reload 通过 |
+| Full B 训练 | `outputs/training/E01-B-FULL-20261028-133805/` | 16,192 Train、4,048 steps、1 Epoch；standalone reload 通过 |
+| Base 完整 Dev | `outputs/evaluation/e01_b/full/E00.3-BASE-20261028-223105/` | 1,833 IDs，`scored` |
+| Full B Adapter 完整 Dev | `outputs/evaluation/e01_b/full/E01-B-EVAL-20261028-223105/` | 同一 1,833 IDs，`scored` |
+| Full Base/Adapter 配对比较 | `outputs/evaluation/e01_b/comparison/full-20261029-062541/` | `completed`；见[正式验收报告](experiments/E01-B_正式SFT与Dev对照验收报告.md) |
+| Full B 只读深度诊断 | `outputs/evaluation/e01_b/diagnostics/full-b-v4/` | Hash、IDs、分母、已评分结果交叉核验；见[诊断报告](experiments/E01-B_Full_深度诊断与证据整理.md) |
+
+只重跑现有产物的只读诊断时使用新输出目录；该脚本不加载模型、不训练、不推理、不重新评分：
+
+```bash
+python scripts/e01_b_diagnose.py \
+  --training-run-root outputs/training/E01-B-FULL-20261028-133805 \
+  --comparison-run-root outputs/evaluation/e01_b/comparison/full-20261029-062541 \
+  --output-dir outputs/evaluation/e01_b/diagnostics/full-b-v5
+```
 
 ### 1. 环境与工程回归
 
@@ -385,7 +403,7 @@ python -m src.training.training_sft --config "$E01_FULL_CONFIG" \
 
 ### 6. Full Dev Base 与 B 分别执行，再离线配对
 
-Full B 完成且重载通过后，单独决定这两次 GPU 推理的资源许可。完整输入复用 E00.1 的 1,833 条无标签 Dev；如果本机尚未生成，则先执行 `python -m src.evaluation.prepare_dev --config configs/evaluation/e00.yaml`。两组均使用同一 Base/Tokenizer、P0/F2/T1、P=1280、G=1200、Greedy、NF4/BF16 和评分器，只改变 Adapter 是否启用。
+为建立新的配对评测时，先核验 E00.1 的 1,833 条无标签 Dev；若本机不存在才运行 prepare 命令。既有 Base/Adapter Run 已使用相同输入、同一 Base/Tokenizer、P0/F2/T1、P=1280、G=1200、Greedy、NF4/BF16 和 Scorer，唯一模型差异是 Adapter 是否启用。以下命令会创建新 Run，不是重跑既有 Run 的必要步骤。
 
 ```bash
 E01_BASE_DEV_ID="E00.3-BASE-$(date +%Y%m%d-%H%M%S)"
@@ -407,7 +425,7 @@ python scripts/e01_b_evaluate.py --scope compare \
 
 `compare` 只读取既有预测并复用 E00 Scorer 重新核验与评分，不训练、不生成。它要求两组完整 ID/Reference Hash、协议、解码、硬件标签、代码/依赖一致，拒绝 Pilot/Full 混比和部分完成结果。产物 `comparison_summary.json`、`report.md`、`comparison_cases.jsonl` 汇总情绪逐类指标/混淆矩阵、画像 33 标签及逐维/非空 Gold Recall、Raw 严格 JSON/A0 Schema 与错误分布、Submission Schema、BLEU-4/ROUGE-L、Token/延迟/显存及配对迁移；情绪差值附固定 Seed 的会话簇配对 Bootstrap 区间。逐 ID 表只含 ID 和诊断统计。
 
-BERTScore 按冻结配置为 `not_run`；官方性能口径为 `not_run`。恢复后的计时包含多个模型加载后的首条冷启动，不能作为单次连续官方性能结果。空画像会抬高 Exact Match，必须结合非空 Gold Recall 与标签 Micro-F1 解读。所有权重、Raw、预测和报告产物仍在忽略目录；真实结果审阅后再填写两份方案要求的版本化验收报告。
+BERTScore 按冻结配置为 `not_run`；官方性能口径为 `not_run`。本机 Runner 的 100/100 轮统计已完成，但不是官方容器性能。空画像会影响 Exact Match，必须结合非空 Gold Recall 与标签 Micro-F1 解读。权重、Raw、预测与逐样本比较文件仍在忽略目录；汇总结果已记录在[正式验收报告](experiments/E01-B_正式SFT与Dev对照验收报告.md)和[深度诊断报告](experiments/E01-B_Full_深度诊断与证据整理.md)。
 
 ## Regression suite
 
