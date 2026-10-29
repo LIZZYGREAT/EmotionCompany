@@ -599,6 +599,36 @@ def validate_adapter_base_reference(adapter_config: dict[str, Any], model_id: st
     return declared
 
 
+def load_peft_adapter(
+    base_model: Any,
+    adapter_path: str | Path,
+    *,
+    prepare_quantized_base: bool,
+    is_trainable: bool = False,
+    local_files_only: bool = True,
+) -> Any:
+    """Load an Adapter with the same non-quantized parameter dtypes as QLoRA training."""
+    try:
+        from peft import PeftModel, prepare_model_for_kbit_training
+    except ImportError as exc:
+        raise RuntimeError("Adapter loading requires PEFT") from exc
+
+    if prepare_quantized_base:
+        # QLoRA training calls this before injecting LoRA. In particular, PEFT
+        # upcasts non-Params4bit BF16 parameters to FP32. Apply the same transform
+        # before loading the saved Adapter so train/reload/inference agree.
+        base_model = prepare_model_for_kbit_training(
+            base_model,
+            use_gradient_checkpointing=False,
+        )
+    return PeftModel.from_pretrained(
+        base_model,
+        str(adapter_path),
+        is_trainable=is_trainable,
+        local_files_only=local_files_only,
+    )
+
+
 def resolve_raw_output_path(result_dir: Path, submission_path: Path) -> Path | None:
     configured = os.environ.get("EVALUATION_RAW_OUTPUT_PATH")
     if not configured:
@@ -1343,13 +1373,10 @@ def main() -> None:
         model_load_started = time.perf_counter()
         model = model_loader.from_pretrained(local_model, **model_load_kwargs)
         if adapter_config["enabled"]:
-            try:
-                from peft import PeftModel
-            except ImportError as exc:
-                raise RuntimeError("Adapter 加载需要安装 PEFT") from exc
-            model = PeftModel.from_pretrained(
+            model = load_peft_adapter(
                 model,
-                str(adapter_path),
+                adapter_path,
+                prepare_quantized_base=quantization_config is not None,
                 is_trainable=False,
                 local_files_only=True,
             )

@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import copy
 import json
+import sys
+import types
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -45,6 +48,115 @@ def test_full_b_needs_matching_approval_and_separate_launch_flag(tmp_path):
     approved["training"]["seed"] += 1
     with pytest.raises(ValueError, match="does not match"):
         training.validate_training_mode(approved, "train", allow_full_training=True)
+
+
+def test_training_reload_prepares_quantized_base_before_adapter_load(tmp_path, monkeypatch):
+    events = []
+
+    class FakeModel:
+        def __init__(self):
+            self.config = SimpleNamespace(use_cache=True)
+            self.evaluated = False
+
+        def eval(self):
+            self.evaluated = True
+
+    model = FakeModel()
+
+    class FakeCuda:
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def is_bf16_supported():
+            return True
+
+    fake_torch = types.ModuleType("torch")
+    fake_torch.bfloat16 = "bf16"
+    fake_torch.cuda = FakeCuda
+
+    class FakeBitsAndBytesConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeAutoModel:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            events.append(("base", args, kwargs))
+            return model
+
+    fake_transformers = types.ModuleType("transformers")
+    fake_transformers.AutoModelForCausalLM = FakeAutoModel
+    fake_transformers.BitsAndBytesConfig = FakeBitsAndBytesConfig
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+    def load_peft_adapter(base, adapter_path, **kwargs):
+        events.append(("adapter", base, adapter_path, kwargs))
+        return base
+
+    monkeypatch.setattr(training.inference, "load_peft_adapter", load_peft_adapter)
+    monkeypatch.setattr(
+        training.inference,
+        "inspect_quantization_runtime",
+        lambda *_args, **_kwargs: {"real_nf4_verified": True, "offload_devices": []},
+    )
+    config = {
+        "quantization": {
+            "quant_type": "nf4",
+            "use_double_quant": True,
+            "device_map": "auto",
+            "method": "bitsandbytes_4bit",
+        },
+    }
+
+    loaded, returned_torch, _facts = training._load_train_model(
+        config,
+        tmp_path / "base",
+        adapter_path=tmp_path / "adapter",
+    )
+
+    assert loaded is model
+    assert returned_torch is fake_torch
+    assert model.config.use_cache is False
+    assert model.evaluated is True
+    assert events[1][0] == "adapter"
+    assert events[1][3]["prepare_quantized_base"] is True
+
+
+@pytest.mark.parametrize(
+    ("check_status", "expected_run_status"),
+    [("passed", "passed"), ("failed", "failed")],
+)
+def test_standalone_reload_check_updates_manifest_and_keeps_history(
+    tmp_path, check_status, expected_run_status,
+):
+    run_root = tmp_path / "E01-B-FULL-fixture"
+    run_root.mkdir()
+    (run_root / "manifest.json").write_text(json.dumps({
+        "run_id": run_root.name,
+        "status": "failed",
+        "stage": "reload_failed",
+        "reload_check_status": "failed",
+    }), encoding="utf-8")
+    result = {
+        "status": check_status,
+        "token_ids_exact_match": check_status == "passed",
+        "base_weights_unchanged": True,
+        "base_weight_sha256_after": "a" * 64,
+    }
+    (run_root / "reload_check_standalone.json").write_text(json.dumps(result), encoding="utf-8")
+
+    training._record_standalone_reload_check(run_root, result)
+
+    manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == expected_run_status
+    assert manifest["stage"] == ("completed" if expected_run_status == "passed" else "reload_failed")
+    assert manifest["reload_check_status"] == expected_run_status
+    assert manifest["base_weights_unchanged"] is True
+    assert manifest["reload_check_standalone_sha256"]
+    assert manifest["reload_check_history"][-1]["result_file"] == "reload_check_standalone.json"
 
 
 def test_operator_approval_creates_new_independent_full_config_without_starting_training(tmp_path, monkeypatch):

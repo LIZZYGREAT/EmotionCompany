@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -272,6 +273,66 @@ def test_i11_adapter_identity_is_separate_and_base_reference_is_checked(tmp_path
     assert runner.validate_adapter_base_reference(adapter_config, "Qwen/Qwen3-1.7B", tmp_path / "base") == "Qwen/Qwen3-1.7B"
     with pytest.raises(ValueError, match="does not match configured model"):
         runner.validate_adapter_base_reference({"base_model_name_or_path": "Qwen/other"}, "Qwen/Qwen3-1.7B", tmp_path / "base")
+
+
+def test_i11_quantized_adapter_load_prepares_base_before_loading(monkeypatch, tmp_path):
+    events = []
+
+    class BaseModel:
+        prepared = False
+
+    class FakePeftModel:
+        @staticmethod
+        def from_pretrained(model, adapter_path, **kwargs):
+            events.append(("adapter", model.prepared, adapter_path, kwargs))
+            return {"base": model, "adapter_path": adapter_path}
+
+    def prepare_model_for_kbit_training(model, *, use_gradient_checkpointing):
+        events.append(("prepare", use_gradient_checkpointing))
+        model.prepared = True
+        return model
+
+    monkeypatch.setitem(sys.modules, "peft", SimpleNamespace(
+        PeftModel=FakePeftModel,
+        prepare_model_for_kbit_training=prepare_model_for_kbit_training,
+    ))
+    base = BaseModel()
+    loaded = runner.load_peft_adapter(
+        base,
+        tmp_path / "adapter",
+        prepare_quantized_base=True,
+        is_trainable=False,
+        local_files_only=True,
+    )
+
+    assert events == [
+        ("prepare", False),
+        ("adapter", True, str(tmp_path / "adapter"), {"is_trainable": False, "local_files_only": True}),
+    ]
+    assert loaded["base"].prepared is True
+
+
+def test_i11_unquantized_adapter_load_skips_kbit_preparation(monkeypatch, tmp_path):
+    events = []
+
+    class FakePeftModel:
+        @staticmethod
+        def from_pretrained(model, adapter_path, **kwargs):
+            events.append((model, adapter_path, kwargs))
+            return model
+
+    def unexpected_prepare(*args, **kwargs):
+        raise AssertionError("unquantized adapter loading must not run k-bit preparation")
+
+    monkeypatch.setitem(sys.modules, "peft", SimpleNamespace(
+        PeftModel=FakePeftModel,
+        prepare_model_for_kbit_training=unexpected_prepare,
+    ))
+    base = object()
+    result = runner.load_peft_adapter(base, tmp_path / "adapter", prepare_quantized_base=False)
+
+    assert result is base
+    assert events == [(base, str(tmp_path / "adapter"), {"is_trainable": False, "local_files_only": True})]
 
 
 def test_i10_budget_preflight_rejects_p_plus_g_over_k(tmp_path, monkeypatch):

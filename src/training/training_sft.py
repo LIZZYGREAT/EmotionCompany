@@ -650,6 +650,36 @@ def _write_run_manifest(run_root: Path, manifest: dict[str, Any]) -> None:
     _write_json(run_root / "manifest.json", manifest)
 
 
+def _record_standalone_reload_check(run_root: Path, result: dict[str, Any]) -> None:
+    """Make the latest explicit reload check authoritative for downstream evaluation."""
+    manifest_path = run_root / "manifest.json"
+    result_path = run_root / "reload_check_standalone.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("run_id") != run_root.name:
+        raise ValueError("reload-check manifest Run ID does not match run-root")
+
+    history = manifest.setdefault("reload_check_history", [])
+    history.append({
+        "source": "standalone_reload_check",
+        "checked_at_utc": _now(),
+        "status": result["status"],
+        "token_ids_exact_match": result["token_ids_exact_match"],
+        "base_weights_unchanged": result["base_weights_unchanged"],
+        "result_file": result_path.name,
+        "result_sha256": sha256_file(result_path),
+    })
+    manifest.update(
+        status=result["status"],
+        stage="completed" if result["status"] == "passed" else "reload_failed",
+        reload_check_status=result["status"],
+        base_weight_sha256=result["base_weight_sha256_after"],
+        base_weights_unchanged=result["base_weights_unchanged"],
+        reload_check_standalone_sha256=sha256_file(result_path),
+        ended_at_utc=_now(),
+    )
+    _write_run_manifest(run_root, manifest)
+
+
 def _seed_everything(seed: int, torch: Any) -> None:
     random.seed(seed)
     try:
@@ -686,14 +716,20 @@ def _load_train_model(config: dict[str, Any], base_path: Path, *, adapter_path: 
         quantization_config=quantization,
     )
     model.config.use_cache = False
-    from peft import PeftModel, prepare_model_for_kbit_training
     if adapter_path is not None:
-        model = PeftModel.from_pretrained(model, str(adapter_path), is_trainable=False, local_files_only=True)
+        model = inference.load_peft_adapter(
+            model,
+            adapter_path,
+            prepare_quantized_base=True,
+            is_trainable=False,
+            local_files_only=True,
+        )
         model.eval()
         facts = inference.inspect_quantization_runtime(model, _training_quantization_inspection_config(config), torch)
         if not facts.get("real_nf4_verified") or facts.get("offload_devices"):
             raise RuntimeError("reloaded Adapter failed NF4/BF16/CUDA placement verification")
         return model, torch, facts
+    from peft import prepare_model_for_kbit_training
     prepare_kwargs: dict[str, Any] = {"use_gradient_checkpointing": bool(config["training"]["gradient_checkpointing"])}
     try:
         import inspect
@@ -2372,6 +2408,7 @@ def execute_reload_check(config: dict[str, Any], run_root: Path) -> dict[str, An
         "reload_model_facts": facts,
     }
     _write_json(root / "reload_check_standalone.json", result)
+    _record_standalone_reload_check(root, result)
     del model
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
