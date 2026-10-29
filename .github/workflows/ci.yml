@@ -63,5 +63,7 @@ jobs:
             tests/test_e00_runner.py \
             tests/test_inference_resume.py \
             tests/test_e01_b_evaluate.py \
+            tests/test_e01_b_diagnose.py \
+            tests/test_e02_vllm_protocol.py \
             tests/test_e00_2_diagnose.py \
             tests/test_e00_2_emotion_diag.py

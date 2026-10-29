@@ -120,6 +120,21 @@ def load_config(config_path: Path | None = None) -> dict[str, Any]:
             config_name == "api_key" or os.environ[environment_name]
         ):
             config[config_name] = os.environ[environment_name]
+    if os.environ.get("EVALUATION_ADAPTER_PATH"):
+        config.setdefault("adapter", {})["path"] = os.environ["EVALUATION_ADAPTER_PATH"]
+        config["adapter"]["enabled"] = True
+    if os.environ.get("EVALUATION_SERVER_MODELS_JSON"):
+        try:
+            observed_models = json.loads(os.environ["EVALUATION_SERVER_MODELS_JSON"])
+        except json.JSONDecodeError as exc:
+            raise ValueError("EVALUATION_SERVER_MODELS_JSON 必须是 JSON 字符串数组") from exc
+        if (
+            not isinstance(observed_models, list)
+            or any(not isinstance(value, str) or not value for value in observed_models)
+            or len(observed_models) != len(set(observed_models))
+        ):
+            raise ValueError("EVALUATION_SERVER_MODELS_JSON 必须是唯一的非空字符串数组")
+        config.setdefault("openai_compatible", {})["observed_server_model_ids"] = observed_models
     if os.environ.get("EVALUATION_MODEL_PATH"):
         config["model_path"] = os.environ["EVALUATION_MODEL_PATH"]
     if os.environ.get("EVALUATION_HARDWARE_LABEL"):
@@ -510,8 +525,8 @@ def validate_adapter_config(adapter: Any, backend: str) -> dict[str, Any]:
         raise ValueError("adapter.enabled 必须为 boolean")
     if not enabled:
         return {"enabled": False}
-    if backend != "transformers":
-        raise ValueError("PEFT Adapter 仅支持 backend=transformers；不会静默忽略 Adapter")
+    if backend not in {"transformers", "openai_compatible"}:
+        raise ValueError(f"PEFT Adapter 不支持 backend={backend!r}；不会静默忽略 Adapter")
     for name in ("path", "expected_base_weight_sha256", "expected_adapter_weight_sha256"):
         value = adapter.get(name)
         if not isinstance(value, str) or not value.strip():
@@ -527,7 +542,53 @@ def validate_adapter_config(adapter: Any, backend: str) -> dict[str, Any]:
         or any(character not in "0123456789abcdef" for character in expected_config_sha.lower())
     ):
         raise ValueError("adapter.expected_adapter_config_sha256 必须是 64 位 SHA-256")
+    expected_rank = adapter.get("expected_rank")
+    if expected_rank is not None and (
+        not isinstance(expected_rank, int) or isinstance(expected_rank, bool) or expected_rank <= 0
+    ):
+        raise ValueError("adapter.expected_rank 必须为正整数")
+    expected_modules = adapter.get("expected_target_modules")
+    if expected_modules is not None and (
+        not isinstance(expected_modules, list)
+        or not expected_modules
+        or any(not isinstance(value, str) or not value for value in expected_modules)
+        or len(expected_modules) != len(set(expected_modules))
+    ):
+        raise ValueError("adapter.expected_target_modules 必须是无重复的非空字符串数组")
+    expected_server_model_id = adapter.get("expected_server_model_id")
+    if backend == "openai_compatible" and (
+        not isinstance(expected_server_model_id, str) or not expected_server_model_id.strip()
+    ):
+        raise ValueError(
+            "openai_compatible Adapter 必须提供冻结的 adapter.expected_server_model_id"
+        )
+    if expected_server_model_id is not None and (
+        not isinstance(expected_server_model_id, str) or not expected_server_model_id.strip()
+    ):
+        raise ValueError("adapter.expected_server_model_id 必须是非空字符串")
     return {**adapter, "enabled": True}
+
+
+def validate_api_adapter_route(
+    adapter: dict[str, Any], api_model: str, server_model_ids: Any
+) -> dict[str, Any]:
+    """Require the API request to target the configured, advertised LoRA alias."""
+    expected_model_id = adapter.get("expected_server_model_id")
+    if expected_model_id and api_model != expected_model_id:
+        raise RuntimeError(
+            "Adapter 请求 model ID 与冻结的 LoRA 别名不匹配；"
+            f"expected={expected_model_id!r}, requested={api_model!r}"
+        )
+    if not isinstance(server_model_ids, list) or api_model not in server_model_ids:
+        raise RuntimeError(
+            "Adapter API 推理要求 start.sh 已核验 /v1/models 包含请求别名；"
+            f"requested={api_model!r}, observed={server_model_ids!r}"
+        )
+    return {
+        "status": "requested_model_id_present_in_server_model_list",
+        "requested_model_id": api_model,
+        "advertised_model_ids": server_model_ids,
+    }
 
 
 def adapter_weight_identity(adapter_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1423,20 +1484,119 @@ def main() -> None:
             if not local_tokenizer_source.is_absolute():
                 local_tokenizer_source = ROOT / local_tokenizer_source
         tokenizer, tokenizer_facts = load_runtime_tokenizer(config, local_tokenizer_source)
+        adapter_config = validate_adapter_config(config.get("adapter"), backend)
+        adapter_identity: dict[str, Any] = {"enabled": False, "status": "not_enabled"}
+        model_weight_identity: dict[str, Any] = {
+            "model_id": config.get("model_id"),
+            "configured_revision": config.get("model_revision"),
+            "identity_status": "unverified",
+            "fingerprint_status": "remote_or_local_server_weight_identity_not_observable",
+            "revision_status": "unverified_revision" if config.get("model_revision") else "not_configured",
+            "observed_weight_hash": None,
+            "files": [],
+        }
+        openai_config = config.get("openai_compatible", {})
+        server_model_ids = openai_config.get("observed_server_model_ids")
+        gpu_runtime_facts = None
+        if os.environ.get("EVALUATION_GPU_FACTS_JSON"):
+            try:
+                gpu_runtime_facts = json.loads(os.environ["EVALUATION_GPU_FACTS_JSON"])
+            except json.JSONDecodeError as exc:
+                raise ValueError("EVALUATION_GPU_FACTS_JSON 必须为 JSON object") from exc
+            if not isinstance(gpu_runtime_facts, dict):
+                raise ValueError("EVALUATION_GPU_FACTS_JSON 必须为 JSON object")
+        launch_facts = None
+        if os.environ.get("EVALUATION_VLLM_LAUNCH_FACTS_JSON"):
+            try:
+                launch_facts = json.loads(os.environ["EVALUATION_VLLM_LAUNCH_FACTS_JSON"])
+            except json.JSONDecodeError as exc:
+                raise ValueError("EVALUATION_VLLM_LAUNCH_FACTS_JSON 必须为 JSON object") from exc
+            if not isinstance(launch_facts, dict):
+                raise ValueError("EVALUATION_VLLM_LAUNCH_FACTS_JSON 必须为 JSON object")
+        if adapter_config["enabled"]:
+            route_observation = validate_api_adapter_route(
+                adapter_config, config["api_model"], server_model_ids
+            )
+            local_base = _weight_identity(model_path(config), config)
+            expected_base_sha = adapter_config["expected_base_weight_sha256"]
+            if (
+                local_base.get("identity_status") != "observed"
+                or local_base.get("observed_weight_hash") != expected_base_sha
+            ):
+                raise RuntimeError("Adapter API 配置的本地 Base 权重与冻结 SHA-256 不匹配")
+            expected_model_sha = config.get("expected_weight_sha256")
+            if expected_model_sha is not None and local_base.get("observed_weight_hash") != expected_model_sha:
+                raise RuntimeError("Adapter API 本地 Base 权重与 expected_weight_sha256 不匹配")
+            adapter_path_value = Path(adapter_config["path"]).expanduser()
+            adapter_path = (
+                adapter_path_value
+                if adapter_path_value.is_absolute()
+                else WORKSPACE_ROOT / adapter_path_value
+            ).resolve()
+            adapter_identity, adapter_metadata = adapter_weight_identity(adapter_path)
+            if adapter_identity["weight_sha256"] != adapter_config["expected_adapter_weight_sha256"]:
+                raise RuntimeError("Adapter API 本地权重 SHA-256 与冻结 Full B 不匹配")
+            expected_adapter_config_sha = adapter_config.get("expected_adapter_config_sha256")
+            if expected_adapter_config_sha and adapter_identity["config_sha256"] != expected_adapter_config_sha:
+                raise RuntimeError("Adapter API 本地 config SHA-256 与冻结 Full B 不匹配")
+            validate_adapter_base_reference(adapter_metadata, config.get("model_id", ""), model_path(config))
+            actual_rank = adapter_metadata.get("r")
+            expected_rank = adapter_config.get("expected_rank")
+            if expected_rank is not None and actual_rank != expected_rank:
+                raise RuntimeError("Adapter API 实际 LoRA rank 与配置的 expected_rank 不一致")
+            expected_modules = adapter_config.get("expected_target_modules")
+            actual_modules = adapter_metadata.get("target_modules")
+            if expected_modules is not None and (
+                not isinstance(actual_modules, (list, set))
+                or set(actual_modules) != set(expected_modules)
+            ):
+                raise RuntimeError("Adapter API 实际 target_modules 与冻结 Full B 不一致")
+            adapter_identity.update({
+                "enabled": True,
+                "status": "local_artifacts_verified_server_weights_unverified",
+                "base_weight_sha256": local_base["observed_weight_hash"],
+                "configured_adapter": {
+                    "path": str(adapter_path),
+                    "requested_model_id": config["api_model"],
+                },
+                "locally_verified_adapter_file": {
+                    "status": "verified",
+                    "weight_sha256": adapter_identity["weight_sha256"],
+                    "config_sha256": adapter_identity["config_sha256"],
+                    "rank": actual_rank,
+                    "target_modules": sorted(actual_modules) if isinstance(actual_modules, (list, set)) else actual_modules,
+                },
+                "server_route_observed": route_observation,
+                "server_weight_identity": "unverified",
+            })
+            # These files identify the intended local launch inputs only. They do
+            # not prove which Base/Adapter weights the remote server instantiated.
+            model_weight_identity = {
+                "model_id": config.get("model_id"),
+                "configured_revision": config.get("model_revision"),
+                "local_path": local_base["local_path"],
+                "identity_status": "server_unverified",
+                "fingerprint_status": "local_reference_files_verified_server_weights_unverified",
+                "revision_status": local_base.get("revision_status"),
+                "local_reference_weight_sha256": local_base["observed_weight_hash"],
+                "observed_weight_hash": None,
+                "files": local_base["files"],
+                "server_weight_identity": "unverified",
+            }
         backend_report = {
             "version": "openai_compatible_p0_f2_t1_v3",
             "timing_scope": "client prompt tokenization+HTTP request/server inference+response decode+parse+schema validation; server startup excluded",
             "api_model": config["api_model"],
             "base_url": config["base_url"],
-            "model_weight_identity": {
-                "model_id": config.get("model_id"),
-                "configured_revision": config.get("model_revision"),
-                "identity_status": "unverified",
-                "fingerprint_status": "remote_or_local_server_weight_identity_not_observable",
-                "revision_status": "unverified_revision" if config.get("model_revision") else "not_configured",
-                "observed_weight_hash": None,
+            "api_server_runtime": {
+                "vllm_version": os.environ.get("EVALUATION_VLLM_VERSION"),
+                "advertised_model_ids": server_model_ids,
+                "gpu_runtime": gpu_runtime_facts,
+                "launch_configuration": launch_facts,
+                "server_weight_identity": "unverified",
             },
-            "adapter_identity": {"enabled": False, "status": "not_enabled"},
+            "model_weight_identity": model_weight_identity,
+            "adapter_identity": adapter_identity,
             "quantization": {"applied": False, "method": "configured by external server; not observed"},
             "template_equivalence": "BLOCKED_NOT_RUN_exact_server_token_ids_not_observable",
         }

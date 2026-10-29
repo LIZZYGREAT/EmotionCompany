@@ -252,9 +252,11 @@ def test_i10_adapter_is_disabled_by_default_and_rejects_invalid_declarations(pro
         "path": "outputs/training/a/adapter",
         "expected_base_weight_sha256": "a" * 64,
         "expected_adapter_weight_sha256": "b" * 64,
+        "expected_server_model_id": "e01-full",
     }
-    with pytest.raises(ValueError, match="仅支持 backend=transformers"):
-        runner.validate_adapter_config(valid_shape, "openai_compatible")
+    assert runner.validate_adapter_config(valid_shape, "openai_compatible")["enabled"] is True
+    with pytest.raises(ValueError, match="不支持 backend"):
+        runner.validate_adapter_config(valid_shape, "unknown")
     with pytest.raises(ValueError, match="64 位 SHA-256"):
         runner.validate_adapter_config({**valid_shape, "expected_adapter_weight_sha256": "wrong"}, "transformers")
 

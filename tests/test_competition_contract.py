@@ -29,3 +29,12 @@ def test_start_script_preserves_entry_arguments_and_fixed_environment_contract()
     assert 'TEST_FILE="$1"' in script
     assert 'RESULT_DIR="$2"' in script
     assert '"$SCRIPT_DIR/run_inference.py" "$TEST_FILE" "$RESULT_DIR"' in script
+
+
+def test_start_script_keeps_lora_opt_in_and_checks_the_requested_server_route():
+    script = (ROOT / "participant/start.sh").read_text(encoding="utf-8")
+
+    assert 'LORA_ENABLED="${VLLM_LORA_ENABLED:-$CONFIG_ADAPTER_ENABLED}"' in script
+    assert 'VLLM_ARGS+=(--enable-lora --lora-modules "$LORA_NAME=$LORA_PATH" --max-lora-rank "$MAX_LORA_RANK")' in script
+    assert 'scripts/e02_vllm_probe.py" models' in script
+    assert 'export EVALUATION_API_MODEL="$REQUEST_MODEL_NAME"' in script

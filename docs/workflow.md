@@ -8,6 +8,8 @@ D0 through E00.2-D have completed their documented data, protocol, and small-sam
 
 The team Git branch, PR review, merge, and `main` protection process is documented in [`docs/knowledge/双人Git协作与PR操作规范.md`](knowledge/双人Git协作与PR操作规范.md). `.github/workflows/ci.yml` runs `unit-cpu` on every branch push and PR to `main`; configure Required Checks only after confirming the exact successful check name in GitHub.
 
+E02.0 已完成本地指标计算口径审计和 Full B Run/Dev 输入身份索引；官方计分等价性仍未确认。E02.1 已准备 vLLM `0.11.1` + Full B Adapter 的独立 LoRA 别名路径、CPU 路由门禁与 10 条 smoke 配置。固定入口、GPU 运行命令和验收边界集中在 [`E02.1 报告`](experiments/E02.1_vLLM兼容性与最小推理验收报告.md)；基线与口径索引分别见 [E02.0 报告](experiments/E02.0_评分口径与基线冻结报告.md) 和 [E02 基线资产索引](experiments/E02_基线资产与证据索引.md)。服务端权重身份和 Token ID 等价性必须按实际 Run 证据分别判断。
+
 ## Environment setup
 
 ```bash
