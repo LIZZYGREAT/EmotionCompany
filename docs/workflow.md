@@ -8,7 +8,7 @@ D0 through E00.2-D have completed their documented data, protocol, and small-sam
 
 The team Git branch, PR review, merge, and `main` protection process is documented in [`docs/knowledge/双人Git协作与PR操作规范.md`](knowledge/双人Git协作与PR操作规范.md). `.github/workflows/ci.yml` runs `unit-cpu` on every branch push and PR to `main`; configure Required Checks only after confirming the exact successful check name in GitHub.
 
-E02.0 已完成本地指标计算口径审计和 Full B Run/Dev 输入身份索引；官方计分等价性仍未确认。E02.1 的 10 条 vLLM `0.11.1` + Full B Adapter GPU Smoke 已完成：13/13 Manifest 检查通过，9 条输出有效、1 条输出结构无效，Prompt Token 数量 10/10 匹配但完整服务端 Token IDs 尚未核验。E02.1 真实 Run 及异常结构诊断见 [`E02.1 报告`](experiments/E02.1_vLLM兼容性与最小推理验收报告.md)；E02.2-A Token ID 工具、CPU 回归和 GPU 命令见 [`E02.2 报告`](experiments/E02.2_推理协议与性能验收报告.md)。基线与口径索引分别见 [E02.0 报告](experiments/E02.0_评分口径与基线冻结报告.md) 和 [E02 基线资产索引](experiments/E02_基线资产与证据索引.md)。服务端权重身份与 Token ID 等价性仍按各自证据边界判断。
+E02.0 已完成本地指标计算口径审计和 Full B Run/Dev 输入身份索引；官方计分等价性仍未确认。E02.1 的 10 条 vLLM `0.11.1` + Full B Adapter GPU Smoke 已完成：13/13 Manifest 检查通过，9 条输出有效、1 条输出结构无效。后续 E02.2-A Run `E02.2-A-TOKEN-20261101T143137Z` 对 10 条既有无标签样本和 2 条合成 `</think>` 样本完成服务端 Prompt Token ID 核验，12/12 逐 ID 精确相等。E02.1 真实 Run 及异常结构诊断见 [`E02.1 报告`](experiments/E02.1_vLLM兼容性与最小推理验收报告.md)，E02.2-A 证据和后续性能验收边界见 [`E02.2 报告`](experiments/E02.2_推理协议与性能验收报告.md)。基线与口径索引分别见 [E02.0 报告](experiments/E02.0_评分口径与基线冻结报告.md) 和 [E02 基线资产索引](experiments/E02_基线资产与证据索引.md)。服务端权重身份仍为 `unverified`；Token ID 通过不代表质量、性能或 Docker 验收通过。
 
 ## Environment setup
 
