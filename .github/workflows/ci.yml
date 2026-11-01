@@ -66,5 +66,6 @@ jobs:
             tests/test_e01_b_diagnose.py \
             tests/test_e02_vllm_protocol.py \
             tests/test_e02_token_equivalence.py \
+            tests/test_e02_benchmark_selection.py \
             tests/test_e00_2_diagnose.py \
             tests/test_e00_2_emotion_diag.py
