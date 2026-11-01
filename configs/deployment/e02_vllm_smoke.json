@@ -78,7 +78,8 @@
       "expected_version": "0.11.1",
       "dtype": "bfloat16",
       "max_num_seqs": 1,
-      "max_num_batched_tokens": 2560
+      "max_num_batched_tokens": 2560,
+      "gpu_memory_utilization": 0.8
     }
   }
 }

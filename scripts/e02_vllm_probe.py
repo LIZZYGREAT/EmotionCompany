@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -291,7 +292,7 @@ def inspect_vllm_cli(binary: str, expected_version: str | None = None) -> dict[s
     if executable is None:
         raise FileNotFoundError(f"找不到 vLLM 命令: {binary}")
     version = subprocess.run([executable, "--version"], capture_output=True, text=True, timeout=30, check=False)
-    help_result = subprocess.run([executable, "serve", "--help"], capture_output=True, text=True, timeout=60, check=False)
+    help_result = subprocess.run([executable, "serve", "--help=all"], capture_output=True, text=True, timeout=60, check=False)
     help_text = help_result.stdout + "\n" + help_result.stderr
     if version.returncode != 0:
         raise RuntimeError(f"vLLM --version 失败: {version.stderr[-1000:]}")
@@ -304,15 +305,22 @@ def inspect_vllm_cli(binary: str, expected_version: str | None = None) -> dict[s
     missing = [flag for flag in required_flags if flag not in help_text]
     if missing:
         raise RuntimeError(f"当前 vLLM CLI 缺少 LoRA 参数: {missing}")
-    version_text = version.stdout.strip() or version.stderr.strip()
-    version_match = re.fullmatch(
-        r"(?:vllm(?:,\s*version)?\s+)?v?(\d+\.\d+\.\d+)",
-        version_text,
-        flags=re.IGNORECASE,
-    )
-    if version_match is None:
-        raise RuntimeError(f"vLLM 版本输出不是精确的 release 版本号: {version_text!r}")
-    actual_version = version_match.group(1)
+    version_text = version.stdout + "\n" + version.stderr
+    found_versions = [
+        match.group(1)
+        for line in version_text.splitlines()
+        if (match := re.fullmatch(
+            r"(?:vllm(?:,\s*version)?\s+)?v?(\d+\.\d+\.\d+)",
+            line.strip(),
+            flags=re.IGNORECASE,
+        )) is not None
+    ]
+    if len(found_versions) != 1:
+        raise RuntimeError(
+            f"无法唯一确定 vLLM release 版本: {version_text[-1000:]!r}"
+        )
+
+    actual_version = found_versions[0]
     if expected_version and actual_version != expected_version:
         raise RuntimeError(
             f"vLLM 版本与 E02.1 已锁定版本不一致: expected={expected_version}, actual={actual_version}"
@@ -322,6 +330,32 @@ def inspect_vllm_cli(binary: str, expected_version: str | None = None) -> dict[s
         "version": actual_version,
         "required_lora_flags": list(required_flags),
         "status": "passed_cli_surface_check",
+    }
+
+
+def resolve_gpu_memory_utilization(
+    config_value: Any,
+    override_value: str | None,
+) -> dict[str, str | None]:
+    """Resolve and validate the vLLM memory fraction without changing defaults."""
+    configured = None if config_value is None else str(config_value).strip()
+    override = None if override_value is None else override_value.strip()
+    if override == "":
+        override = None
+    effective = override if override is not None else configured
+    source = "environment_override" if override is not None else "config" if configured is not None else "vllm_default"
+    if effective is not None:
+        try:
+            numeric = float(effective)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("GPU 显存利用率必须是数字") from exc
+        if not math.isfinite(numeric) or not 0.0 < numeric <= 1.0:
+            raise ValueError("GPU 显存利用率必须在 (0, 1] 范围内")
+    return {
+        "config_value": configured,
+        "override_value": override,
+        "effective_value": effective,
+        "source": source,
     }
 
 
@@ -533,6 +567,13 @@ def main(argv: list[str] | None = None) -> int:
 
     gpu_parser = subparsers.add_parser("gpu-facts", help="读取当前 NVIDIA GPU/显存观察值")
 
+    memory_parser = subparsers.add_parser(
+        "resolve-gpu-memory", help="验证并解析 vLLM GPU 显存利用率配置"
+    )
+    memory_parser.add_argument("--config-value", default="")
+    memory_parser.add_argument("--override-value", default="")
+    memory_parser.add_argument("--format", choices=("json", "nul"), default="json")
+
     args = parser.parse_args(argv)
     if args.command == "preflight":
         result = validate_artifact_identity(
@@ -580,9 +621,15 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif args.command == "make-sample":
         result = write_unlabelled_sample(args.source, args.output, args.count)
+    elif args.command == "resolve-gpu-memory":
+        result = resolve_gpu_memory_utilization(args.config_value or None, args.override_value)
     else:
         result = nvidia_gpu_facts()
-    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    if args.command == "resolve-gpu-memory" and args.format == "nul":
+        for key in ("config_value", "override_value", "effective_value", "source"):
+            sys.stdout.write((result[key] or "") + "\0")
+    else:
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
 

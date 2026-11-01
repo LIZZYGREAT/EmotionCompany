@@ -31,6 +31,7 @@ activate_project_conda_env
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+PROBE_SCRIPT="$WORKSPACE_ROOT/scripts/e02_vllm_probe.py"
 if [[ -n "${EVALUATION_INFERENCE_CONFIG:-}" && "$EVALUATION_INFERENCE_CONFIG" != /* ]]; then
   EVALUATION_INFERENCE_CONFIG="$WORKSPACE_ROOT/$EVALUATION_INFERENCE_CONFIG"
   export EVALUATION_INFERENCE_CONFIG
@@ -50,6 +51,7 @@ PYTHON_CMD="${PYTHON_BIN:-python3}"
 VLLM_BIN="${VLLM_BIN:-vllm}"
 TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
 VLLM_ARGS=(--tensor-parallel-size "$TENSOR_PARALLEL_SIZE")
+VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-}"
 
 if [[ $# -ne 2 ]]; then
   echo "用法: $0 TEST_FILE RESULT_DIR" >&2
@@ -95,12 +97,13 @@ values = [
     vllm.get("dtype", ""),
     vllm.get("max_num_seqs", ""),
     vllm.get("max_num_batched_tokens", ""),
+    vllm.get("gpu_memory_utilization", ""),
 ]
 for value in values:
     sys.stdout.buffer.write(str(value).encode("utf-8") + b"\0")
 PY
 )
-[[ "${#CONFIG_FACTS[@]}" -eq 15 ]] || {
+[[ "${#CONFIG_FACTS[@]}" -eq 16 ]] || {
   echo "ERROR: 无法从推理配置读取部署参数: $CONFIG_FILE" >&2
   exit 1
 }
@@ -119,6 +122,7 @@ CONFIG_VLLM_EXPECTED_VERSION="${CONFIG_FACTS[11]:-}"
 CONFIG_VLLM_DTYPE="${CONFIG_FACTS[12]:-}"
 CONFIG_VLLM_MAX_NUM_SEQS="${CONFIG_FACTS[13]:-}"
 CONFIG_VLLM_MAX_NUM_BATCHED_TOKENS="${CONFIG_FACTS[14]:-}"
+CONFIG_VLLM_GPU_MEMORY_UTILIZATION="${CONFIG_FACTS[15]:-}"
 
 BACKEND="${EVALUATION_BACKEND:-}"
 if [[ -z "$BACKEND" ]]; then
@@ -134,6 +138,22 @@ fi
 if [[ "$BACKEND" != "openai_compatible" ]]; then
   echo "ERROR: backend 必须为 transformers 或 openai_compatible: $BACKEND" >&2
   exit 1
+fi
+
+mapfile -d '' -t GPU_MEMORY_FACTS < <("$PYTHON_CMD" "$PROBE_SCRIPT" resolve-gpu-memory \
+  --config-value "$CONFIG_VLLM_GPU_MEMORY_UTILIZATION" \
+  --override-value "$VLLM_GPU_MEMORY_UTILIZATION" \
+  --format nul)
+[[ "${#GPU_MEMORY_FACTS[@]}" -eq 4 ]] || {
+  echo "ERROR: 无法解析 deployment.vllm.gpu_memory_utilization" >&2
+  exit 1
+}
+GPU_MEMORY_CONFIG_VALUE="${GPU_MEMORY_FACTS[0]}"
+GPU_MEMORY_OVERRIDE_VALUE="${GPU_MEMORY_FACTS[1]}"
+GPU_MEMORY_EFFECTIVE_VALUE="${GPU_MEMORY_FACTS[2]}"
+GPU_MEMORY_SOURCE="${GPU_MEMORY_FACTS[3]}"
+if [[ -n "$GPU_MEMORY_EFFECTIVE_VALUE" ]]; then
+  VLLM_ARGS+=(--gpu-memory-utilization "$GPU_MEMORY_EFFECTIVE_VALUE")
 fi
 
 [[ "$TENSOR_PARALLEL_SIZE" =~ ^[1-9][0-9]*$ ]] || {
@@ -253,7 +273,6 @@ if [[ "$LORA_ENABLED" == "true" ]]; then
     echo "ERROR: Adapter 路径不存在或缺少 adapter_config.json: $LORA_PATH" >&2
     exit 1
   }
-  PROBE_SCRIPT="$WORKSPACE_ROOT/scripts/e02_vllm_probe.py"
   [[ -f "$PROBE_SCRIPT" ]] || {
     echo "ERROR: 缺少 E02 vLLM 身份检查程序: $PROBE_SCRIPT" >&2
     exit 1
@@ -322,16 +341,23 @@ for argument in "${COMMAND[@]}"; do
     SAFE_COMMAND+=("$argument")
   fi
 done
-export EVALUATION_VLLM_LAUNCH_FACTS_JSON="$("$PYTHON_CMD" - "${SAFE_COMMAND[@]}" <<'PY'
+export EVALUATION_VLLM_LAUNCH_FACTS_JSON="$("$PYTHON_CMD" - "${SAFE_COMMAND[@]}" \
+  "$GPU_MEMORY_CONFIG_VALUE" "$GPU_MEMORY_OVERRIDE_VALUE" \
+  "$GPU_MEMORY_EFFECTIVE_VALUE" "$GPU_MEMORY_SOURCE" <<'PY'
 import json
 import sys
 
-arguments = sys.argv[1:]
+arguments = sys.argv[1:-4]
+memory_config, memory_override, memory_effective, memory_source = sys.argv[-4:]
 print(json.dumps({
     "argv": arguments,
     "api_key_configured": "--api-key" in arguments,
     "api_key_value": "redacted" if "--api-key" in arguments else None,
-    "gpu_memory_utilization": "vLLM default; not overridden",
+    "gpu_memory_utilization": memory_effective or "vLLM default; not overridden",
+    "gpu_memory_utilization_config_value": memory_config or None,
+    "gpu_memory_utilization_override_value": memory_override or None,
+    "gpu_memory_utilization_effective_value": memory_effective or None,
+    "gpu_memory_utilization_source": memory_source,
 }, ensure_ascii=False, separators=(",", ":")))
 PY
 )"

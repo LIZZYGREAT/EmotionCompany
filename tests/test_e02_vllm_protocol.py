@@ -71,14 +71,22 @@ def test_e02_preflight_rejects_rank_alias_and_frozen_hash_mismatches(tmp_path):
         probe.validate_artifact_identity(**{**kwargs, "expected_base_sha256": "0" * 64, "max_lora_rank": 8})
 
 
-def test_e02_vllm_version_parser_requires_an_exact_release(monkeypatch, tmp_path):
+def test_e02_vllm_version_parser_accepts_one_release_line_with_log_noise(monkeypatch, tmp_path):
     binary = tmp_path / "vllm"
     binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     binary.chmod(0o755)
+    calls = []
+    version_output = {"stdout": "vllm 0.11.1\n", "stderr": "INFO: vLLM startup\n"}
 
     def mock_run(arguments, **kwargs):
+        calls.append(arguments)
         if arguments[-1] == "--version":
-            return type("Result", (), {"returncode": 0, "stdout": "vllm 0.11.1\n", "stderr": ""})()
+            return type("Result", (), {
+                "returncode": 0,
+                "stdout": version_output["stdout"],
+                "stderr": version_output["stderr"],
+            })()
+        assert arguments == [str(binary), "serve", "--help=all"]
         return type("Result", (), {
             "returncode": 0,
             "stdout": "--enable-lora --lora-modules --max-lora-rank --dtype --max-model-len --max-num-seqs --max-num-batched-tokens",
@@ -87,15 +95,51 @@ def test_e02_vllm_version_parser_requires_an_exact_release(monkeypatch, tmp_path
 
     monkeypatch.setattr(probe.subprocess, "run", mock_run)
     assert probe.inspect_vllm_cli(str(binary), "0.11.1")["version"] == "0.11.1"
+    assert calls == [[str(binary), "--version"], [str(binary), "serve", "--help=all"]]
 
-    def dev_version(arguments, **kwargs):
-        if arguments[-1] == "--version":
-            return type("Result", (), {"returncode": 0, "stdout": "0.11.1.dev0\n", "stderr": ""})()
-        return mock_run(arguments, **kwargs)
+    for invalid_stdout in (
+        "0.11.1.dev0\n",
+        "0.11.1\n0.11.1\n",
+        "0.11.1\n0.11.2\n",
+        "INFO: version unavailable\n",
+    ):
+        version_output["stdout"] = invalid_stdout
+        version_output["stderr"] = ""
+        with pytest.raises(RuntimeError, match="无法唯一确定"):
+            probe.inspect_vllm_cli(str(binary), "0.11.1")
 
-    monkeypatch.setattr(probe.subprocess, "run", dev_version)
-    with pytest.raises(RuntimeError, match="不是精确的 release"):
-        probe.inspect_vllm_cli(str(binary), "0.11.1")
+
+def test_e02_gpu_memory_utilization_uses_config_and_validates_override():
+    assert probe.resolve_gpu_memory_utilization(0.8, "") == {
+        "config_value": "0.8",
+        "override_value": None,
+        "effective_value": "0.8",
+        "source": "config",
+    }
+    assert probe.resolve_gpu_memory_utilization(0.8, "0.75") == {
+        "config_value": "0.8",
+        "override_value": "0.75",
+        "effective_value": "0.75",
+        "source": "environment_override",
+    }
+    assert probe.resolve_gpu_memory_utilization(None, None)["source"] == "vllm_default"
+    for invalid in ("0", "1.01", "nan", "inf", "not-a-number"):
+        with pytest.raises(ValueError, match="GPU 显存利用率"):
+            probe.resolve_gpu_memory_utilization(0.8, invalid)
+    with pytest.raises(ValueError, match="GPU 显存利用率"):
+        probe.resolve_gpu_memory_utilization("1.01", "")
+
+
+def test_e02_gpu_memory_cli_emits_shell_safe_nul_delimited_values(capsys):
+    assert probe.main([
+        "resolve-gpu-memory",
+        "--config-value", "0.8",
+        "--override-value", "0.75",
+        "--format", "nul",
+    ]) == 0
+    assert capsys.readouterr().out.split("\0") == [
+        "0.8", "0.75", "0.75", "environment_override", "",
+    ]
 
 
 def test_e02_server_model_list_rejects_base_only_and_returns_advertised_alias():
@@ -155,6 +199,7 @@ def test_e02_deployment_config_freezes_full_b_identity_and_smoke_budget():
     assert config["context"]["max_prompt_tokens"] + config["generation"]["max_new_tokens"] <= config["context"]["serving_context_limit"]
     assert config["performance_rounds"] == 10
     assert config["deployment"]["vllm"]["expected_version"] == "0.11.1"
+    assert config["deployment"]["vllm"]["gpu_memory_utilization"] == 0.8
 
 
 def test_e02_sample_selector_uses_only_unlabelled_input_and_covers_length_range(tmp_path):
@@ -209,7 +254,6 @@ def test_e02_manifest_records_observed_route_but_not_server_weight_identity(tmp_
         "success_count": 1,
         "failure_counts": {},
         "api_model": "e01-full",
-        "api_server_runtime": {"vllm_version": "0.11.1"},
         "model_weight_identity": {"local_reference_weight_sha256": "a" * 64},
         "adapter_identity": {
             "weight_sha256": "b" * 64,
@@ -222,6 +266,15 @@ def test_e02_manifest_records_observed_route_but_not_server_weight_identity(tmp_
         "budget": {"P_plus_G": 2480},
         "server_exact_token_id_equivalence": "not_verified",
         "raw_predictions_sha256": "d" * 64,
+        "api_server_runtime": {
+            "vllm_version": "0.11.1",
+            "launch_configuration": {
+                "gpu_memory_utilization_config_value": "0.8",
+                "gpu_memory_utilization_override_value": "0.75",
+                "gpu_memory_utilization_effective_value": "0.75",
+                "gpu_memory_utilization_source": "environment_override",
+            },
+        },
     }), encoding="utf-8")
     result = probe.write_smoke_manifest(
         run_root=run_root,
@@ -237,3 +290,4 @@ def test_e02_manifest_records_observed_route_but_not_server_weight_identity(tmp_
     assert result["status"] == "completed"
     assert manifest["execution"]["server_weight_identity"] == "unverified"
     assert manifest["checks"]["requested_route_advertised"] is True
+    assert manifest["execution"]["server_launch_configuration"]["gpu_memory_utilization_effective_value"] == "0.75"
