@@ -49,7 +49,7 @@
 | E01-B Pilot Dev 生成评测 | 已完成（160 条诊断） | Emotion Accuracy 从 0.106 升至 0.406，Raw A0 从 0.013 升至 0.913；Profile Micro-F1 从 0.0648 降至 0.0077，画像几乎恒为空。仅为 Pilot 风险信号，不是完整 Dev 结论；见 [Pilot 验收报告](docs/experiments/E01-B_训练工程与Pilot验收报告.md)。 |
 | E01-B Full 训练 | 已完成 | Run `E01-B-FULL-20261028-133805`：16,192 条有效 Train、4,048 步、1 Epoch；独立 Adapter 重载最终通过，Base 权重未变。 |
 | E01-B 完整 Dev 对照 | 已完成（1,833 条） | Base/Adapter 使用相同 D0.3 Dev IDs。情绪 Accuracy 0.1282→0.6536，画像 33 标签 Micro-F1 0.0782→0.4223，Raw A0 Schema 0.0093→0.9809；均为本地代理指标。见[正式验收报告](docs/experiments/E01-B_正式SFT与Dev对照验收报告.md)和[深度诊断](docs/experiments/E01-B_Full_深度诊断与证据整理.md)。 |
-| E02 评测与部署准备 | 口径审计和 vLLM LoRA 路由实现已完成；GPU Smoke 待实测 | 本地指标仍未映射为官方分数；vLLM `0.11.1` + Full B Adapter 的独立环境与 10 条验收命令已准备，K=2,560 仍是候选。服务端 Token IDs、实测资源、BERTScore、官方性能和离线 Docker 仍待验收。 |
+| E02 评测与部署准备 | 10 条 vLLM GPU Smoke 已完成，E02.1-C 与 Token ID 对照 CPU 工程完成 | Smoke 的 13/13 身份/结构检查通过；9 条有效、1 条结构无效。服务端完整 Token IDs 正在准备单独核验，100 条性能、BERTScore、官方性能口径和离线 Docker 仍待验收。 |
 
 Pilot 的训练 Loss 和 SFT Dev Loss 只说明模型在 Completion-only 训练目标上的变化，不替代情绪、画像、Raw JSON/Schema、回复和性能评测。Pilot Run 的 Manifest、日志、Checkpoint 和权重保存在忽略目录 `outputs/training/`，以上摘要来自执行机上的真实结果，不是 Git 中的实验产物。
 
@@ -127,5 +127,6 @@ bash /root/participant/start.sh TEST_FILE RESULT_DIR
 | E01-B 逐类情绪、逐标签画像、Raw 与延迟诊断 | [E01-B Full 深度诊断](docs/experiments/E01-B_Full_深度诊断与证据整理.md) |
 | E02.0 评分口径与冻结基线身份 | [评分口径审计](docs/experiments/E02.0_评分口径与基线冻结报告.md)、[基线资产索引](docs/experiments/E02_基线资产与证据索引.md) |
 | E02.1 vLLM LoRA Smoke 配置与执行命令 | [兼容性与最小验收报告](docs/experiments/E02.1_vLLM兼容性与最小推理验收报告.md) |
+| E02.2 服务端 Token ID 与后续性能验收 | [推理协议与性能验收报告](docs/experiments/E02.2_推理协议与性能验收报告.md) |
 | E01-B 训练工程和公平评测方案 | [训练工程完善方案](docs/task/E0.1-B_训练工程完善任务方案.md)、[分阶段训练与公平评测方案](docs/task/E0.1-B_分阶段训练与公平评测执行方案.md) |
 | 开发环境、Git/PR 和 P/F/T 协议 | [环境复现指南](docs/完整环境配置与复现指南.md)、[协作规范](docs/knowledge/双人Git协作与PR操作规范.md)、[PFT 笔记](docs/knowledge/PFT_输入协议设计与版本演进笔记.md) |
