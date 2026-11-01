@@ -305,6 +305,29 @@ export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
 export PYTHONUNBUFFERED=1
 
+record_vllm_lifecycle_event() {
+  local event_name="$1"
+  [[ -n "${E02_VLLM_TIMING_FILE:-}" ]] || return 0
+  "$PYTHON_CMD" - "$E02_VLLM_TIMING_FILE" "$event_name" <<'PY'
+import json
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+path = Path(sys.argv[1])
+path.parent.mkdir(parents=True, exist_ok=True)
+record = {
+    "event": sys.argv[2],
+    "epoch_seconds": time.time(),
+    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+}
+with path.open("x" if sys.argv[2] == "serve_process_started" else "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(record, separators=(",", ":")) + "\n")
+    handle.flush()
+PY
+}
+
 CLIENT_HOST="$HOST"
 [[ "$CLIENT_HOST" == "0.0.0.0" || "$CLIENT_HOST" == "::" ]] && CLIENT_HOST="127.0.0.1"
 BASE_URL="http://$CLIENT_HOST:$PORT/v1"
@@ -379,6 +402,7 @@ echo "请求模型 ID: $REQUEST_MODEL_NAME"
 echo "vLLM 日志: $LOG_FILE"
 "${COMMAND[@]}" >"$LOG_FILE" 2>&1 &
 VLLM_PID=$!
+record_vllm_lifecycle_event "serve_process_started"
 
 READY=0
 for ((second = 0; second < START_TIMEOUT; second++)); do
@@ -397,6 +421,7 @@ if ((READY == 0)); then
   tail -n 80 "$LOG_FILE" >&2 || true
   exit 1
 fi
+record_vllm_lifecycle_event "health_ready"
 
 echo "vLLM 已就绪，开始推理测试"
 export EVALUATION_GPU_FACTS_JSON="$("$PYTHON_CMD" "$WORKSPACE_ROOT/scripts/e02_vllm_probe.py" gpu-facts)"

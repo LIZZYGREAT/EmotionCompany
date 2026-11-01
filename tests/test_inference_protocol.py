@@ -6,6 +6,7 @@ import copy
 import json
 import subprocess
 import sys
+import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,6 +24,18 @@ from src.data.token_stats import select_recent_complete_suffix as audit_select_r
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_generation_failure_categories_are_safe_and_recover_wrapped_timeouts():
+    timeout = RuntimeError("request failed")
+    timeout.__cause__ = urllib.error.URLError(TimeoutError("timed out"))
+    server_oom = RuntimeError("API 请求失败: HTTP 500: CUDA out of memory")
+    server_oom.__cause__ = urllib.error.HTTPError("http://localhost", 500, "server error", None, None)
+
+    assert runner.classify_generation_failure(timeout) == "timeout"
+    assert runner.classify_generation_failure(RuntimeError("CUDA out of memory")) == "oom"
+    assert runner.classify_generation_failure(server_oom) == "oom"
+    assert runner.classify_generation_failure(RuntimeError("request failed")) == "request_error"
 
 
 @pytest.fixture(scope="module")

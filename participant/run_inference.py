@@ -11,6 +11,7 @@ import json
 import os
 import platform
 import re
+import socket
 import statistics
 import sys
 import tempfile
@@ -1008,6 +1009,54 @@ class TemplateEquivalenceError(RuntimeError):
     pass
 
 
+def classify_generation_failure(exc: BaseException) -> str:
+    """Return a privacy-safe failure category for benchmark aggregation."""
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    messages: list[str] = []
+    saw_http_error = False
+    saw_connection_error = False
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        messages.append(str(current).lower())
+        if isinstance(current, (TimeoutError, socket.timeout)):
+            return "timeout"
+        if isinstance(current, urllib.error.HTTPError):
+            if current.code in {408, 504}:
+                return "timeout"
+            saw_http_error = True
+            continue
+        if isinstance(current, urllib.error.URLError):
+            reason = current.reason
+            if isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(reason).lower():
+                return "timeout"
+            saw_connection_error = True
+            continue
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+    message = " ".join(messages)
+    if any(marker in message for marker in ("out of memory", "cuda oom", "cuda error: out of memory")):
+        return "oom"
+    if "timed out" in message or "timeout" in message:
+        return "timeout"
+    if saw_http_error:
+        return "http_error"
+    if saw_connection_error:
+        return "connection_error"
+    if "http " in message:
+        return "http_error"
+    if "不是有效 json" in message or "invalid json" in message:
+        return "invalid_response"
+    if "无法连接" in message or "connection refused" in message:
+        return "connection_error"
+    return "request_error"
+
+
 def api_message_payload(messages: list[dict[str, str]], config: dict[str, Any]) -> list[dict[str, str]]:
     api_config = config.get("openai_compatible", {})
     allow_reasoning_field = bool(api_config.get("pass_reasoning_content_field", False))
@@ -1655,6 +1704,7 @@ def main() -> None:
             stop_reason = "not_generated"
             raw_text: str | None = None
             error_type: str | None = None
+            failure_category: str | None = None
             sampling_seed: int | None = None
             prediction: dict[str, Any]
 
@@ -1708,6 +1758,7 @@ def main() -> None:
                     prediction = empty_prediction(sample["id"], enums)
                     status = "generation_failure"
                     error_type = type(exc).__name__
+                    failure_category = classify_generation_failure(exc)
                     stop_reason = "not_generated_generation_failure"
                 raw_text = decoded
 
@@ -1737,6 +1788,7 @@ def main() -> None:
                 "removed_history_messages": removed_messages,
                 "generated_tokens": generated_tokens,
                 "stop_reason": stop_reason,
+                "failure_category": failure_category,
                 "sampling_seed": sampling_seed,
                 "is_first_sample_cold_start": index == completed_samples + 1 and backend == "transformers",
                 "server_prompt_tokens": server_details.get("server_prompt_tokens"),
@@ -1755,6 +1807,7 @@ def main() -> None:
                     "removed_history_messages": removed_messages,
                     "backend": backend,
                     "error_type": error_type,
+                    "failure_category": failure_category,
                 }
                 raw_predictions.append(raw_record)
             submission_line = json.dumps(prediction, ensure_ascii=False, separators=(",", ":")) + "\n"
