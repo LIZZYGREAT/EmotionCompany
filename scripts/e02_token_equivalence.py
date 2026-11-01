@@ -297,6 +297,12 @@ def _resolve_adapter_path(config: dict[str, Any]) -> Path:
     return (path if path.is_absolute() else WORKSPACE_ROOT / path).resolve()
 
 
+def _resolve_base_path(config: dict[str, Any]) -> Path:
+    """Resolve deployment config model paths relative to the repository root."""
+    path = Path(config["model_path"]).expanduser()
+    return (path if path.is_absolute() else WORKSPACE_ROOT / path).resolve()
+
+
 def run_diagnostic(
     *,
     config_path: Path,
@@ -335,7 +341,9 @@ def run_diagnostic(
             vllm_bin,
             config.get("deployment", {}).get("vllm", {}).get("expected_version"),
         )
-        base_path = runner.model_path(config)
+        base_path = _resolve_base_path(config)
+        if not base_path.is_dir():
+            raise FileNotFoundError(f"本地模型目录不存在: {base_path}")
         local_identity = probe.validate_artifact_identity(
             base_path=base_path,
             adapter_path=_resolve_adapter_path(config),

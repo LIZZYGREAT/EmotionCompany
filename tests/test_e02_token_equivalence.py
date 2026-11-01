@@ -80,6 +80,12 @@ def test_frozen_route_rejects_base_model_name_instead_of_lora_alias():
         })
 
 
+def test_deployment_base_path_is_resolved_from_repository_root():
+    resolved = diagnostic._resolve_base_path({"model_path": "participant/model"})
+
+    assert resolved == (diagnostic.WORKSPACE_ROOT / "participant/model").resolve()
+
+
 def test_local_expected_prompt_uses_shared_t1_recent_contiguous_suffix():
     class FakeTokenizer:
         def apply_chat_template(self, messages, **_kwargs):
