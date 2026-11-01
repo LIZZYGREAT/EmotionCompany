@@ -13,3 +13,7 @@
 - Follow [双人 Git 协作与 PR 操作规范](docs/knowledge/双人Git协作与PR操作规范.md) for task branches, explicit staging, commits, syncing, reviews, and merges.
 - Integrate into `main` through a teammate-reviewed PR after the `unit-cpu` CI check passes. Do not push or force-push directly to `main`.
 - Keep the GitHub PR template and CI workflow aligned with the Required Check configured for `main`.
+
+## Project task and documentation workflow
+
+- For project context review, task-plan execution, and decisions about what belongs in project records, also read [.agent/SKILL.MD](.agent/SKILL.MD). It supplements these repository rules and does not replace them.
