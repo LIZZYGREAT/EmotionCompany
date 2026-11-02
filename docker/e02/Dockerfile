@@ -62,4 +62,7 @@ RUN chmod 0755 /usr/local/bin/emotionalcompany-e02-entrypoint \
     && test -f /root/participant/adapter/adapter_config.json \
     && test -f /root/package_manifest.json
 
+# Required for Triton / PyTorch Inductor runtime compilation.
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
+
 ENTRYPOINT ["/usr/local/bin/emotionalcompany-e02-entrypoint"]
