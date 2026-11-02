@@ -49,7 +49,7 @@
 | E01-B Pilot Dev 生成评测 | 已完成（160 条诊断） | Emotion Accuracy 从 0.106 升至 0.406，Raw A0 从 0.013 升至 0.913；Profile Micro-F1 从 0.0648 降至 0.0077，画像几乎恒为空。仅为 Pilot 风险信号，不是完整 Dev 结论；见 [Pilot 验收报告](docs/experiments/E01-B_训练工程与Pilot验收报告.md)。 |
 | E01-B Full 训练 | 已完成 | Run `E01-B-FULL-20261028-133805`：16,192 条有效 Train、4,048 步、1 Epoch；独立 Adapter 重载最终通过，Base 权重未变。 |
 | E01-B 完整 Dev 对照 | 已完成（1,833 条） | Base/Adapter 使用相同 D0.3 Dev IDs。情绪 Accuracy 0.1282→0.6536，画像 33 标签 Micro-F1 0.0782→0.4223，Raw A0 Schema 0.0093→0.9809；均为本地代理指标。见[正式验收报告](docs/experiments/E01-B_正式SFT与Dev对照验收报告.md)和[深度诊断](docs/experiments/E01-B_Full_深度诊断与证据整理.md)。 |
-| E02 评测与部署准备 | 10 条 vLLM GPU Smoke 已完成，E02.1-C 与 Token ID 对照 CPU 工程完成 | Smoke 的 13/13 身份/结构检查通过；9 条有效、1 条结构无效。服务端完整 Token IDs 正在准备单独核验，100 条性能、BERTScore、官方性能口径和离线 Docker 仍待验收。 |
+| E02 评测与部署准备 | E02.2-A 服务端 Token ID 核验通过；E02.2-B 100 条 GPU 性能基准已完成运行 | Token ID 12/12 精确匹配；最新性能 Run 100/100 请求完成，97/100 原始输出有效，3 条格式错误或截断。BERTScore、官方评分口径和离线 Docker 仍待验收；详情见 [E02.2 报告](docs/experiments/E02.2_推理协议与性能验收报告.md)。 |
 
 Pilot 的训练 Loss 和 SFT Dev Loss 只说明模型在 Completion-only 训练目标上的变化，不替代情绪、画像、Raw JSON/Schema、回复和性能评测。Pilot Run 的 Manifest、日志、Checkpoint 和权重保存在忽略目录 `outputs/training/`，以上摘要来自执行机上的真实结果，不是 Git 中的实验产物。
 

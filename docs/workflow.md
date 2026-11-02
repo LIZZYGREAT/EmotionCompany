@@ -8,7 +8,7 @@ D0 through E00.2-D have completed their documented data, protocol, and small-sam
 
 The team Git branch, PR review, merge, and `main` protection process is documented in [`docs/knowledge/双人Git协作与PR操作规范.md`](knowledge/双人Git协作与PR操作规范.md). `.github/workflows/ci.yml` runs `unit-cpu` on every branch push and PR to `main`; configure Required Checks only after confirming the exact successful check name in GitHub.
 
-E02.0 已完成本地指标计算口径审计和 Full B Run/Dev 输入身份索引；官方计分等价性仍未确认。E02.1 的 10 条 vLLM `0.11.1` + Full B Adapter GPU Smoke 已完成：13/13 Manifest 检查通过，9 条输出有效、1 条输出结构无效。后续 E02.2-A Run `E02.2-A-TOKEN-20261101T143137Z` 对 10 条既有无标签样本和 2 条合成 `</think>` 样本完成服务端 Prompt Token ID 核验，12/12 逐 ID 精确相等。E02.2-B 固定 100 条 target-free 候选集已按有效 Prompt Token 三分位和固定 seed 完成 CPU 审计；正式性能运行器和计时汇总仍待实现。E02.1 真实 Run 及异常结构诊断见 [`E02.1 报告`](experiments/E02.1_vLLM兼容性与最小推理验收报告.md)，E02.2-A/B 证据和后续性能验收边界见 [`E02.2 报告`](experiments/E02.2_推理协议与性能验收报告.md)。基线与口径索引分别见 [E02.0 报告](experiments/E02.0_评分口径与基线冻结报告.md) 和 [E02 基线资产索引](experiments/E02_基线资产与证据索引.md)。服务端权重身份仍为 `unverified`；Token ID 通过和候选集审计不代表质量、性能或 Docker 验收通过。
+E02.0 已完成本地指标计算口径审计和 Full B Run/Dev 输入身份索引；官方计分等价性仍未确认。E02.1 的 10 条 vLLM `0.11.1` + Full B Adapter GPU Smoke 已完成：13/13 Manifest 检查通过，9 条输出有效、1 条输出结构无效。E02.2-A Run `E02.2-A-TOKEN-20261101T143137Z` 对 10 条既有无标签样本和 2 条合成 `</think>` 样本完成服务端 Prompt Token ID 核验，12/12 逐 ID 精确相等。E02.2-B 固定 100 条 target-free 性能基准已运行；最新 Run 的 100 条请求均完成，97 条 Raw JSON/A0 有效，3 条格式错误或截断。解析器误提取嵌套 JSON 的问题已修复并通过聚焦回归；性能指标、失败归因和后续边界见 [`E02.2 报告`](experiments/E02.2_推理协议与性能验收报告.md)。基线与口径索引分别见 [E02.0 报告](experiments/E02.0_评分口径与基线冻结报告.md) 和 [E02 基线资产索引](experiments/E02_基线资产与证据索引.md)。服务端权重身份仍为 `unverified`；Token ID 通过和候选集审计不代表质量、性能或 Docker 验收通过。
 
 ## Environment setup
 

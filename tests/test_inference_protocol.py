@@ -231,6 +231,27 @@ def test_i08_only_sixteen_emotion_labels_are_normal_and_empty_is_fallback(protoc
     assert prediction["emotion_label"] == ""
 
 
+def test_i08b_truncated_outer_json_is_not_misread_as_a_nested_valid_object(protocol):
+    _, _, _, enums, _, _, _ = protocol
+    raw = (
+        '{"emotion_label":"joy","user_profile":'
+        '{"personality_traits":[],"interests":[],"style":[]},'
+        '"response_text":"截断'
+    )
+
+    with pytest.raises(ValueError, match="格式错误或不完整"):
+        runner.extract_object(raw)
+
+    _, parse_failed, invalid_label = runner.parse_prediction("test_000007_t0", raw, enums)
+    assert parse_failed
+    assert not invalid_label
+
+
+def test_i08c_fenced_nested_json_object_is_extracted_as_a_whole():
+    raw = "```json\n" + _valid_completion() + "\n```"
+    assert runner.extract_object(raw)["emotion_label"] == "anxiety"
+
+
 def test_i09_completion_order_and_submission_schema_are_distinct(protocol):
     _, _, schema, enums, _, _, _ = protocol
     raw = json.dumps({

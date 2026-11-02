@@ -1174,16 +1174,18 @@ def request_chat_completion(
 
 def extract_object(text: str) -> dict[str, Any]:
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.S | re.I)
-    candidate = fenced.group(1) if fenced else text
+    candidate = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I).strip()
+    candidate = re.sub(r"\s*```$", "", candidate).strip()
     decoder = json.JSONDecoder()
-    for match in re.finditer(r"\{", candidate):
-        try:
-            value, _ = decoder.raw_decode(candidate[match.start():])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            return value
+    start = candidate.find("{")
+    if start < 0:
+        raise ValueError("模型输出中没有可解析的 JSON object")
+    try:
+        value, _ = decoder.raw_decode(candidate[start:])
+    except json.JSONDecodeError as exc:
+        raise ValueError("模型输出中的 JSON object 格式错误或不完整") from exc
+    if isinstance(value, dict):
+        return value
     raise ValueError("模型输出中没有可解析的 JSON object")
 
 
