@@ -1,5 +1,7 @@
 # EmotionCompany：Whitespace 自动修复任务
 
+> **历史实施任务：已落地。** 当前 Markdown 空白修复命令和提交门禁见[AGENTS.md](../../AGENTS.md) 与 `.github/hooks/`；本文件保留原始实施目标，不是新的工程 Todo。
+
 ## 一、目标与边界
 
 为仓库增加**本地可手动调用、Agent 可复用、Git 提交前自动执行**的空白字符修复工具，减少 `.github/workflows/ci.yml` 中 `git diff --check` 失败。

@@ -1,5 +1,7 @@
 # EmotionCompany：双人 Git 分支协作规范、`main` 保护与 GitHub CI 实施方案
 
+> **历史实施方案快照**：正文含 2026-10-27 的分支和 CI 状态观察，也含当时的设置建议。日常操作以[当前双人 Git 协作规范](../knowledge/双人Git协作与PR操作规范.md)和[仓库工作规则](../../AGENTS.md)为准；GitHub 网页保护状态需在 GitHub 现场核实。
+
 > **文档定位**：同时作为两名队员日常遵守的仓库协作规范，以及交给 Codex 的一次性治理实施任务。先建立规则与 CI，再进入 E01；**本文件不是要求立即训练模型、修改评测逻辑或部署 Docker**。<br>
 > **仓库**：`LIZZYGREAT/EmotionCompany`。<br>
 > **核查基线**：2026-10-27，远端 `e00-1-evaluation-infrastructure` HEAD `eff89062cc07d11e141ef2eae1069d83156940a7`，`main` HEAD `7b225eb8b99…`；实施前以 GitHub 和本地 Git 最新状态为准。<br>

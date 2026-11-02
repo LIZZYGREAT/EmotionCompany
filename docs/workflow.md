@@ -4,11 +4,13 @@ Run the data stages from the repository root. The reports, configs, source, and 
 
 ## Current progress and handoff
 
-D0 through E00.2-D have completed their documented data, protocol, and small-sample diagnostic scopes. E01-A Run `E01-A-20261027-223703` passed its 120-step engineering and reload checks; its fixed 20-row Dev Smoke had low local metrics and does not establish generalization. E01-B Pilot Run `E01-B-PILOT-20261028-092248` completed 128 optimizer steps, same-Run Checkpoint recovery, Adapter reload, and its 160-row paired Pilot Dev comparison; see [`E01-B Pilot 验收报告`](experiments/E01-B_训练工程与Pilot验收报告.md). The independent Full B Run `E01-B-FULL-20261028-133805` completed 4,048 optimizer steps over all 16,192 Train rows and passed the standalone Adapter reload check. Full Dev Base `E00.3-BASE-20261028-223105` and Adapter `E01-B-EVAL-20261028-223105` both scored the same 1,833 IDs; the paired comparison completed. On local proxy metrics, emotion Accuracy was 0.1282 → 0.6536 and profile 33-label Micro-F1 was 0.0782 → 0.4223. These are not official competition scores; BERTScore and official performance remain `not_run`. See [`E01-B Full SFT 与 Dev 配对验收报告`](experiments/E01-B_正式SFT与Dev对照验收报告.md), [深度诊断报告](experiments/E01-B_Full_深度诊断与证据整理.md) and the [唯一当前交接入口](context/E01_当前状态与后续交接.md). Earlier E00 evidence and handoff context remain historical in [`E00 阶段总结与 E01 交接`](experiments/E00_阶段总结与E01交接.md); future experiments remain candidates in [`后续调优候选与实验决策`](experiments/后续调优候选与实验决策.md).
+D0 through E00.2-D have completed their documented data, protocol, and small-sample diagnostic scopes. E01-A Run `E01-A-20261027-223703` passed its 120-step engineering and reload checks; its fixed 20-row Dev Smoke had low local metrics and does not establish generalization. E01-B Pilot Run `E01-B-PILOT-20261028-092248` completed 128 optimizer steps, same-Run Checkpoint recovery, Adapter reload, and its 160-row paired Pilot Dev comparison; see [`E01-B Pilot 验收报告`](experiments/E0.1-B_训练工程与Pilot验收报告.md). The independent Full B Run `E01-B-FULL-20261028-133805` completed 4,048 optimizer steps over all 16,192 Train rows and passed the standalone Adapter reload check. Full Dev Base `E00.3-BASE-20261028-223105` and Adapter `E01-B-EVAL-20261028-223105` both scored the same 1,833 IDs; the paired comparison completed. On local proxy metrics, emotion Accuracy was 0.1282 → 0.6536 and profile 33-label Micro-F1 was 0.0782 → 0.4223. These are not official competition scores; BERTScore and official performance remain `not_run`. See [`E01-B Full SFT 与 Dev 配对验收报告`](experiments/E0.1-B_正式SFT与Dev对照验收报告.md), [深度诊断报告](experiments/E0.1-B_Full_深度诊断与证据整理.md) and the [唯一当前交接入口](context/E0.1_当前状态与后续交接.md). Earlier E00 evidence and handoff context remain historical in [`E00 阶段总结与 E01 交接`](experiments/E0.0_阶段总结与E0.1交接.md); future experiments remain candidates in [`后续调优候选与实验决策`](experiments/后续调优候选与实验决策.md).
 
 The team Git branch, PR review, merge, and `main` protection process is documented in [`docs/knowledge/双人Git协作与PR操作规范.md`](knowledge/双人Git协作与PR操作规范.md). `.github/workflows/ci.yml` runs `unit-cpu` on every branch push and PR to `main`; configure Required Checks only after confirming the exact successful check name in GitHub.
 
-E02.0 已完成本地指标计算口径审计和 Full B Run/Dev 输入身份索引；官方计分等价性仍未确认。E02.1 的 10 条 vLLM `0.11.1` + Full B Adapter GPU Smoke 已完成：13/13 Manifest 检查通过，9 条输出有效、1 条输出结构无效。E02.2-A Run `E02.2-A-TOKEN-20261101T143137Z` 对 10 条既有无标签样本和 2 条合成 `</think>` 样本完成服务端 Prompt Token ID 核验，12/12 逐 ID 精确相等。E02.2-B 固定 100 条 target-free 性能基准已运行；最新 Run 的 100 条请求均完成，97 条 Raw JSON/A0 有效，3 条格式错误或截断。解析器误提取嵌套 JSON 的问题已修复并通过聚焦回归；性能指标、失败归因和后续边界见 [`E02.2 报告`](experiments/E02.2_推理协议与性能验收报告.md)。基线与口径索引分别见 [E02.0 报告](experiments/E02.0_评分口径与基线冻结报告.md) 和 [E02 基线资产索引](experiments/E02_基线资产与证据索引.md)。服务端权重身份仍为 `unverified`；Token ID 通过和候选集审计不代表质量、性能或 Docker 验收通过。
+E02.0 已完成本地指标口径审计和 Full B Run/Dev 输入身份索引；官方计分等价性仍未确认。E02.1 的 10 条 vLLM `0.11.1` + Full B Adapter GPU Smoke 完成：13/13 Manifest 检查通过，9 条输出有效、1 条 `invalid_label`。E02.2-A Run `E02.2-A-TOKEN-20261101T143137Z` 对 10 条既有无标签样本和 2 条合成 `</think>` 样本完成服务端 Prompt Token ID 核验，12/12 逐 ID 精确相等。E02.2-B 固定 100 条 target-free 基准中 100/100 请求完成、97 条 Raw JSON/A0 有效，3 条格式错误或截断。E02.2-C 修复版 Docker 在 `--network none` 下完成本地 10/10 GPU Smoke；镜像 tar、体积/SHA、干净环境导入和官网提交主动暂缓。解析器修复、E02 证据与边界见 [`E02.2 报告`](experiments/E0.2.2_推理协议与性能验收报告.md)和[Docker 准备说明](../docker/e02/README.md)。服务端权重身份仍为 `unverified`；本地 Smoke 不代表官方评分或最终交付验收。
+
+当前下一阶段是 E03 优化方向讨论。Full B 保持冻结对照，现有实验候选均为 `idea`，没有获批的训练、Prompt 或推理修改。方向见 [E03 优化总览](task/E0.3_优化方向总览.md)，阶段状态见[唯一当前交接](context/E0.1_当前状态与后续交接.md)。
 
 ## Environment setup
 
@@ -84,7 +86,7 @@ Run the participant entry point after providing the model and service configurat
 bash participant/start.sh TEST_FILE RESULT_DIR
 ```
 
-Current defaults are provisional: `P=1280` (`local_smoke_candidate_P1280`), `G=1200` reference, `K=null` (`not_verified`). Set `EVALUATION_MAX_PROMPT_TOKENS`, `EVALUATION_PROMPT_BUDGET_PROFILE`, and `EVALUATION_SERVING_CONTEXT_LIMIT` for a named run. If K is configured, startup and runner both reject `P+G>K`; vLLM then receives `--max-model-len K`. Tensor Parallel defaults to 1 and can be set with `VLLM_TENSOR_PARALLEL_SIZE`. The earlier E00.0.1 acceptance check preceded the local model mount and real GPU run. For E00.2, `participant/model` now resolves to the recorded Qwen3-1.7B snapshot, and the real Transformers/NF4/BF16/CUDA run passed the archived identity and device-placement checks. `K` and vLLM server-side prompt/token equivalence remain unverified; see `docs/experiments/E00.2_真实模型Smoke与解码对照报告.md` for the run record.
+Historical E00/E00.2 snapshot: at that time, the generic runner defaults were `P=1280` (`local_smoke_candidate_P1280`), `G=1200` reference and `K=null` (`not_verified`). Set `EVALUATION_MAX_PROMPT_TOKENS`, `EVALUATION_PROMPT_BUDGET_PROFILE`, and `EVALUATION_SERVING_CONTEXT_LIMIT` for a named run. If K is configured, startup and runner both reject `P+G>K`; vLLM then receives `--max-model-len K`. Tensor Parallel defaults to 1 and can be set with `VLLM_TENSOR_PARALLEL_SIZE`. The earlier E00.0.1 acceptance check preceded the local model mount and real GPU run. For E00.2, `participant/model` resolves to the recorded Qwen3-1.7B snapshot, and the real Transformers/NF4/BF16/CUDA run passed its archived identity and device-placement checks. Later fixed E02.2 profiles used vLLM `0.11.1`, `K=2560`, and E02.2-A's 12/12 exact Prompt Token ID comparison; see the [E02.2 report](experiments/E0.2.2_推理协议与性能验收报告.md). Generic defaults remain configurable and are not the fixed E02 run configuration.
 
 ## D0.4.3 — Completion-only SFT data and Trainer Batch acceptance
 
@@ -172,7 +174,7 @@ source .venv/bin/activate
 python scripts/e00_2_smoke.py --run-id "E00.2-$(date +%Y%m%d-%H%M%S)" --execute
 ```
 
-Greedy uses `do_sample=false`; Sampling uses `do_sample=true, temperature=0.7, top_p=0.8, top_k=20` with base seed 42 and a stable per-ID seed. Runner reports include effective runner/evaluation config hashes, model shard identity, actual NF4 module/device-map evidence, model-load time, CUDA allocator usage, cold first-sample timing, and per-sample diagnostics. Raw model text and per-case comparison files stay under ignored `outputs/evaluation/e00_2/`; the tracked report contains no conversation text. Twenty Smoke rows are exploratory and cannot establish a generally better decoding strategy. The E00.2 report records the original decision not to proceed directly to E00.3; full Dev timing remains an open decision, not an automatic next run. Current evidence and E01 handoff are summarized in `docs/experiments/E00_阶段总结与E01交接.md`.
+Greedy uses `do_sample=false`; Sampling uses `do_sample=true, temperature=0.7, top_p=0.8, top_k=20` with base seed 42 and a stable per-ID seed. Runner reports include effective runner/evaluation config hashes, model shard identity, actual NF4 module/device-map evidence, model-load time, CUDA allocator usage, cold first-sample timing, and per-sample diagnostics. Raw model text and per-case comparison files stay under ignored `outputs/evaluation/e00_2/`; the tracked report contains no conversation text. Twenty Smoke rows are exploratory and cannot establish a generally better decoding strategy. The E00.2 report records the original decision not to proceed directly to E00.3; full Dev timing remains an open decision, not an automatic next run. Current evidence and E01 handoff are summarized in `docs/experiments/E0.0_阶段总结与E0.1交接.md`.
 
 After a completed real Smoke, run the offline diagnosis against its immutable artifacts:
 
@@ -182,7 +184,7 @@ python scripts/e00_2_diagnose.py \
   --output-dir outputs/evaluation/e00_2/diagnostics/E00.2-20261026-220635
 ```
 
-Use a new output directory for each run; the CLI refuses to overwrite an existing one. It verifies the Manifest and source hashes, joins Raw/Submission/Performance/References by ID, reconciles historical Metrics, checks local model-mount metadata without rehashing multi-GB shards, and compares Smoke truncation with D0.4.2. It reads existing artifacts only, does not load a model or modify inference behavior, and writes its detailed outputs under ignored `outputs/`. The tracked analysis is `docs/experiments/E00.2_错误归因与后续决策.md`; it contains field counts and conclusions, not Raw completions or conversation text.
+Use a new output directory for each run; the CLI refuses to overwrite an existing one. It verifies the Manifest and source hashes, joins Raw/Submission/Performance/References by ID, reconciles historical Metrics, checks local model-mount metadata without rehashing multi-GB shards, and compares Smoke truncation with D0.4.2. It reads existing artifacts only, does not load a model or modify inference behavior, and writes its detailed outputs under ignored `outputs/`. The tracked analysis is `docs/experiments/E0.0.2_错误归因与后续决策.md`; it contains field counts and conclusions, not Raw completions or conversation text.
 
 ## E00.2-D — Single-field emotion diagnosis
 
@@ -221,7 +223,7 @@ PY
 python scripts/e00_2_emotion_diag.py score --run-dir "$RUN_DIR"
 ```
 
-The runner requires actual NF4/BF16/CUDA placement with no CPU/disk offload and the archived weight identity; it does not fall back to CPU. If CUDA is unavailable, it writes a `blocked_in_codex_env` Manifest and does not create predictions. A blocked run ID is immutable; use a new one on a later attempt. Raw predictions and per-case results stay under ignored `outputs/`; only the concise report is tracked at `docs/experiments/E00.2-D_单字段情绪诊断报告.md`. The completed run `E00.2-D-emotion-003` scored 15/20 strict legal labels and 0/20 correct; its weight SHA matched the archived identity, and the report records that the configured revision itself remains unverified by the Manifest. See the experiment report for full metrics. The 20-row result is descriptive only because the prompt and output contract changed together, so it cannot establish causality or replace the A0 baseline.
+The runner requires actual NF4/BF16/CUDA placement with no CPU/disk offload and the archived weight identity; it does not fall back to CPU. If CUDA is unavailable, it writes a `blocked_in_codex_env` Manifest and does not create predictions. A blocked run ID is immutable; use a new one on a later attempt. Raw predictions and per-case results stay under ignored `outputs/`; only the concise report is tracked at `docs/experiments/E0.0.2-D_单字段情绪诊断报告.md`. The completed run `E00.2-D-emotion-003` scored 15/20 strict legal labels and 0/20 correct; its weight SHA matched the archived identity, and the report records that the configured revision itself remains unverified by the Manifest. See the experiment report for full metrics. The 20-row result is descriptive only because the prompt and output contract changed together, so it cannot establish causality or replace the A0 baseline.
 
 ## E01-A — QLoRA engineering acceptance
 
@@ -279,9 +281,11 @@ python scripts/e01_evaluate.py \
   --attempt-id "dev-smoke-$(date +%Y%m%d-%H%M%S)"
 ```
 
-The evaluation attempt writes to `outputs/training/E01-A-<run-id>/evaluation/dev_smoke/<attempt-id>/`. It records a `running` `run_manifest.json` before launching inference and updates it with inference/scoring status. A new attempt ID gives each retry an independent output directory; the CLI also generates a unique ID if `--attempt-id` is omitted. Raw training generations, predictions, runner reports, and scores stay under ignored `outputs/training/`. Do not commit those artifacts or use E01-A training fit as Dev generalization evidence. Review [`E01-A 训练可学习性验收报告`](experiments/E01-A_训练可学习性验收报告.md) before setting E01-B's Epoch/Steps, resource budget, and explicit start decision.
+The evaluation attempt writes to `outputs/training/E01-A-<run-id>/evaluation/dev_smoke/<attempt-id>/`. It records a `running` `run_manifest.json` before launching inference and updates it with inference/scoring status. A new attempt ID gives each retry an independent output directory; the CLI also generates a unique ID if `--attempt-id` is omitted. Raw training generations, predictions, runner reports, and scores stay under ignored `outputs/training/`. Do not commit those artifacts or use E01-A training fit as Dev generalization evidence. Review [`E01-A 训练可学习性验收报告`](experiments/E0.1-A_训练可学习性验收报告.md) before setting E01-B's Epoch/Steps, resource budget, and explicit start decision.
 
 ## E01-B — 分阶段训练与公平 Dev 评测
+
+已验收的 Full B Run 为 `E01-B-FULL-20261028-133805`，路径 `outputs/training/E01-B-FULL-20261028-133805/`；完整 Base/Adapter Dev 生成和比较在 `outputs/evaluation/e01_b/`。独立 Adapter 重载通过，结果见[正式报告](experiments/E0.1-B_正式SFT与Dev对照验收报告.md)。本节后续命令是未来新 Run 的复现配方，不是当前需要重做的训练或评测。
 
 本节后面的命令是建立**新 Run**时的执行配方；不得用相同 Run ID 覆盖既有产物。当前已执行的真实 Run 如下。两份 E01-B 任务方案解释实现来源和执行门禁，不表示 Full B 仍待启动。
 
@@ -291,8 +295,8 @@ The evaluation attempt writes to `outputs/training/E01-A-<run-id>/evaluation/dev
 | Full B 训练 | `outputs/training/E01-B-FULL-20261028-133805/` | 16,192 Train、4,048 steps、1 Epoch；standalone reload 通过 |
 | Base 完整 Dev | `outputs/evaluation/e01_b/full/E00.3-BASE-20261028-223105/` | 1,833 IDs，`scored` |
 | Full B Adapter 完整 Dev | `outputs/evaluation/e01_b/full/E01-B-EVAL-20261028-223105/` | 同一 1,833 IDs，`scored` |
-| Full Base/Adapter 配对比较 | `outputs/evaluation/e01_b/comparison/full-20261029-062541/` | `completed`；见[正式验收报告](experiments/E01-B_正式SFT与Dev对照验收报告.md) |
-| Full B 只读深度诊断 | `outputs/evaluation/e01_b/diagnostics/full-b-v4/` | Hash、IDs、分母、已评分结果交叉核验；见[诊断报告](experiments/E01-B_Full_深度诊断与证据整理.md) |
+| Full Base/Adapter 配对比较 | `outputs/evaluation/e01_b/comparison/full-20261029-062541/` | `completed`；见[正式验收报告](experiments/E0.1-B_正式SFT与Dev对照验收报告.md) |
+| Full B 只读深度诊断 | `outputs/evaluation/e01_b/diagnostics/full-b-v4/` | Hash、IDs、分母、已评分结果交叉核验；见[诊断报告](experiments/E0.1-B_Full_深度诊断与证据整理.md) |
 
 只重跑现有产物的只读诊断时使用新输出目录；该脚本不加载模型、不训练、不推理、不重新评分：
 
@@ -427,7 +431,7 @@ python scripts/e01_b_evaluate.py --scope compare \
 
 `compare` 只读取既有预测并复用 E00 Scorer 重新核验与评分，不训练、不生成。它要求两组完整 ID/Reference Hash、协议、解码、硬件标签、代码/依赖一致，拒绝 Pilot/Full 混比和部分完成结果。产物 `comparison_summary.json`、`report.md`、`comparison_cases.jsonl` 汇总情绪逐类指标/混淆矩阵、画像 33 标签及逐维/非空 Gold Recall、Raw 严格 JSON/A0 Schema 与错误分布、Submission Schema、BLEU-4/ROUGE-L、Token/延迟/显存及配对迁移；情绪差值附固定 Seed 的会话簇配对 Bootstrap 区间。逐 ID 表只含 ID 和诊断统计。
 
-BERTScore 按冻结配置为 `not_run`；官方性能口径为 `not_run`。本机 Runner 的 100/100 轮统计已完成，但不是官方容器性能。空画像会影响 Exact Match，必须结合非空 Gold Recall 与标签 Micro-F1 解读。权重、Raw、预测与逐样本比较文件仍在忽略目录；汇总结果已记录在[正式验收报告](experiments/E01-B_正式SFT与Dev对照验收报告.md)和[深度诊断报告](experiments/E01-B_Full_深度诊断与证据整理.md)。
+BERTScore 按冻结配置为 `not_run`；官方性能口径为 `not_run`。本机 Runner 的 100/100 轮统计已完成，但不是官方容器性能。空画像会影响 Exact Match，必须结合非空 Gold Recall 与标签 Micro-F1 解读。权重、Raw、预测与逐样本比较文件仍在忽略目录；汇总结果已记录在[正式验收报告](experiments/E0.1-B_正式SFT与Dev对照验收报告.md)和[深度诊断报告](experiments/E0.1-B_Full_深度诊断与证据整理.md)。
 
 ## Regression suite
 

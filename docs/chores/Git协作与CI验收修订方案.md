@@ -1,5 +1,7 @@
 # EmotionCompany：Git 协作规范与 CI 验收修订方案
 
+> **历史实施方案**：记录早期 Git/CI 修订时的分支快照和验收步骤；不要用其中的旧分支关系推断当前状态。现行日常规则以[双人 Git 协作规范](../knowledge/双人Git协作与PR操作规范.md)、[AGENTS.md](../../AGENTS.md) 和 `.github/workflows/ci.yml` 为准。
+
 > 类型：交给 Codex 的**针对性修订任务**，非新一轮架构重做。
 > 审查对象：`LIZZYGREAT/EmotionCompany`，分支 `e00-1-evaluation-infrastructure`，检查时 HEAD `61b88a115cc1e926f84f43f848111efb78e8ef9d`。
 > 目标：补齐 GitHub Actions 的真实可运行条件、验证协作门禁、清理剩余文档事实偏差。

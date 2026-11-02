@@ -16,4 +16,5 @@
 
 ## Project task and documentation workflow
 
-- For project context review, task-plan execution, and decisions about what belongs in project records, also read [.agent/SKILL.MD](.agent/SKILL.MD). It supplements these repository rules and does not replace them.
+- For project context review, task-plan execution, and decisions about project records, read the tracked [current handoff](docs/context/E0.1_当前状态与后续交接.md) and [Git collaboration rules](docs/knowledge/双人Git协作与PR操作规范.md).
+- `.agent/SKILL.MD` is an optional local extension. It is ignored by Git and may be absent in a clean clone; read it when available. Tracked repository documents remain authoritative for all contributors.
