@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: ['**']
+
+permissions:
+  contents: read
+
+jobs:
+  unit-cpu:
+    name: unit-cpu
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+
+      - name: Install minimal pinned CI dependencies
+        run: |
+          python -m pip install --disable-pip-version-check \
+            'pytest==9.1.1' \
+            'PyYAML==6.0.3' \
+            'jsonschema==4.26.0' \
+            'sacrebleu==2.5.1'
+
+      - name: Check syntax and pushed diff whitespace
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          EVENT_SHA: ${{ github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python -m compileall -q src scripts participant tests
+          bash -n participant/start.sh
+          bash -n scripts/e01_b_pilot.sh
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            git diff --check "$PR_BASE_SHA...$PR_HEAD_SHA"
+          elif [[ "$BEFORE_SHA" =~ ^0+$ ]]; then
+            git diff --check "origin/main...$EVENT_SHA"
+          else
+            git diff --check "$BEFORE_SHA" "$EVENT_SHA"
+          fi
+
+      - name: Run CPU synthetic regression suite
+        run: |
+          python -m pytest -q \
+            tests/test_competition_contract.py \
+            tests/test_data_audit.py \
+            tests/test_data_pipeline.py \
+            tests/test_e00_metrics.py \
+            tests/test_e00_runner.py \
+            tests/test_inference_resume.py \
+            tests/test_e01_b_evaluate.py \
+            tests/test_e01_b_diagnose.py \
+            tests/test_e02_vllm_protocol.py \
+            tests/test_e02_token_equivalence.py \
+            tests/test_e02_benchmark_selection.py \
+            tests/test_e00_2_diagnose.py \
+            tests/test_e00_2_emotion_diag.py

@@ -6,7 +6,9 @@ import copy
 import json
 import subprocess
 import sys
+import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -22,6 +24,18 @@ from src.data.token_stats import select_recent_complete_suffix as audit_select_r
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_generation_failure_categories_are_safe_and_recover_wrapped_timeouts():
+    timeout = RuntimeError("request failed")
+    timeout.__cause__ = urllib.error.URLError(TimeoutError("timed out"))
+    server_oom = RuntimeError("API 请求失败: HTTP 500: CUDA out of memory")
+    server_oom.__cause__ = urllib.error.HTTPError("http://localhost", 500, "server error", None, None)
+
+    assert runner.classify_generation_failure(timeout) == "timeout"
+    assert runner.classify_generation_failure(RuntimeError("CUDA out of memory")) == "oom"
+    assert runner.classify_generation_failure(server_oom) == "oom"
+    assert runner.classify_generation_failure(RuntimeError("request failed")) == "request_error"
 
 
 @pytest.fixture(scope="module")
@@ -217,6 +231,27 @@ def test_i08_only_sixteen_emotion_labels_are_normal_and_empty_is_fallback(protoc
     assert prediction["emotion_label"] == ""
 
 
+def test_i08b_truncated_outer_json_is_not_misread_as_a_nested_valid_object(protocol):
+    _, _, _, enums, _, _, _ = protocol
+    raw = (
+        '{"emotion_label":"joy","user_profile":'
+        '{"personality_traits":[],"interests":[],"style":[]},'
+        '"response_text":"截断'
+    )
+
+    with pytest.raises(ValueError, match="格式错误或不完整"):
+        runner.extract_object(raw)
+
+    _, parse_failed, invalid_label = runner.parse_prediction("test_000007_t0", raw, enums)
+    assert parse_failed
+    assert not invalid_label
+
+
+def test_i08c_fenced_nested_json_object_is_extracted_as_a_whole():
+    raw = "```json\n" + _valid_completion() + "\n```"
+    assert runner.extract_object(raw)["emotion_label"] == "anxiety"
+
+
 def test_i09_completion_order_and_submission_schema_are_distinct(protocol):
     _, _, schema, enums, _, _, _ = protocol
     raw = json.dumps({
@@ -239,6 +274,101 @@ def test_i09_completion_order_and_submission_schema_are_distinct(protocol):
     }
     completion = serialize_completion(target, official_schema)
     assert list(json.loads(completion)) == ["emotion_label", "user_profile", "response_text", "memory_refs"]
+
+
+def test_i10_adapter_is_disabled_by_default_and_rejects_invalid_declarations(protocol, tmp_path):
+    config, *_ = protocol
+    assert runner.validate_adapter_config(config.get("adapter"), "transformers") == {"enabled": False}
+    with pytest.raises(ValueError, match="expected_base_weight_sha256"):
+        runner.validate_adapter_config({"enabled": True, "path": "outputs/training/a/adapter"}, "transformers")
+    valid_shape = {
+        "enabled": True,
+        "path": "outputs/training/a/adapter",
+        "expected_base_weight_sha256": "a" * 64,
+        "expected_adapter_weight_sha256": "b" * 64,
+        "expected_server_model_id": "e01-full",
+    }
+    assert runner.validate_adapter_config(valid_shape, "openai_compatible")["enabled"] is True
+    with pytest.raises(ValueError, match="不支持 backend"):
+        runner.validate_adapter_config(valid_shape, "unknown")
+    with pytest.raises(ValueError, match="64 位 SHA-256"):
+        runner.validate_adapter_config({**valid_shape, "expected_adapter_weight_sha256": "wrong"}, "transformers")
+
+
+def test_i11_adapter_identity_is_separate_and_base_reference_is_checked(tmp_path):
+    adapter_dir = tmp_path / "adapter"
+    adapter_dir.mkdir()
+    config_path = adapter_dir / "adapter_config.json"
+    config_path.write_text(json.dumps({"base_model_name_or_path": "Qwen/Qwen3-1.7B"}), encoding="utf-8")
+    weights = adapter_dir / "adapter_model.safetensors"
+    weights.write_bytes(b"synthetic adapter weights")
+    identity, adapter_config = runner.adapter_weight_identity(adapter_dir)
+    assert identity["identity_status"] == "observed"
+    assert identity["weight_sha256"]
+    assert identity["config_sha256"] == runner.sha256(config_path)
+    assert runner.validate_adapter_base_reference(adapter_config, "Qwen/Qwen3-1.7B", tmp_path / "base") == "Qwen/Qwen3-1.7B"
+    with pytest.raises(ValueError, match="does not match configured model"):
+        runner.validate_adapter_base_reference({"base_model_name_or_path": "Qwen/other"}, "Qwen/Qwen3-1.7B", tmp_path / "base")
+
+
+def test_i11_quantized_adapter_load_prepares_base_before_loading(monkeypatch, tmp_path):
+    events = []
+
+    class BaseModel:
+        prepared = False
+
+    class FakePeftModel:
+        @staticmethod
+        def from_pretrained(model, adapter_path, **kwargs):
+            events.append(("adapter", model.prepared, adapter_path, kwargs))
+            return {"base": model, "adapter_path": adapter_path}
+
+    def prepare_model_for_kbit_training(model, *, use_gradient_checkpointing):
+        events.append(("prepare", use_gradient_checkpointing))
+        model.prepared = True
+        return model
+
+    monkeypatch.setitem(sys.modules, "peft", SimpleNamespace(
+        PeftModel=FakePeftModel,
+        prepare_model_for_kbit_training=prepare_model_for_kbit_training,
+    ))
+    base = BaseModel()
+    loaded = runner.load_peft_adapter(
+        base,
+        tmp_path / "adapter",
+        prepare_quantized_base=True,
+        is_trainable=False,
+        local_files_only=True,
+    )
+
+    assert events == [
+        ("prepare", False),
+        ("adapter", True, str(tmp_path / "adapter"), {"is_trainable": False, "local_files_only": True}),
+    ]
+    assert loaded["base"].prepared is True
+
+
+def test_i11_unquantized_adapter_load_skips_kbit_preparation(monkeypatch, tmp_path):
+    events = []
+
+    class FakePeftModel:
+        @staticmethod
+        def from_pretrained(model, adapter_path, **kwargs):
+            events.append((model, adapter_path, kwargs))
+            return model
+
+    def unexpected_prepare(*args, **kwargs):
+        raise AssertionError("unquantized adapter loading must not run k-bit preparation")
+
+    monkeypatch.setitem(sys.modules, "peft", SimpleNamespace(
+        PeftModel=FakePeftModel,
+        prepare_model_for_kbit_training=unexpected_prepare,
+    ))
+    base = object()
+    result = runner.load_peft_adapter(base, tmp_path / "adapter", prepare_quantized_base=False)
+
+    assert result is base
+    assert events == [(base, str(tmp_path / "adapter"), {"is_trainable": False, "local_files_only": True})]
 
 
 def test_i10_budget_preflight_rejects_p_plus_g_over_k(tmp_path, monkeypatch):

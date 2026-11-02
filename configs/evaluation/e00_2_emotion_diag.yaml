@@ -1,0 +1,26 @@
+experiment_id: E00.2-D
+prompt_version: Pdiag-E1
+prompt_path: configs/prompts/pdiag_emotion_v1.txt
+prompt_sha256: 1b329069e7da9abde0b3c118cb5a1e25c0ae21b86b2f1916dddfea49170822e1
+inference_config_path: participant/configs/inference_config.json
+baseline_run_id: E00.2-20261026-220635
+baseline_manifest_path: outputs/evaluation/e00_2/E00.2-20261026-220635/run_manifest.json
+input_path: outputs/evaluation/e00_1/dev_adapter_v2/smoke_input.jsonl
+references_path: outputs/evaluation/e00_1/dev_adapter_v2/smoke_references.jsonl
+evaluation_manifest_path: outputs/evaluation/e00_1/dev_adapter_v2/manifest.json
+id_map_path: outputs/evaluation/e00_1/dev_adapter_v2/smoke_id_map.jsonl
+d042_manifest_path: outputs/token_audit/v1/manifest.json
+d042_budget_path: outputs/token_audit/v1/budget_simulations.jsonl
+d03_manifest_path: outputs/data_pipeline/v1/manifest.json
+train_path: data/processed/v1/train.jsonl
+model_reference: Qwen/Qwen3-1.7B
+model_path: participant/model
+expected_model_revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+expected_model_weight_sha256: 005d20550c04f4e246e5b434448786b44a0196b47d758d0acc77aba279e5bbc5
+history_policy: exact_E00.2_A0_greedy_selected_history
+prompt_budget: 1280
+majority_reference_label: anxiety
+expected_sample_count: 20
+generation:
+  do_sample: false
+  max_new_tokens: 64

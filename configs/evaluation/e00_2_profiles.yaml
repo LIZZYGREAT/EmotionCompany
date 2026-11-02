@@ -1,0 +1,42 @@
+experiment_id: E00.2
+description: >-
+  Real Qwen3-1.7B base-model Smoke under the frozen E00.1 protocol; compare
+  Greedy with one seeded Sampling candidate. The 20-row Smoke is exploratory.
+source_files:
+  inference_config: participant/configs/inference_config.json
+  evaluation_config: configs/evaluation/e00.yaml
+  smoke_input: outputs/evaluation/e00_1/dev_adapter_v2/smoke_input.jsonl
+  smoke_references: outputs/evaluation/e00_1/dev_adapter_v2/smoke_references.jsonl
+  evaluation_manifest: outputs/evaluation/e00_1/dev_adapter_v2/manifest.json
+sampling:
+  base_seed: 42
+  derivation: int(first_8_bytes_sha256(f'{base_seed}:{id}'))
+model:
+  model_id: Qwen/Qwen3-1.7B
+  weight_revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  local_weight_path: participant/model
+quantization:
+  enabled: true
+  load_in_4bit: true
+  quant_type: nf4
+  compute_dtype: bfloat16
+  use_double_quant: true
+context:
+  max_prompt_tokens: 1280
+  budget_profile: local_smoke_candidate_P1280
+generation_common:
+  max_new_tokens: 1200
+profiles:
+  greedy:
+    run_suffix: greedy
+    generation:
+      do_sample: false
+      temperature: 1.0
+      top_p: 1.0
+  sampling:
+    run_suffix: sampling
+    generation:
+      do_sample: true
+      temperature: 0.7
+      top_p: 0.8
+      top_k: 20

@@ -9,12 +9,17 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import re
+import socket
 import statistics
 import sys
+import tempfile
 import time
+import uuid
 import urllib.error
 import urllib.request
+from contextlib import ExitStack
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -24,6 +29,14 @@ from jsonschema import Draft202012Validator
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "configs" / "inference_config.json"
+
+
+def inference_config_path() -> Path:
+    configured = os.environ.get("EVALUATION_INFERENCE_CONFIG")
+    if not configured:
+        return CONFIG_PATH.resolve()
+    path = Path(configured).expanduser()
+    return (path if path.is_absolute() else WORKSPACE_ROOT / path).resolve()
 
 
 def _find_workspace_root(start: Path) -> Path:
@@ -89,25 +102,51 @@ def prepare_result_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def load_config() -> dict[str, Any]:
-    config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+def load_config(config_path: Path | None = None) -> dict[str, Any]:
+    selected_config_path = (config_path or inference_config_path()).resolve()
+    if not selected_config_path.is_file():
+        raise FileNotFoundError(f"推理配置文件不存在: {selected_config_path}")
+    config = json.loads(selected_config_path.read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        raise ValueError("推理配置 JSON 根节点必须为 object")
     environment_overrides = {
         "EVALUATION_BACKEND": "backend",
         "EVALUATION_BASE_URL": "base_url",
         "EVALUATION_API_MODEL": "api_model",
         "EVALUATION_API_KEY": "api_key",
+        "EVALUATION_EXPERIMENT_ID": "experiment_id",
     }
     for environment_name, config_name in environment_overrides.items():
         if environment_name in os.environ and (
             config_name == "api_key" or os.environ[environment_name]
         ):
             config[config_name] = os.environ[environment_name]
+    if os.environ.get("EVALUATION_ADAPTER_PATH"):
+        config.setdefault("adapter", {})["path"] = os.environ["EVALUATION_ADAPTER_PATH"]
+        config["adapter"]["enabled"] = True
+    if os.environ.get("EVALUATION_SERVER_MODELS_JSON"):
+        try:
+            observed_models = json.loads(os.environ["EVALUATION_SERVER_MODELS_JSON"])
+        except json.JSONDecodeError as exc:
+            raise ValueError("EVALUATION_SERVER_MODELS_JSON 必须是 JSON 字符串数组") from exc
+        if (
+            not isinstance(observed_models, list)
+            or any(not isinstance(value, str) or not value for value in observed_models)
+            or len(observed_models) != len(set(observed_models))
+        ):
+            raise ValueError("EVALUATION_SERVER_MODELS_JSON 必须是唯一的非空字符串数组")
+        config.setdefault("openai_compatible", {})["observed_server_model_ids"] = observed_models
     if os.environ.get("EVALUATION_MODEL_PATH"):
         config["model_path"] = os.environ["EVALUATION_MODEL_PATH"]
     if os.environ.get("EVALUATION_HARDWARE_LABEL"):
         config["hardware_label"] = os.environ["EVALUATION_HARDWARE_LABEL"]
     if os.environ.get("EVALUATION_TOKENIZER_PATH"):
         config.setdefault("tokenizer", {})["local_path"] = os.environ["EVALUATION_TOKENIZER_PATH"]
+    if "EVALUATION_ENABLE_NF4" in os.environ:
+        value = os.environ["EVALUATION_ENABLE_NF4"].strip().lower()
+        if value not in {"1", "true", "yes", "0", "false", "no"}:
+            raise ValueError("EVALUATION_ENABLE_NF4 必须为 true/false")
+        config.setdefault("quantization", {})["enabled"] = value in {"1", "true", "yes"}
     if os.environ.get("EVALUATION_MAX_PROMPT_TOKENS"):
         config.setdefault("context", {})["max_prompt_tokens"] = int(os.environ["EVALUATION_MAX_PROMPT_TOKENS"])
     if os.environ.get("EVALUATION_PROMPT_BUDGET_PROFILE"):
@@ -133,6 +172,19 @@ def load_config() -> dict[str, Any]:
             raise ValueError("request_timeout_seconds 必须为正数")
         if not isinstance(config.get("api_options", {}), dict):
             raise ValueError("api_options 必须为 JSON object")
+    validate_adapter_config(config.get("adapter"), config["backend"])
+    quantization = config.get("quantization", {})
+    if not isinstance(quantization, dict):
+        raise ValueError("quantization 必须为 JSON object")
+    if quantization.get("enabled", False):
+        if quantization.get("load_in_4bit", True) is not True:
+            raise ValueError("启用量化时 load_in_4bit 必须为 true")
+        if quantization.get("quant_type", "nf4") != "nf4":
+            raise ValueError("当前仅支持显式 NF4 候选")
+        if quantization.get("compute_dtype", "bfloat16") != "bfloat16":
+            raise ValueError("当前 NF4 候选要求 bfloat16 compute dtype")
+        if not isinstance(quantization.get("use_double_quant", True), bool):
+            raise ValueError("quantization.use_double_quant 必须为 boolean")
     if not isinstance(config["performance_rounds"], int) or config["performance_rounds"] <= 0:
         raise ValueError("performance_rounds 必须为正整数")
     context = config["context"]
@@ -146,6 +198,8 @@ def load_config() -> dict[str, Any]:
         not isinstance(serving_limit, int) or isinstance(serving_limit, bool) or serving_limit <= 0
     ):
         raise ValueError("context.serving_context_limit 必须为正整数或 null")
+    if not isinstance(config["generation"], dict):
+        raise ValueError("generation 必须为 JSON object")
     generation_cap = config["generation"].get("max_new_tokens")
     if not isinstance(generation_cap, int) or isinstance(generation_cap, bool) or generation_cap <= 0:
         raise ValueError("generation.max_new_tokens 必须为正整数")
@@ -154,6 +208,37 @@ def load_config() -> dict[str, Any]:
             f"部署预算不兼容：P({prompt_cap}) + G({generation_cap}) = "
             f"{prompt_cap + generation_cap} > K({serving_limit})"
         )
+    generation = config["generation"]
+    if "do_sample" in generation and not isinstance(generation["do_sample"], bool):
+        raise ValueError("generation.do_sample 必须为 boolean")
+    sampling = config.get("sampling", {})
+    if not isinstance(sampling, dict):
+        raise ValueError("sampling 必须为 JSON object")
+    if "base_seed" in sampling and (
+        not isinstance(sampling["base_seed"], int)
+        or isinstance(sampling["base_seed"], bool)
+        or sampling["base_seed"] < 0
+        or sampling["base_seed"] >= 2**64
+    ):
+        raise ValueError("sampling.base_seed 必须在 [0, 2**64) 范围内")
+    if (
+        config["backend"] == "transformers"
+        and generation.get("do_sample", False)
+        and "base_seed" not in sampling
+    ):
+        raise ValueError("Transformers Sampling 必须配置 sampling.base_seed")
+    if generation.get("do_sample", False):
+        temperature = generation.get("temperature", 1.0)
+        top_p = generation.get("top_p", 1.0)
+        top_k = generation.get("top_k")
+        if not isinstance(temperature, (int, float)) or isinstance(temperature, bool) or temperature <= 0:
+            raise ValueError("generation.temperature 必须为正数")
+        if not isinstance(top_p, (int, float)) or isinstance(top_p, bool) or not 0 < top_p <= 1:
+            raise ValueError("generation.top_p 必须位于 (0, 1]")
+        if top_k is not None and (
+            not isinstance(top_k, int) or isinstance(top_k, bool) or top_k <= 0
+        ):
+            raise ValueError("generation.top_k 必须为正整数")
     tokenizer_config = config["tokenizer"]
     for key in ("model_id", "revision", "expected_signature_sha256", "expected_template_sha256", "files_sha256"):
         if key not in tokenizer_config:
@@ -161,6 +246,601 @@ def load_config() -> dict[str, Any]:
     if tokenizer_config.get("local_files_only") is not True:
         raise ValueError("tokenizer.local_files_only 必须为 true，禁止运行时隐式下载")
     return config
+
+
+def build_quantization_config(
+    config: dict[str, Any],
+    torch_module: Any,
+    bitsandbytes_config_cls: Any | None = None,
+) -> Any | None:
+    """Return a real BitsAndBytesConfig only when opt-in NF4 is enabled."""
+    quantization = config.get("quantization", {})
+    if not quantization.get("enabled", False):
+        return None
+    if bitsandbytes_config_cls is None:
+        from transformers import BitsAndBytesConfig
+
+        bitsandbytes_config_cls = BitsAndBytesConfig
+    dtype = getattr(torch_module, "bfloat16", None)
+    if dtype is None:
+        raise ValueError("当前 PyTorch 缺少 bfloat16 dtype")
+    return bitsandbytes_config_cls(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=dtype,
+        bnb_4bit_use_double_quant=quantization.get("use_double_quant", True),
+    )
+
+
+def require_cuda_for_quantization(config: dict[str, Any], torch_module: Any) -> None:
+    if config.get("quantization", {}).get("enabled", False) and not torch_module.cuda.is_available():
+        raise RuntimeError("请求 NF4 真实模型运行但 CUDA 不可用；拒绝降级到 CPU")
+
+
+def _device_name(value: Any) -> str:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return f"cuda:{value}"
+    return str(value).replace("torch.", "")
+
+
+def inspect_quantization_runtime(
+    model: Any,
+    config: dict[str, Any],
+    torch_module: Any,
+    linear4bit_type: type | None = None,
+) -> dict[str, Any]:
+    """Inspect the loaded model instead of inferring NF4 from its config object."""
+    if not config.get("quantization", {}).get("enabled", False):
+        return {"applied": False, "real_nf4_verified": False, "linear4bit_module_count": 0}
+    if linear4bit_type is None:
+        try:
+            from bitsandbytes.nn import Linear4bit
+        except ImportError as exc:
+            raise RuntimeError("NF4 已请求，但 bitsandbytes.nn.Linear4bit 不可用") from exc
+        linear4bit_type = Linear4bit
+
+    modules = [module for module in model.modules() if isinstance(module, linear4bit_type)]
+    compute_dtypes = sorted({
+        _device_name(getattr(module, "compute_dtype", None))
+        for module in modules
+    })
+    quant_types = sorted({
+        str(getattr(getattr(module, "weight", None), "quant_type", None)).lower()
+        for module in modules
+    })
+    double_quant_observations = []
+    for module in modules:
+        weight = getattr(module, "weight", None)
+        quant_state = getattr(weight, "quant_state", None)
+        if quant_state is not None and hasattr(quant_state, "nested"):
+            double_quant_observations.append(getattr(quant_state, "nested") is not None)
+    observed_double_quant = (
+        double_quant_observations[0]
+        if double_quant_observations and all(value == double_quant_observations[0] for value in double_quant_observations)
+        else None
+    )
+    raw_device_map = getattr(model, "hf_device_map", None)
+    device_map = (
+        {str(name): _device_name(device) for name, device in raw_device_map.items()}
+        if isinstance(raw_device_map, dict) and raw_device_map else None
+    )
+    parameter_devices: set[str] = set()
+    if callable(getattr(model, "named_parameters", None)):
+        try:
+            for _name, parameter in model.named_parameters():
+                device = getattr(parameter, "device", None)
+                if device is not None:
+                    parameter_devices.add(_device_name(device))
+        except (RuntimeError, TypeError):
+            parameter_devices.clear()
+    hook_offload_modules: list[str] = []
+    if callable(getattr(model, "named_modules", None)):
+        for module_name, module in model.named_modules():
+            pending_hooks = [getattr(module, "_hf_hook", None)]
+            while pending_hooks:
+                hook = pending_hooks.pop()
+                if hook is None:
+                    continue
+                nested_hooks = getattr(hook, "hooks", None)
+                if isinstance(nested_hooks, (list, tuple)):
+                    pending_hooks.extend(nested_hooks)
+                if getattr(hook, "offload", False) is True:
+                    hook_offload_modules.append(module_name or "<root>")
+    observed_devices = set((device_map or {}).values()) | parameter_devices
+    offload_devices = {
+        device for device in observed_devices
+        if not device.lower().startswith("cuda")
+    }
+    if hook_offload_modules:
+        offload_devices.add("accelerate_hook")
+    placement_observed = device_map is not None or bool(parameter_devices)
+    placement_verified = bool(
+        placement_observed
+        and observed_devices
+        and not offload_devices
+        and bool(parameter_devices or device_map)
+    )
+    use_double_quant = config.get("quantization", {}).get("use_double_quant", True)
+    cuda_available = bool(torch_module.cuda.is_available())
+    real_nf4_verified = bool(
+        cuda_available
+        and modules
+        and compute_dtypes == ["bfloat16"]
+        and quant_types == ["nf4"]
+        and placement_verified
+    )
+    return {
+        "applied": bool(modules),
+        "load_in_4bit": True,
+        "quant_type": quant_types[0] if len(quant_types) == 1 else None,
+        "compute_dtype": compute_dtypes[0] if len(compute_dtypes) == 1 else None,
+        "observed_compute_dtypes": compute_dtypes,
+        "observed_quant_types": quant_types,
+        "use_double_quant": use_double_quant,
+        "double_quant_runtime_observed": observed_double_quant,
+        "linear4bit_module_count": len(modules),
+        "device_map_observed": placement_observed,
+        "device_map_source": "hf_device_map" if device_map is not None else (
+            "parameter_devices" if parameter_devices else None
+        ),
+        "hf_device_map": device_map,
+        "observed_parameter_devices": sorted(parameter_devices),
+        "observed_devices": sorted(observed_devices),
+        "offload_devices": sorted(offload_devices),
+        "accelerate_offload_hook_modules": sorted(set(hook_offload_modules)),
+        "placement_verified": placement_verified,
+        "cuda_available": cuda_available,
+        "real_nf4_verified": real_nf4_verified,
+    }
+
+
+def cuda_memory_facts(torch_module: Any) -> dict[str, Any]:
+    cuda = torch_module.cuda
+    if not cuda.is_available():
+        return {"cuda_available": False}
+    device_index = cuda.current_device()
+    properties = cuda.get_device_properties(device_index)
+    return {
+        "cuda_available": True,
+        "device_index": int(device_index),
+        "gpu_name": str(properties.name),
+        "total_memory_bytes": int(properties.total_memory),
+        "allocator_current_allocated_bytes": int(cuda.memory_allocated(device_index)),
+        "allocator_current_reserved_bytes": int(cuda.memory_reserved(device_index)),
+        "allocator_peak_allocated_bytes": int(cuda.max_memory_allocated(device_index)),
+        "allocator_peak_reserved_bytes": int(cuda.max_memory_reserved(device_index)),
+        "memory_measurement": "PyTorch CUDA allocator; excludes non-PyTorch and other-process allocations",
+    }
+
+
+def derive_sample_seed(base_seed: int, sample_id: str) -> int:
+    digest = hashlib.sha256(f"{base_seed}:{sample_id}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big", signed=False)
+
+
+def set_sampling_seed(torch_module: Any, seed: int) -> None:
+    torch_module.manual_seed(seed)
+    if torch_module.cuda.is_available():
+        torch_module.cuda.manual_seed_all(seed)
+
+
+def run_configuration_provenance() -> dict[str, Any]:
+    config_path = inference_config_path()
+    evaluation_value = os.environ.get("EVALUATION_EVALUATION_CONFIG")
+    evaluation_path = None
+    if evaluation_value:
+        candidate = Path(evaluation_value).expanduser()
+        evaluation_path = (candidate if candidate.is_absolute() else WORKSPACE_ROOT / candidate).resolve()
+    override_names = sorted(
+        name for name in os.environ
+        if name.startswith("EVALUATION_") and name not in {
+            "EVALUATION_API_KEY", "EVALUATION_INFERENCE_CONFIG", "EVALUATION_EVALUATION_CONFIG",
+            "EVALUATION_RAW_OUTPUT_PATH", "EVALUATION_RUN_ID",
+        }
+    )
+    return {
+        "inference_config_path": str(config_path),
+        "inference_config_sha256": sha256(config_path) if config_path.is_file() else None,
+        "evaluation_config_path": str(evaluation_path) if evaluation_path else None,
+        "evaluation_config_sha256": (
+            sha256(evaluation_path) if evaluation_path is not None and evaluation_path.is_file() else None
+        ),
+        "environment_override_names": override_names,
+    }
+
+
+def _weight_identity(model_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
+    configured_revision = config.get("model_revision")
+    if not isinstance(configured_revision, str) or not configured_revision.strip():
+        configured_revision = None
+    weight_index = model_dir / "model.safetensors.index.json"
+    fingerprint_status = "all_supported_weight_files_sha256"
+    if weight_index.is_file():
+        try:
+            index = json.loads(weight_index.read_text(encoding="utf-8"))
+            weight_map = index["weight_map"]
+            shard_names = sorted(set(weight_map.values()))
+            if not shard_names or not all(isinstance(name, str) for name in shard_names):
+                raise ValueError("weight_map must reference one or more string shard names")
+            candidates = []
+            for name in shard_names:
+                relative = Path(name)
+                if relative.is_absolute() or ".." in relative.parts:
+                    raise ValueError(f"weight shard path escapes model directory: {name}")
+                shard = model_dir / relative
+                if not shard.is_file() or shard.stat().st_size <= 0:
+                    raise ValueError(f"indexed weight shard is missing or empty: {name}")
+                candidates.append(shard)
+            fingerprint_status = "indexed_safetensors_shards_sha256"
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"无效的 model.safetensors.index.json: {exc}") from exc
+    else:
+        candidates = sorted(
+            path for path in model_dir.rglob("*")
+            if path.is_file() and (
+                path.name.endswith(".safetensors")
+                or path.name.endswith(".gguf")
+                or path.name == "pytorch_model.bin"
+                or path.name.startswith("pytorch_model-") and path.name.endswith(".bin")
+            )
+        )
+    if not candidates:
+        return {
+            "model_id": config.get("model_id"),
+            "configured_revision": configured_revision,
+            "local_path": str(model_dir),
+            "identity_status": "declared" if configured_revision else "unverified",
+            "fingerprint_status": (
+                "revision_configured_file_hashes_not_computed"
+                if configured_revision else "no_supported_weight_files_found"
+            ),
+            "revision_status": "unverified_revision" if configured_revision else "not_configured",
+            "observed_weight_hash": None,
+            "files": [],
+        }
+    files = [{"path": path.relative_to(model_dir).as_posix(), "size_bytes": path.stat().st_size, "sha256": sha256(path)} for path in candidates]
+    fingerprint = hashlib.sha256(
+        json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return {
+        "model_id": config.get("model_id"),
+        "configured_revision": configured_revision,
+        "local_path": str(model_dir),
+        "identity_status": "observed",
+        "fingerprint_status": fingerprint_status,
+        "revision_status": "unverified_revision" if configured_revision else "not_configured",
+        "observed_weight_hash": fingerprint,
+        "aggregate_sha256": fingerprint,
+        "files": files,
+    }
+
+
+def validate_adapter_config(adapter: Any, backend: str) -> dict[str, Any]:
+    """Validate an explicit optional PEFT Adapter declaration."""
+    if adapter is None:
+        return {"enabled": False}
+    if not isinstance(adapter, dict):
+        raise ValueError("adapter 必须为 JSON object")
+    enabled = adapter.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("adapter.enabled 必须为 boolean")
+    if not enabled:
+        return {"enabled": False}
+    if backend not in {"transformers", "openai_compatible"}:
+        raise ValueError(f"PEFT Adapter 不支持 backend={backend!r}；不会静默忽略 Adapter")
+    for name in ("path", "expected_base_weight_sha256", "expected_adapter_weight_sha256"):
+        value = adapter.get(name)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"adapter.enabled=true 时必须提供 adapter.{name}")
+    for name in ("expected_base_weight_sha256", "expected_adapter_weight_sha256"):
+        value = adapter[name].lower()
+        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+            raise ValueError(f"adapter.{name} 必须是 64 位 SHA-256")
+    expected_config_sha = adapter.get("expected_adapter_config_sha256")
+    if expected_config_sha is not None and (
+        not isinstance(expected_config_sha, str)
+        or len(expected_config_sha) != 64
+        or any(character not in "0123456789abcdef" for character in expected_config_sha.lower())
+    ):
+        raise ValueError("adapter.expected_adapter_config_sha256 必须是 64 位 SHA-256")
+    expected_rank = adapter.get("expected_rank")
+    if expected_rank is not None and (
+        not isinstance(expected_rank, int) or isinstance(expected_rank, bool) or expected_rank <= 0
+    ):
+        raise ValueError("adapter.expected_rank 必须为正整数")
+    expected_modules = adapter.get("expected_target_modules")
+    if expected_modules is not None and (
+        not isinstance(expected_modules, list)
+        or not expected_modules
+        or any(not isinstance(value, str) or not value for value in expected_modules)
+        or len(expected_modules) != len(set(expected_modules))
+    ):
+        raise ValueError("adapter.expected_target_modules 必须是无重复的非空字符串数组")
+    expected_server_model_id = adapter.get("expected_server_model_id")
+    if backend == "openai_compatible" and (
+        not isinstance(expected_server_model_id, str) or not expected_server_model_id.strip()
+    ):
+        raise ValueError(
+            "openai_compatible Adapter 必须提供冻结的 adapter.expected_server_model_id"
+        )
+    if expected_server_model_id is not None and (
+        not isinstance(expected_server_model_id, str) or not expected_server_model_id.strip()
+    ):
+        raise ValueError("adapter.expected_server_model_id 必须是非空字符串")
+    return {**adapter, "enabled": True}
+
+
+def validate_api_adapter_route(
+    adapter: dict[str, Any], api_model: str, server_model_ids: Any
+) -> dict[str, Any]:
+    """Require the API request to target the configured, advertised LoRA alias."""
+    expected_model_id = adapter.get("expected_server_model_id")
+    if expected_model_id and api_model != expected_model_id:
+        raise RuntimeError(
+            "Adapter 请求 model ID 与冻结的 LoRA 别名不匹配；"
+            f"expected={expected_model_id!r}, requested={api_model!r}"
+        )
+    if not isinstance(server_model_ids, list) or api_model not in server_model_ids:
+        raise RuntimeError(
+            "Adapter API 推理要求 start.sh 已核验 /v1/models 包含请求别名；"
+            f"requested={api_model!r}, observed={server_model_ids!r}"
+        )
+    return {
+        "status": "requested_model_id_present_in_server_model_list",
+        "requested_model_id": api_model,
+        "advertised_model_ids": server_model_ids,
+    }
+
+
+def adapter_weight_identity(adapter_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Fingerprint local Adapter weights separately from its config and Base."""
+    adapter_dir = adapter_dir.expanduser().resolve()
+    config_path = adapter_dir / "adapter_config.json"
+    if not adapter_dir.is_dir() or not config_path.is_file():
+        raise FileNotFoundError(f"Adapter directory/config missing: {adapter_dir}")
+    adapter_config = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(adapter_config, dict):
+        raise ValueError("adapter_config.json must contain a JSON object")
+    candidates = sorted(
+        path for path in adapter_dir.iterdir()
+        if path.is_file() and (
+            path.name == "adapter_model.safetensors"
+            or path.name == "adapter_model.bin"
+            or re.fullmatch(r"adapter_model-[0-9]+-of-[0-9]+\.safetensors", path.name)
+        )
+    )
+    if not candidates or any(path.stat().st_size <= 0 for path in candidates):
+        raise FileNotFoundError(f"Adapter weights missing or empty: {adapter_dir}")
+    files = [
+        {"path": path.name, "size_bytes": path.stat().st_size, "sha256": sha256(path)}
+        for path in candidates
+    ]
+    weight_sha = hashlib.sha256(
+        json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    config_sha = sha256(config_path)
+    config_summary = {
+        name: adapter_config.get(name)
+        for name in (
+            "peft_type", "task_type", "r", "lora_alpha", "lora_dropout",
+            "target_modules", "bias", "inference_mode", "base_model_name_or_path",
+        )
+        if name in adapter_config
+    }
+    return {
+        "identity_status": "observed",
+        "local_path": str(adapter_dir),
+        "weight_sha256": weight_sha,
+        "config_sha256": config_sha,
+        "config_summary": config_summary,
+        "files": files,
+    }, adapter_config
+
+
+def validate_adapter_base_reference(adapter_config: dict[str, Any], model_id: str, model_dir: Path) -> str:
+    """Reject an Adapter declaring a different Base model reference."""
+    declared = adapter_config.get("base_model_name_or_path")
+    if not isinstance(declared, str) or not declared.strip():
+        raise ValueError("adapter_config.json 缺少 base_model_name_or_path")
+    accepted = {model_id}
+    accepted_paths = {str(model_dir.resolve())}
+    if declared in accepted:
+        return declared
+    try:
+        declared_path = Path(declared).expanduser()
+        if not declared_path.is_absolute():
+            declared_path = WORKSPACE_ROOT / declared_path
+        if declared_path.resolve() in {model_dir.resolve(), model_dir.absolute()}:
+            return declared
+    except (OSError, RuntimeError):
+        pass
+    if declared not in accepted_paths:
+        raise ValueError(
+            f"Adapter Base reference does not match configured model {model_id}: {declared}"
+        )
+    return declared
+
+
+def load_peft_adapter(
+    base_model: Any,
+    adapter_path: str | Path,
+    *,
+    prepare_quantized_base: bool,
+    is_trainable: bool = False,
+    local_files_only: bool = True,
+) -> Any:
+    """Load an Adapter with the same non-quantized parameter dtypes as QLoRA training."""
+    try:
+        from peft import PeftModel, prepare_model_for_kbit_training
+    except ImportError as exc:
+        raise RuntimeError("Adapter loading requires PEFT") from exc
+
+    if prepare_quantized_base:
+        # QLoRA training calls this before injecting LoRA. In particular, PEFT
+        # upcasts non-Params4bit BF16 parameters to FP32. Apply the same transform
+        # before loading the saved Adapter so train/reload/inference agree.
+        base_model = prepare_model_for_kbit_training(
+            base_model,
+            use_gradient_checkpointing=False,
+        )
+    return PeftModel.from_pretrained(
+        base_model,
+        str(adapter_path),
+        is_trainable=is_trainable,
+        local_files_only=local_files_only,
+    )
+
+
+def resolve_raw_output_path(result_dir: Path, submission_path: Path) -> Path | None:
+    configured = os.environ.get("EVALUATION_RAW_OUTPUT_PATH")
+    if not configured:
+        return None
+    raw_path = Path(configured).expanduser().resolve()
+    outputs_root = (WORKSPACE_ROOT / "outputs").resolve()
+    if not raw_path.is_relative_to(outputs_root):
+        raise ValueError(f"原始生成文本只能写入 outputs/ 下: {raw_path}")
+    if raw_path in {submission_path.resolve(), (result_dir / "performance_report.json").resolve(), (result_dir / "run_progress.json").resolve()}:
+        raise ValueError("原始诊断路径不得覆盖官方提交或性能报告")
+    resume_enabled = os.environ.get("EVALUATION_RESUME", "").strip().lower() in {"1", "true", "yes"}
+    if raw_path.exists() and not resume_enabled:
+        raise FileExistsError(f"原始诊断输出已存在，拒绝覆盖: {raw_path}")
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    return raw_path
+
+
+def _write_jsonl_atomic(path: Path, rows: list[dict[str, Any]]) -> None:
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", newline="\n", dir=path.parent,
+            prefix=f".{path.name}.", suffix=".tmp", delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _read_jsonl_for_resume(path: Path) -> tuple[list[dict[str, Any]], list[bytes]]:
+    if not path.is_file():
+        return [], []
+    rows: list[dict[str, Any]] = []
+    complete_lines: list[bytes] = []
+    with path.open("rb") as handle:
+        for raw_line in handle:
+            if not raw_line.endswith(b"\n"):
+                break
+            try:
+                row = json.loads(raw_line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                break
+            if not isinstance(row, dict):
+                break
+            rows.append(row)
+            complete_lines.append(raw_line)
+    return rows, complete_lines
+
+
+def _prepare_resume_prefix(
+    *,
+    result_dir: Path,
+    submission_path: Path,
+    raw_path: Path | None,
+    samples: list[dict[str, Any]],
+    test_file: Path,
+    config: dict[str, Any],
+    run_id: str,
+    experiment_id: str,
+) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    if raw_path is None:
+        raise ValueError("可恢复评测必须启用 EVALUATION_RAW_OUTPUT_PATH")
+    report_path = result_dir / "performance_report.json"
+    if report_path.exists():
+        raise FileExistsError("性能报告已存在；完成的推理 Run 不可 resume 或覆盖")
+    progress_path = result_dir / "run_progress.json"
+    effective_config_sha = hashlib.sha256(
+        json.dumps(config, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    identity = {
+        "run_id": run_id,
+        "experiment_id": experiment_id,
+        "test_file_sha256": sha256(test_file),
+        "effective_config_sha256": effective_config_sha,
+        "sample_count": len(samples),
+        "sample_ids_sha256": hashlib.sha256(
+            "\n".join(sample["id"] for sample in samples).encode("utf-8")
+        ).hexdigest(),
+        "raw_output_path": str(raw_path.resolve()),
+    }
+    if progress_path.is_file():
+        progress = json.loads(progress_path.read_text(encoding="utf-8"))
+        if any(progress.get(key) != value for key, value in identity.items()):
+            raise ValueError("resume input, model config, Run ID, or output path differs from the interrupted Run")
+        completed = progress.get("completed_samples")
+        if not isinstance(completed, int) or isinstance(completed, bool) or not 0 <= completed <= len(samples):
+            raise ValueError("resume progress has an invalid completed_samples count")
+    else:
+        if any(path.exists() and path.stat().st_size for path in (submission_path, raw_path)):
+            raise FileExistsError("existing prediction files have no resumable progress record; refusing to overwrite")
+        completed = 0
+        progress = {**identity, "status": "running", "completed_samples": 0}
+
+    submissions, submission_lines = _read_jsonl_for_resume(submission_path)
+    raw_rows, raw_lines = _read_jsonl_for_resume(raw_path)
+    if len(submissions) < completed or len(raw_rows) < completed:
+        raise ValueError("resumable prediction files are shorter than the last committed progress record")
+    expected_ids = [sample["id"] for sample in samples[:completed]]
+    if [row.get("id") for row in submissions[:completed]] != expected_ids:
+        raise ValueError("resumable Submission IDs do not match the committed input prefix")
+    if [row.get("id") for row in raw_rows[:completed]] != expected_ids:
+        raise ValueError("resumable Raw IDs do not match the committed input prefix")
+    if len(submission_lines) < completed or len(raw_lines) < completed:
+        raise ValueError("resumable prediction JSONL has a corrupt committed prefix")
+    submission_bytes = b"".join(submission_lines[:completed])
+    raw_bytes = b"".join(raw_lines[:completed])
+    for key, data in (("submission_prefix_sha256", submission_bytes), ("raw_prefix_sha256", raw_bytes)):
+        if completed and progress.get(key) != hashlib.sha256(data).hexdigest():
+            raise ValueError("committed resume prediction prefix hash changed")
+        progress[key] = hashlib.sha256(data).hexdigest()
+    # A crash between the two file appends may leave one file ahead; trim both to
+    # the last atomic progress record before continuing.
+    submission_path.write_bytes(submission_bytes)
+    raw_path.write_bytes(raw_bytes)
+    progress.update(status="running", attempt=int(progress.get("attempt", 0)) + 1, updated_at_epoch_seconds=time.time())
+    _write_json_atomic(progress_path, progress)
+    return completed, submissions[:completed], raw_rows[:completed], progress
+
+
+def _bind_resume_runtime(progress_path: Path, progress: dict[str, Any], backend_report: dict[str, Any], tokenizer_facts: dict[str, Any]) -> dict[str, Any]:
+    runtime = {
+        "base_weight_sha256": backend_report.get("model_weight_identity", {}).get("observed_weight_hash"),
+        "adapter_identity": backend_report.get("adapter_identity", {"enabled": False}),
+        "tokenizer_signature_sha256": tokenizer_facts.get("signature_sha256"),
+        "template_sha256": tokenizer_facts.get("template_sha256"),
+        "runtime_environment": backend_report.get("runtime_environment"),
+    }
+    if progress.get("runtime_identity") is not None and progress["runtime_identity"] != runtime:
+        raise ValueError("actual Base/Adapter/Tokenizer identity changed since the interrupted inference")
+    progress["runtime_identity"] = runtime
+    _write_json_atomic(progress_path, progress)
+    return progress
 
 
 def model_path(config: dict[str, Any]) -> Path:
@@ -329,6 +1009,54 @@ class TemplateEquivalenceError(RuntimeError):
     pass
 
 
+def classify_generation_failure(exc: BaseException) -> str:
+    """Return a privacy-safe failure category for benchmark aggregation."""
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    messages: list[str] = []
+    saw_http_error = False
+    saw_connection_error = False
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        messages.append(str(current).lower())
+        if isinstance(current, (TimeoutError, socket.timeout)):
+            return "timeout"
+        if isinstance(current, urllib.error.HTTPError):
+            if current.code in {408, 504}:
+                return "timeout"
+            saw_http_error = True
+            continue
+        if isinstance(current, urllib.error.URLError):
+            reason = current.reason
+            if isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(reason).lower():
+                return "timeout"
+            saw_connection_error = True
+            continue
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+    message = " ".join(messages)
+    if any(marker in message for marker in ("out of memory", "cuda oom", "cuda error: out of memory")):
+        return "oom"
+    if "timed out" in message or "timeout" in message:
+        return "timeout"
+    if saw_http_error:
+        return "http_error"
+    if saw_connection_error:
+        return "connection_error"
+    if "http " in message:
+        return "http_error"
+    if "不是有效 json" in message or "invalid json" in message:
+        return "invalid_response"
+    if "无法连接" in message or "connection refused" in message:
+        return "connection_error"
+    return "request_error"
+
+
 def api_message_payload(messages: list[dict[str, str]], config: dict[str, Any]) -> list[dict[str, str]]:
     api_config = config.get("openai_compatible", {})
     allow_reasoning_field = bool(api_config.get("pass_reasoning_content_field", False))
@@ -446,16 +1174,18 @@ def request_chat_completion(
 
 def extract_object(text: str) -> dict[str, Any]:
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.S | re.I)
-    candidate = fenced.group(1) if fenced else text
+    candidate = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I).strip()
+    candidate = re.sub(r"\s*```$", "", candidate).strip()
     decoder = json.JSONDecoder()
-    for match in re.finditer(r"\{", candidate):
-        try:
-            value, _ = decoder.raw_decode(candidate[match.start():])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            return value
+    start = candidate.find("{")
+    if start < 0:
+        raise ValueError("模型输出中没有可解析的 JSON object")
+    try:
+        value, _ = decoder.raw_decode(candidate[start:])
+    except json.JSONDecodeError as exc:
+        raise ValueError("模型输出中的 JSON object 格式错误或不完整") from exc
+    if isinstance(value, dict):
+        return value
     raise ValueError("模型输出中没有可解析的 JSON object")
 
 
@@ -620,7 +1350,11 @@ def generate_transformers_sample(
         contains_eos = bool((new_ids == eos_id).any().item())
     details = {
         "generated_tokens": int(new_ids.shape[-1]),
-        "stop_reason": "eos" if contains_eos else "generation_limit_or_other",
+        "stop_reason": (
+            "eos" if contains_eos
+            else "max_new_tokens" if int(new_ids.shape[-1]) >= generation.get("max_new_tokens", 0)
+            else "unknown"
+        ),
     }
     return decoded, details
 
@@ -639,10 +1373,37 @@ def main() -> None:
     test_file = validate_test_file(args.test_file.resolve())
     result_dir = args.result_dir.resolve()
     prepare_result_dir(result_dir)
+    submission_path = result_dir / "submission.jsonl"
+    raw_output_path = resolve_raw_output_path(result_dir, submission_path)
     config = load_config()
+    configuration_provenance = run_configuration_provenance()
+    run_id = os.environ.get("EVALUATION_RUN_ID", "").strip() or uuid.uuid4().hex
+    experiment_id = os.environ.get("EVALUATION_EXPERIMENT_ID", config.get("experiment_id", "unspecified"))
+    resume_value = os.environ.get("EVALUATION_RESUME", "").strip().lower()
+    if resume_value not in {"", "0", "false", "no", "1", "true", "yes"}:
+        raise ValueError("EVALUATION_RESUME must be true or false")
+    resume_mode = resume_value in {"1", "true", "yes"}
     backend = config["backend"]
     samples = read_jsonl(test_file)
+    completed_samples = 0
+    previous_submission_rows: list[dict[str, Any]] = []
+    previous_raw_rows: list[dict[str, Any]] = []
+    resume_identity: dict[str, Any] | None = None
+    progress_path = result_dir / "run_progress.json"
+    if resume_mode:
+        completed_samples, previous_submission_rows, previous_raw_rows, resume_identity = _prepare_resume_prefix(
+            result_dir=result_dir,
+            submission_path=submission_path,
+            raw_path=raw_output_path,
+            samples=samples,
+            test_file=test_file,
+            config=config,
+            run_id=run_id,
+            experiment_id=experiment_id,
+        )
     prompt_text, submission_schema, enums, prompt_facts = load_runtime_protocol(config)
+    for row in previous_submission_rows:
+        validate_submission_prediction(row, submission_schema)
     context = config["context"]
     prompt_cap = context["max_prompt_tokens"]
     generation = dict(config["generation"])
@@ -668,6 +1429,7 @@ def main() -> None:
         except ImportError as exc:
             raise RuntimeError("请先安装 participant/requirements.txt") from exc
 
+        require_cuda_for_quantization(config, torch)
         trust_remote_code = bool(config.get("trust_remote_code", False))
         model_config = AutoConfig.from_pretrained(
             local_model,
@@ -680,20 +1442,89 @@ def main() -> None:
             else AutoModelForCausalLM
         )
         tokenizer, tokenizer_facts = load_runtime_tokenizer(config, local_model)
-        model = model_loader.from_pretrained(
-            local_model,
-            trust_remote_code=trust_remote_code,
-            local_files_only=True,
-            device_map=config.get("device_map", "auto"),
-            torch_dtype=config.get("torch_dtype", "auto"),
-        )
+        weight_identity = _weight_identity(local_model, config)
+        if config.get("expected_weight_sha256") is not None and weight_identity.get("observed_weight_hash") != config["expected_weight_sha256"]:
+            raise RuntimeError("observed Base weights differ from the frozen evaluation identity")
+        adapter_config = validate_adapter_config(config.get("adapter"), backend)
+        adapter_identity = {"enabled": False, "status": "not_enabled"}
+        if adapter_config["enabled"]:
+            if weight_identity.get("identity_status") != "observed" or (
+                weight_identity.get("observed_weight_hash") != adapter_config["expected_base_weight_sha256"]
+            ):
+                raise RuntimeError(
+                    "Adapter expected Base SHA-256 does not match the observed local Base weights"
+                )
+            adapter_path_value = Path(adapter_config["path"]).expanduser()
+            adapter_path = (
+                adapter_path_value
+                if adapter_path_value.is_absolute()
+                else WORKSPACE_ROOT / adapter_path_value
+            ).resolve()
+            adapter_identity, adapter_metadata = adapter_weight_identity(adapter_path)
+            if adapter_identity["weight_sha256"] != adapter_config["expected_adapter_weight_sha256"]:
+                raise RuntimeError("Adapter weight SHA-256 differs from the explicitly configured identity")
+            expected_adapter_config_sha = adapter_config.get("expected_adapter_config_sha256")
+            if expected_adapter_config_sha and adapter_identity["config_sha256"] != expected_adapter_config_sha:
+                raise RuntimeError("Adapter config SHA-256 differs from the explicitly configured identity")
+            validate_adapter_base_reference(adapter_metadata, config.get("model_id", ""), local_model)
+            adapter_identity.update({
+                "enabled": True,
+                "status": "verified_local_adapter",
+                "base_model_id": config.get("model_id"),
+                "base_weight_sha256": weight_identity["observed_weight_hash"],
+            })
+        model_load_kwargs = {
+            "trust_remote_code": trust_remote_code,
+            "local_files_only": True,
+            "device_map": config.get("device_map", "auto"),
+            "torch_dtype": config.get("torch_dtype", "auto"),
+        }
+        quantization_config = build_quantization_config(config, torch)
+        if quantization_config is not None:
+            model_load_kwargs["quantization_config"] = quantization_config
+        model_load_started = time.perf_counter()
+        model = model_loader.from_pretrained(local_model, **model_load_kwargs)
+        if adapter_config["enabled"]:
+            model = load_peft_adapter(
+                model,
+                adapter_path,
+                prepare_quantized_base=quantization_config is not None,
+                is_trainable=False,
+                local_files_only=True,
+            )
         model.eval()
+        model_load_seconds = time.perf_counter() - model_load_started
+        quantization_facts = inspect_quantization_runtime(model, config, torch)
+        if quantization_config is not None and not quantization_facts["real_nf4_verified"]:
+            raise RuntimeError(
+                "模型加载后未通过真实 NF4/BF16/CUDA/无 offload 验收: "
+                + json.dumps(quantization_facts, ensure_ascii=False, sort_keys=True)
+            )
+        memory_after_load = cuda_memory_facts(torch)
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
         backend_report = {
             "version": "transformers_p0_f2_t1_v3",
-            "timing_scope": "tokenize+generate+decode+parse+validate; model loading excluded",
+            "timing_scope": (
+                "per-sample tokenize+generate+decode+parse+schema validation; CUDA synchronized "
+                "before start and after validation; model/tokenizer loading, weight fingerprinting, "
+                "initialization and warmup excluded"
+            ),
             "model_path_name": local_model.name,
             "model_type": model_config.model_type,
             "model_loader": model_loader.__name__,
+            "model_weight_identity": weight_identity,
+            "runtime_environment": {
+                "python": sys.version.split()[0], "platform": platform.platform(),
+                "torch": getattr(torch, "__version__", None),
+                "cuda_version": getattr(getattr(torch, "version", None), "cuda", None),
+                "cuda_devices": [torch.cuda.get_device_name(index) for index in range(torch.cuda.device_count())] if torch.cuda.is_available() else [],
+            },
+            "adapter_identity": adapter_identity,
+            "quantization": quantization_facts,
+            "model_load_seconds": round(model_load_seconds, 6),
+            "cuda_memory_after_model_load": memory_after_load,
+            "cuda_peak_memory_scope": "reset after model load; peak covers inference samples only",
             "template_equivalence": "local_input_ids_are_the_shared_encode_inference_prompt_result",
         }
     else:
@@ -704,27 +1535,162 @@ def main() -> None:
             if not local_tokenizer_source.is_absolute():
                 local_tokenizer_source = ROOT / local_tokenizer_source
         tokenizer, tokenizer_facts = load_runtime_tokenizer(config, local_tokenizer_source)
+        adapter_config = validate_adapter_config(config.get("adapter"), backend)
+        adapter_identity: dict[str, Any] = {"enabled": False, "status": "not_enabled"}
+        model_weight_identity: dict[str, Any] = {
+            "model_id": config.get("model_id"),
+            "configured_revision": config.get("model_revision"),
+            "identity_status": "unverified",
+            "fingerprint_status": "remote_or_local_server_weight_identity_not_observable",
+            "revision_status": "unverified_revision" if config.get("model_revision") else "not_configured",
+            "observed_weight_hash": None,
+            "files": [],
+        }
+        openai_config = config.get("openai_compatible", {})
+        server_model_ids = openai_config.get("observed_server_model_ids")
+        gpu_runtime_facts = None
+        if os.environ.get("EVALUATION_GPU_FACTS_JSON"):
+            try:
+                gpu_runtime_facts = json.loads(os.environ["EVALUATION_GPU_FACTS_JSON"])
+            except json.JSONDecodeError as exc:
+                raise ValueError("EVALUATION_GPU_FACTS_JSON 必须为 JSON object") from exc
+            if not isinstance(gpu_runtime_facts, dict):
+                raise ValueError("EVALUATION_GPU_FACTS_JSON 必须为 JSON object")
+        launch_facts = None
+        if os.environ.get("EVALUATION_VLLM_LAUNCH_FACTS_JSON"):
+            try:
+                launch_facts = json.loads(os.environ["EVALUATION_VLLM_LAUNCH_FACTS_JSON"])
+            except json.JSONDecodeError as exc:
+                raise ValueError("EVALUATION_VLLM_LAUNCH_FACTS_JSON 必须为 JSON object") from exc
+            if not isinstance(launch_facts, dict):
+                raise ValueError("EVALUATION_VLLM_LAUNCH_FACTS_JSON 必须为 JSON object")
+        if adapter_config["enabled"]:
+            route_observation = validate_api_adapter_route(
+                adapter_config, config["api_model"], server_model_ids
+            )
+            local_base = _weight_identity(model_path(config), config)
+            expected_base_sha = adapter_config["expected_base_weight_sha256"]
+            if (
+                local_base.get("identity_status") != "observed"
+                or local_base.get("observed_weight_hash") != expected_base_sha
+            ):
+                raise RuntimeError("Adapter API 配置的本地 Base 权重与冻结 SHA-256 不匹配")
+            expected_model_sha = config.get("expected_weight_sha256")
+            if expected_model_sha is not None and local_base.get("observed_weight_hash") != expected_model_sha:
+                raise RuntimeError("Adapter API 本地 Base 权重与 expected_weight_sha256 不匹配")
+            adapter_path_value = Path(adapter_config["path"]).expanduser()
+            adapter_path = (
+                adapter_path_value
+                if adapter_path_value.is_absolute()
+                else WORKSPACE_ROOT / adapter_path_value
+            ).resolve()
+            adapter_identity, adapter_metadata = adapter_weight_identity(adapter_path)
+            if adapter_identity["weight_sha256"] != adapter_config["expected_adapter_weight_sha256"]:
+                raise RuntimeError("Adapter API 本地权重 SHA-256 与冻结 Full B 不匹配")
+            expected_adapter_config_sha = adapter_config.get("expected_adapter_config_sha256")
+            if expected_adapter_config_sha and adapter_identity["config_sha256"] != expected_adapter_config_sha:
+                raise RuntimeError("Adapter API 本地 config SHA-256 与冻结 Full B 不匹配")
+            validate_adapter_base_reference(adapter_metadata, config.get("model_id", ""), model_path(config))
+            actual_rank = adapter_metadata.get("r")
+            expected_rank = adapter_config.get("expected_rank")
+            if expected_rank is not None and actual_rank != expected_rank:
+                raise RuntimeError("Adapter API 实际 LoRA rank 与配置的 expected_rank 不一致")
+            expected_modules = adapter_config.get("expected_target_modules")
+            actual_modules = adapter_metadata.get("target_modules")
+            if expected_modules is not None and (
+                not isinstance(actual_modules, (list, set))
+                or set(actual_modules) != set(expected_modules)
+            ):
+                raise RuntimeError("Adapter API 实际 target_modules 与冻结 Full B 不一致")
+            adapter_identity.update({
+                "enabled": True,
+                "status": "local_artifacts_verified_server_weights_unverified",
+                "base_weight_sha256": local_base["observed_weight_hash"],
+                "configured_adapter": {
+                    "path": str(adapter_path),
+                    "requested_model_id": config["api_model"],
+                },
+                "locally_verified_adapter_file": {
+                    "status": "verified",
+                    "weight_sha256": adapter_identity["weight_sha256"],
+                    "config_sha256": adapter_identity["config_sha256"],
+                    "rank": actual_rank,
+                    "target_modules": sorted(actual_modules) if isinstance(actual_modules, (list, set)) else actual_modules,
+                },
+                "server_route_observed": route_observation,
+                "server_weight_identity": "unverified",
+            })
+            # These files identify the intended local launch inputs only. They do
+            # not prove which Base/Adapter weights the remote server instantiated.
+            model_weight_identity = {
+                "model_id": config.get("model_id"),
+                "configured_revision": config.get("model_revision"),
+                "local_path": local_base["local_path"],
+                "identity_status": "server_unverified",
+                "fingerprint_status": "local_reference_files_verified_server_weights_unverified",
+                "revision_status": local_base.get("revision_status"),
+                "local_reference_weight_sha256": local_base["observed_weight_hash"],
+                "observed_weight_hash": None,
+                "files": local_base["files"],
+                "server_weight_identity": "unverified",
+            }
         backend_report = {
             "version": "openai_compatible_p0_f2_t1_v3",
-            "timing_scope": "HTTP request+server inference+response decode+parse+validate; server startup excluded",
+            "timing_scope": "client prompt tokenization+HTTP request/server inference+response decode+parse+schema validation; server startup excluded",
             "api_model": config["api_model"],
             "base_url": config["base_url"],
+            "api_server_runtime": {
+                "vllm_version": os.environ.get("EVALUATION_VLLM_VERSION"),
+                "advertised_model_ids": server_model_ids,
+                "gpu_runtime": gpu_runtime_facts,
+                "launch_configuration": launch_facts,
+                "server_weight_identity": "unverified",
+            },
+            "model_weight_identity": model_weight_identity,
+            "adapter_identity": adapter_identity,
+            "quantization": {"applied": False, "method": "configured by external server; not observed"},
             "template_equivalence": "BLOCKED_NOT_RUN_exact_server_token_ids_not_observable",
         }
 
-    submission_path = result_dir / "submission.jsonl"
-    latencies: list[float] = []
-    prediction_count = 0
-    parse_failure_ids: list[str] = []
-    invalid_label_ids: list[str] = []
-    prompt_overflow_ids: list[str] = []
-    template_equivalence_failure_ids: list[str] = []
-    server_prompt_token_mismatch_ids: list[str] = []
-    sample_diagnostics: list[dict[str, Any]] = []
-    statuses: list[str] = []
-
-    with submission_path.open("w", encoding="utf-8", newline="\n") as submission_handle:
-        for index, sample in enumerate(samples, 1):
+    if resume_mode and resume_identity is not None:
+        resume_identity = _bind_resume_runtime(progress_path, resume_identity, backend_report, tokenizer_facts)
+    latencies: list[float] = [
+        float(row["latency_ms"])
+        for index, row in enumerate(previous_raw_rows, 1)
+        if index <= int(config["performance_rounds"])
+        and isinstance(row.get("latency_ms"), (int, float))
+        and not isinstance(row.get("latency_ms"), bool)
+    ]
+    prediction_count = completed_samples
+    parse_failure_ids = [row["id"] for row in previous_raw_rows if row.get("status") == "parse_failure"]
+    invalid_label_ids = [row["id"] for row in previous_raw_rows if row.get("status") == "invalid_label"]
+    prompt_overflow_ids = [row["id"] for row in previous_raw_rows if row.get("status") == "prompt_floor_exceeds_cap"]
+    template_equivalence_failure_ids = [row["id"] for row in previous_raw_rows if row.get("status") == "template_equivalence_failure"]
+    server_prompt_token_mismatch_ids = [row["id"] for row in previous_raw_rows if row.get("status") == "server_prompt_token_mismatch"]
+    sample_diagnostics: list[dict[str, Any]] = [{
+        "id": row["id"],
+        "status": row.get("status"),
+        "client_prompt_tokens": row.get("prompt_tokens"),
+        "prompt_cap": prompt_cap,
+        "original_history_messages": len(samples[index]["history"]),
+        "retained_history_messages": len(samples[index]["history"]) - int(row.get("removed_history_messages", 0)),
+        "removed_history_messages": row.get("removed_history_messages", 0),
+        "generated_tokens": row.get("generated_tokens"),
+        "stop_reason": row.get("stop_reason"),
+        "sampling_seed": None,
+        "is_first_sample_cold_start": index == 0 and backend == "transformers",
+        "server_prompt_tokens": None,
+        "server_completion_tokens": None,
+    } for index, row in enumerate(previous_raw_rows)]
+    statuses: list[str] = [str(row.get("status", "unknown")) for row in previous_raw_rows]
+    raw_predictions: list[dict[str, Any]] = list(previous_raw_rows)
+    submission_mode = "a" if resume_mode else "w"
+    submission_digest = hashlib.sha256(submission_path.read_bytes() if resume_mode else b"")
+    raw_digest = hashlib.sha256(raw_output_path.read_bytes() if resume_mode and raw_output_path else b"")
+    with ExitStack() as streams:
+        submission_handle = streams.enter_context(submission_path.open(submission_mode, encoding="utf-8", newline="\n"))
+        raw_handle_context = streams.enter_context(raw_output_path.open("a", encoding="utf-8", newline="\n")) if resume_mode and raw_output_path else None
+        for index, sample in enumerate(samples[completed_samples:], completed_samples + 1):
             if backend == "transformers":
                 synchronize(torch)
             started = time.perf_counter()
@@ -738,6 +1704,11 @@ def main() -> None:
             }
             generated_tokens = 0
             stop_reason = "not_generated"
+            raw_text: str | None = None
+            error_type: str | None = None
+            failure_category: str | None = None
+            sampling_seed: int | None = None
+            prediction: dict[str, Any]
 
             if selection["floor_exceeds_cap"]:
                 prediction = empty_prediction(sample["id"], enums)
@@ -745,32 +1716,55 @@ def main() -> None:
                 prompt_overflow_ids.append(sample["id"])
                 stop_reason = "not_generated_prompt_floor_exceeds_cap"
             else:
+                decoded: str | None = None
+                can_parse_output = False
                 try:
                     if backend == "transformers":
+                        if generation.get("do_sample", False):
+                            sampling_seed = derive_sample_seed(
+                                config["sampling"]["base_seed"], sample["id"]
+                            )
+                            set_sampling_seed(torch, sampling_seed)
                         decoded, generation_details = generate_transformers_sample(
                             model, torch, tokenizer, selection["prompt_ids"], generation
                         )
                         generated_tokens = generation_details["generated_tokens"]
                         stop_reason = generation_details["stop_reason"]
+                        can_parse_output = True
                     else:
                         decoded, server_details = _request_chat_completion_details(config, messages, generation)
-                        generated_tokens = server_details.get("server_completion_tokens") or 0
-                        stop_reason = server_details.get("finish_reason") or "server_finish_reason_unreported"
+                        generated_tokens = server_details.get("server_completion_tokens")
+                        finish_reason = server_details.get("finish_reason")
+                        stop_reason = (
+                            f"server_finish_reason:{finish_reason}"
+                            if isinstance(finish_reason, str) and finish_reason
+                            else "unknown_server_finish_reason"
+                        )
                         server_prompt_tokens = server_details.get("server_prompt_tokens")
                         if isinstance(server_prompt_tokens, int) and server_prompt_tokens != prompt_tokens:
                             prediction = empty_prediction(sample["id"], enums)
                             status = "server_prompt_token_mismatch"
                             server_prompt_token_mismatch_ids.append(sample["id"])
-                            decoded = None
                         else:
-                            decoded = decoded
+                            can_parse_output = True
                 except TemplateEquivalenceError:
+                    if resume_mode:
+                        raise
                     prediction = empty_prediction(sample["id"], enums)
                     status = "template_equivalence_failure"
                     template_equivalence_failure_ids.append(sample["id"])
-                    decoded = None
+                    stop_reason = "not_generated_template_equivalence_failure"
+                except Exception as exc:
+                    if resume_mode:
+                        raise
+                    prediction = empty_prediction(sample["id"], enums)
+                    status = "generation_failure"
+                    error_type = type(exc).__name__
+                    failure_category = classify_generation_failure(exc)
+                    stop_reason = "not_generated_generation_failure"
+                raw_text = decoded
 
-                if decoded is not None:
+                if can_parse_output and decoded is not None:
                     prediction, parse_failed, invalid_label = parse_prediction(sample["id"], decoded, enums)
                     if parse_failed:
                         parse_failure_ids.append(sample["id"])
@@ -779,9 +1773,9 @@ def main() -> None:
                     status = "parse_failure" if parse_failed else ("invalid_label" if invalid_label else "success")
 
             validate_submission_prediction(prediction, submission_schema)
-            elapsed_ms = (time.perf_counter() - started) * 1000
             if backend == "transformers":
                 synchronize(torch)
+            elapsed_ms = (time.perf_counter() - started) * 1000
             if index <= config["performance_rounds"]:
                 latencies.append(elapsed_ms)
             prediction_count += 1
@@ -796,19 +1790,67 @@ def main() -> None:
                 "removed_history_messages": removed_messages,
                 "generated_tokens": generated_tokens,
                 "stop_reason": stop_reason,
+                "failure_category": failure_category,
+                "sampling_seed": sampling_seed,
+                "is_first_sample_cold_start": index == completed_samples + 1 and backend == "transformers",
                 "server_prompt_tokens": server_details.get("server_prompt_tokens"),
                 "server_completion_tokens": server_details.get("server_completion_tokens"),
             })
-            submission_handle.write(json.dumps(prediction, ensure_ascii=False, separators=(",", ":")) + "\n")
+            raw_record = None
+            if raw_output_path is not None:
+                raw_record = {
+                    "id": sample["id"],
+                    "raw_text": raw_text,
+                    "status": status,
+                    "prompt_tokens": prompt_tokens,
+                    "generated_tokens": generated_tokens,
+                    "stop_reason": stop_reason,
+                    "latency_ms": round(elapsed_ms, 6),
+                    "removed_history_messages": removed_messages,
+                    "backend": backend,
+                    "error_type": error_type,
+                    "failure_category": failure_category,
+                }
+                raw_predictions.append(raw_record)
+            submission_line = json.dumps(prediction, ensure_ascii=False, separators=(",", ":")) + "\n"
+            submission_handle.write(submission_line)
+            if resume_mode:
+                submission_handle.flush()
+                os.fsync(submission_handle.fileno())
+                if raw_handle_context is None or raw_record is None or resume_identity is None:
+                    raise RuntimeError("resumable inference lost its Raw output stream or identity")
+                raw_line = json.dumps(raw_record, ensure_ascii=False, separators=(",", ":")) + "\n"
+                raw_handle_context.write(raw_line)
+                raw_handle_context.flush()
+                os.fsync(raw_handle_context.fileno())
+                submission_digest.update(submission_line.encode("utf-8"))
+                raw_digest.update(raw_line.encode("utf-8"))
+                _write_json_atomic(progress_path, {
+                    **resume_identity,
+                    "status": "running",
+                    "completed_samples": index,
+                    "last_completed_id": sample["id"],
+                    "submission_prefix_sha256": submission_digest.hexdigest(),
+                    "raw_prefix_sha256": raw_digest.hexdigest(),
+                    "updated_at_epoch_seconds": time.time(),
+                })
             print(f"[{index}/{len(samples)}] {sample['id']}: {elapsed_ms:.3f} ms ({status})", flush=True)
 
     if prediction_count != len(samples):
         raise RuntimeError(f"提交行数不守恒: input={len(samples)}, output={prediction_count}")
 
+    if raw_output_path is not None and not resume_mode:
+        _write_jsonl_atomic(raw_output_path, raw_predictions)
+
     report = {
         **backend_report,
+        "adapter_identity": backend_report.get("adapter_identity", {"enabled": False, "status": "not_enabled"}),
         "backend": backend,
-        "complete": len(latencies) == config["performance_rounds"],
+        "run_id": run_id,
+        "experiment_id": experiment_id,
+        "configuration": configuration_provenance,
+        "complete": len(latencies) == config["performance_rounds"] and completed_samples == 0,
+        "resumption": {"enabled": resume_mode, "reused_samples": completed_samples, "attempt": (resume_identity or {}).get("attempt", 1), "performance_is_single_uninterrupted_run": completed_samples == 0},
         "required_rounds": config["performance_rounds"],
         "rounds": len(latencies),
         "average_latency_ms": round(statistics.fmean(latencies), 6),
@@ -820,6 +1862,22 @@ def main() -> None:
         "hardware_label": config["hardware_label"],
         "test_file_sha256": sha256(test_file),
         "submission_sha256": sha256(submission_path),
+        "raw_predictions_sha256": sha256(raw_output_path) if raw_output_path is not None else None,
+        "raw_predictions_path": str(raw_output_path) if raw_output_path is not None else None,
+        "model_id": config.get("model_id"),
+        "model_revision": config.get("model_revision"),
+        "generation_config": generation,
+        "sampling": (
+            {
+                "enabled": bool(generation.get("do_sample", False)),
+                "base_seed": config.get("sampling", {}).get("base_seed"),
+                "seed_derivation": "int(first_8_bytes_sha256(f'{base_seed}:{id}'))",
+                "seeded_backend": "transformers_per_sample_cpu_and_all_cuda_devices",
+            }
+            if backend == "transformers" and generation.get("do_sample", False)
+            else {"enabled": False}
+        ),
+        "raw_predictions_rows": len(raw_predictions) if raw_output_path is not None else None,
         "samples": prediction_count,
         "submission_rows": prediction_count,
         "submission_schema_validated": True,
@@ -869,9 +1927,24 @@ def main() -> None:
             if backend == "transformers" else "BLOCKED_NOT_RUN_no_pinned_vllm_token_id_diagnostic"
         ),
         "api_reasoning_content_field_enabled": bool(config.get("openai_compatible", {}).get("pass_reasoning_content_field", False)),
+        "sample_timing": {
+            "model_load_seconds": backend_report.get("model_load_seconds"),
+            "first_sample_is_cold_start": backend == "transformers",
+            "separate_warmup_run": False,
+            "cuda_memory_after_inference": cuda_memory_facts(torch) if backend == "transformers" else None,
+        },
         "sample_diagnostics": sample_diagnostics,
     }
-    (result_dir / "performance_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _write_json_atomic(result_dir / "performance_report.json", report)
+    if resume_mode and resume_identity is not None:
+        _write_json_atomic(progress_path, {
+            **resume_identity,
+            "status": "complete",
+            "completed_samples": len(samples),
+            "submission_prefix_sha256": submission_digest.hexdigest(),
+            "raw_prefix_sha256": raw_digest.hexdigest(),
+            "updated_at_epoch_seconds": time.time(),
+        })
     print(f"PASS: {submission_path}")
     print(f"PASS: {result_dir / 'performance_report.json'}")
 

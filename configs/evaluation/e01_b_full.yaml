@@ -1,0 +1,61 @@
+experiment_id: E01-B
+data:
+  split: D0.3-dev
+  dev_path: data/processed/v1/dev.jsonl
+  train_path: data/processed/v1/train.jsonl
+  d03_manifest_path: outputs/data_pipeline/v1/manifest.json
+  expected_dev_count: 1833
+  output_dir: outputs/evaluation/e00_1/dev_adapter_v2
+smoke:
+  seed: 42
+  count: 20
+protocol:
+  prompt_version: P0
+  prompt_path: configs/prompts/p0.txt
+  prompt_sha256: d427e4996d0075a3adfe03ae25881d093687a6565f5b037f605accecc84c70b2
+  format_version: F2
+  truncation_version: T1
+  tokenizer_id: Qwen/Qwen3-1.7B
+  tokenizer_revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  tokenizer_signature_sha256: 1662c9e99c6185441026a168b2dd6b09af103dc6dc3563b72f598411f14d1913
+  chat_template_sha256: a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8
+  max_prompt_tokens: 1280
+model:
+  model_id: Qwen/Qwen3-1.7B
+  weight_revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  local_weight_path: participant/model
+quantization:
+  planned:
+    load_in_4bit: true
+    quant_type: nf4
+    compute_dtype: bfloat16
+    use_double_quant: true
+  observed_runtime: null
+generation:
+  max_new_tokens: 1200
+  do_sample: false
+scoring:
+  bleu:
+    implementation: sacrebleu
+    version: 2.5.1
+    tokenize: char
+    max_ngram_order: 4
+    smooth_method: exp
+    effective_order: true
+  rouge_l:
+    implementation: local_unicode_character_lcs
+    version: 1
+    whitespace: remove_all_unicode_whitespace
+  bert_score:
+    enabled: false
+    local_model_path: null
+    model_id: null
+    revision: null
+    language: zh
+    implementation: bert-score
+    implementation_version: null
+execution:
+  scope: full-dev
+  output_root: outputs/evaluation/e01_b/full
+  expected_base_weight_sha256: 005d20550c04f4e246e5b434448786b44a0196b47d758d0acc77aba279e5bbc5
+  resource_gate: explicit_allow_full_dev_flag

@@ -1,0 +1,4 @@
+你负责识别最后一条用户消息表达的主要情绪。结合已有对话历史，在以下情绪标签中恰好选择一个：
+joy, gratitude, relaxed, care, pride, neutral, surprise, mixed, sadness, loneliness, anxiety, anger, fear, disgust, shame, helplessness
+
+只输出一个英文标签本身，不要 JSON、引号、代码围栏、解释或任何其他内容。

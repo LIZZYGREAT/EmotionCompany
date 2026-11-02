@@ -18,7 +18,7 @@ Transformers 模式会根据本地 `config.json` 自动选择纯文本 CausalLM 
 
 两种后端共用仓库 P0、原生多轮 `system/user/assistant` 消息和 T1 最近连续完整历史选择。测试 `id` 只用于输出回填，不会进入模型 Prompt。默认 `P=1280` 是 `local_smoke_candidate_P1280` 临时候选，`G=1200` 是参考生成上限，不代表最终训练或生成配置。`K` 默认未配置，报告会将服务上下文兼容性记为 `not_verified`；配置 K 后，runner 和启动脚本都会检查 `P+G≤K`，vLLM 启动时同时传 `--max-model-len K`。
 
-可通过 `EVALUATION_MAX_PROMPT_TOKENS`、`EVALUATION_PROMPT_BUDGET_PROFILE` 和 `EVALUATION_SERVING_CONTEXT_LIMIT` 覆盖 P、档位名称及 K。配置来源会写入 `performance_report.json`。真实服务端 Token ID 等价性仍需使用最终 vLLM 版本和模型实测，Mock 请求与 `prompt_tokens` 数量一致不能代替该验收。
+可通过 `EVALUATION_MAX_PROMPT_TOKENS`、`EVALUATION_PROMPT_BUDGET_PROFILE` 和 `EVALUATION_SERVING_CONTEXT_LIMIT` 覆盖 P、档位名称及 K。通用默认值的 `K` 仍未配置；指定 E02.2 profile 曾在 vLLM `0.11.1`、`K=2560` 下运行，E02.2-A 的 12/12 Prompt Token ID 精确匹配、E02.2-B 的 100 条基准和 E02.2-C 的本地离线 Docker 10 条 Smoke 分别记录在[E02.2 报告](../docs/experiments/E0.2.2_推理协议与性能验收报告.md)。这些固定 Run 不会替代其他目标环境验收；Docker Smoke 的服务端权重身份仍为 `unverified`，镜像 tar/独立导入及官方提交未执行。Mock 请求与 `prompt_tokens` 数量一致不能代替真实 Token ID 核验。
 
 ## Transformers 本地目录模式
 
@@ -84,10 +84,14 @@ EVALUATION_API_MODEL=local-model \
 python3 run_inference.py TEST_FILE RESULT_DIR
 ```
 
-可用覆盖变量为 `EVALUATION_BACKEND`、`EVALUATION_BASE_URL`、
+本地实验可选覆盖变量为 `EVALUATION_INFERENCE_CONFIG`（指定独立推理配置快照）、
+`EVALUATION_EVALUATION_CONFIG`（记录评测配置来源）、`EVALUATION_RUN_ID`、
+`EVALUATION_EXPERIMENT_ID`、`EVALUATION_ENABLE_NF4`、`EVALUATION_BACKEND`、`EVALUATION_BASE_URL`、
 `EVALUATION_API_MODEL`、`EVALUATION_API_KEY`、`EVALUATION_MODEL_PATH`、
 `EVALUATION_HARDWARE_LABEL`、`EVALUATION_TOKENIZER_PATH`、`EVALUATION_MAX_PROMPT_TOKENS`、
 `EVALUATION_PROMPT_BUDGET_PROFILE` 和 `EVALUATION_SERVING_CONTEXT_LIMIT`。API Key 只用于请求头，不会写入结果文件。
+
+`EVALUATION_RAW_OUTPUT_PATH` 是本地诊断用的显式 opt-in：默认不生成 Raw 日志；启用时路径必须位于仓库 `outputs/` 下，且不能覆盖提交或性能报告。上述变量不改变官方调用形式，`start.sh` 仍固定激活 `conda_env`，并接收 `TEST_FILE RESULT_DIR` 两个位置参数。
 
 ## 唯一运行命令
 
