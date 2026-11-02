@@ -466,7 +466,7 @@ class GpuMemorySampler:
                 except (TypeError, ValueError):
                     continue
                 old = self._peak_by_index.get(key)
-                if old is None or used > old["memory_used_mib"]:
+                if old is None or used > old["peak_memory_used_mib_observed"]:
                     self._peak_by_index[key] = {
                         "index": index,
                         "name": device.get("name"),

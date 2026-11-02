@@ -169,6 +169,33 @@ def test_benchmark_config_is_independent_and_keeps_the_smoke_protocol_identity()
     assert config["deployment"] == smoke["deployment"]
 
 
+def test_gpu_memory_sampler_keeps_peak_across_repeated_observations():
+    observations = iter([
+        {
+            "status": "observed",
+            "devices": [{"name": "GPU", "memory_used_mib_at_observation": 4096, "memory_total_mib": 24576}],
+        },
+        {
+            "status": "observed",
+            "devices": [{"name": "GPU", "memory_used_mib_at_observation": 3072, "memory_total_mib": 24576}],
+        },
+    ])
+    sampler = benchmark.GpuMemorySampler(provider=lambda: next(observations))
+
+    sampler._record()
+    sampler._record()
+    result = sampler.stop()
+
+    assert result["sample_count"] == 2
+    assert result["query_error_count"] == 0
+    assert result["peak_observed_by_device"] == [{
+        "index": 0,
+        "name": "GPU",
+        "memory_total_mib": 24576,
+        "peak_memory_used_mib_observed": 4096,
+    }]
+
+
 def test_benchmark_completes_100_and_reports_metrics_from_mock_runner(tmp_path, monkeypatch):
     output_root, selection_root, config_path, rows = _fixture(tmp_path, monkeypatch)
     run_root = output_root / "benchmark-complete"
