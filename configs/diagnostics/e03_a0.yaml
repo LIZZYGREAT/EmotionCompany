@@ -1,0 +1,53 @@
+version: E03-A0-v1
+
+inputs:
+  normalized_train: data/processed/v1/train.jsonl
+  sft_train: data/processed/sft/v1/train.jsonl
+  d03_manifest: outputs/data_pipeline/v1/manifest.json
+  sft_manifest: outputs/sft_data/v1/manifest.json
+  sft_summary: outputs/sft_data/v1/summary.json
+  sft_excluded: outputs/sft_data/v1/excluded_samples.jsonl
+  d042_manifest: outputs/token_audit/v1/manifest.json
+  d042_budget_rows: outputs/token_audit/v1/budget_simulations.jsonl
+  train_schema: data/train/train_public.schema.json
+  prompt: configs/prompts/p0.txt
+  tokenizer_config: configs/data_token_audit.yaml
+  runner_config: participant/configs/inference_config.json
+  training_config: configs/training/e01_b.yaml
+  training_run_root: outputs/training/E01-B-FULL-20261028-133805
+  output_root: outputs/diagnostics/e03_a0
+
+expected_counts:
+  d03_train_rows: 16312
+  sft_train_rows: 16192
+
+protocol:
+  max_train_sequence_length: 2048
+  max_prompt_tokens: 1280
+  eos_token_id: 151645
+  completion_policy: exact_D0.4.3_serialization
+  labels_policy: prompt_minus_100_completion_verbatim
+
+model:
+  training_run_id: E01-B-FULL-20261028-133805
+  base_model_id: Qwen/Qwen3-1.7B
+  base_revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  expected_base_weight_sha256: 005d20550c04f4e246e5b434448786b44a0196b47d758d0acc77aba279e5bbc5
+  expected_adapter_weight_sha256: 77b61e8a4caf46f54a8c813e98def488c7a8493fe891966e47df1cdac6df7d67
+  expected_adapter_config_sha256: 05d578eb242868385839b2bc779c5cb88911973db766e2a793cb361b42aafafd
+  quantization: nf4
+  compute_dtype: bfloat16
+
+selection:
+  seed: 42
+  token_default_sample_cap: 0
+  ce_requires_explicit_sample_cap: true
+  ce_selection: sha256_seeded_greedy_strata_then_sha256_fill_v1
+
+gpu:
+  max_sample_cap: 128
+  logit_chunk_tokens: 32
+  native_loss_abs_tolerance: 0.001
+  repeat_abs_tolerance: 0.00001
+  loading_policy: local_only_NF4_BF16_no_offload_no_backend_fallback
+  inference_mode: true
