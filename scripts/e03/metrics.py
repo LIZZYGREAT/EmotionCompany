@@ -61,12 +61,20 @@ def parse_obj(text: str):
 
 def check(obj):
     out = {"fields": False, "enum": False, "extra": False, "profile_nonempty": False,
-           "empty_response": True, "chars": 0}
+           "empty_response": True, "chars": 0, "types": False}
     if obj is None:
         return out
     out["fields"] = all(k in obj for k in ("emotion_label", "user_profile", "response_text", "memory_refs"))
     if not out["fields"]:
         return out
+    prof_t = obj.get("user_profile")
+    out["types"] = (
+        isinstance(obj.get("emotion_label"), str)
+        and isinstance(obj.get("response_text"), str)
+        and isinstance(obj.get("memory_refs"), list)
+        and isinstance(prof_t, dict)
+        and all(isinstance(prof_t.get(d), list) for d in DIMS)
+    )
     rt = obj.get("response_text")
     if isinstance(rt, str):
         out["chars"] = len(rt)
@@ -108,7 +116,7 @@ def main() -> int:
         name = f.stem
         recs = [json.loads(l) for l in f.open(encoding="utf-8")]
         n = len(recs)
-        agg = {k: 0 for k in ("json", "fields", "enum", "extra", "nonempty", "trunc", "empty")}
+        agg = {k: 0 for k in ("json", "fields", "enum", "extra", "nonempty", "trunc", "empty", "types")}
         chars = 0
         for r in recs:
             obj = parse_obj(r["raw"])
@@ -120,11 +128,13 @@ def main() -> int:
             agg["nonempty"] += c["profile_nonempty"]
             agg["trunc"] += bool(r.get("truncated"))
             agg["empty"] += c["empty_response"]
+            agg["types"] += c["types"]
             chars += c["chars"]
         rows.append({
             "prompt": name, "n": n,
             "json_object_rate": round(agg["json"] / n, 4),
             "required_fields_rate": round(agg["fields"] / n, 4),
+            "field_type_valid_rate": round(agg["types"] / n, 4),
             "enum_valid_rate": round(agg["enum"] / n, 4),
             "profile_nonempty_rate": round(agg["nonempty"] / n, 4),
             "schema_extra_label_rate": round(agg["extra"] / n, 4),
