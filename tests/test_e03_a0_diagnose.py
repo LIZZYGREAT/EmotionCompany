@@ -17,6 +17,7 @@ from src.diagnostics.e03_a0 import (
     create_run_dir,
     deterministic_select,
     parse_completion_regions,
+    _quantization_inspection_config,
     validate_sample_cap,
 )
 
@@ -205,6 +206,20 @@ def test_quantization_placement_failure_retains_runtime_facts() -> None:
     error = QuantizationPlacementError(facts)
     assert str(error) == "loaded model failed NF4/CUDA placement verification"
     assert error.runtime_facts == facts
+
+
+def test_nf4_runtime_inspection_is_enabled_for_loaded_model() -> None:
+    config = _quantization_inspection_config({
+        "quant_type": "nf4",
+        "use_double_quant": True,
+    })
+    assert config["quantization"] == {
+        "enabled": True,
+        "load_in_4bit": True,
+        "quant_type": "nf4",
+        "compute_dtype": "bfloat16",
+        "use_double_quant": True,
+    }
 
 
 def test_run_directory_never_overwrites_existing_output(tmp_path: Path) -> None:

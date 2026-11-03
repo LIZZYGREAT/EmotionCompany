@@ -1249,6 +1249,18 @@ def _ce_for_logits(torch: Any, logits: Any, labels: Any, regions: list[str], pro
     return values, profile_values, valid_sum, valid_count
 
 
+def _quantization_inspection_config(quantization: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "quantization": {
+            "enabled": True,
+            "load_in_4bit": True,
+            "quant_type": quantization["quant_type"],
+            "compute_dtype": "bfloat16",
+            "use_double_quant": bool(quantization["use_double_quant"]),
+        }
+    }
+
+
 def _load_inference_model(
     root: Path, paths: dict[str, Path], training_config: dict[str, Any], adapter_path: Path
 ) -> tuple[Any, Any, dict[str, Any]]:
@@ -1288,14 +1300,7 @@ def _load_inference_model(
         raise RuntimeError("loaded Full B model did not enter eval mode")
     if any(parameter.requires_grad for parameter in model.parameters()):
         raise RuntimeError("frozen Full B model unexpectedly contains trainable parameters")
-    inspect_config = {
-        "quantization": {
-            "load_in_4bit": True,
-            "quant_type": quantization["quant_type"],
-            "compute_dtype": "bfloat16",
-            "use_double_quant": bool(quantization["use_double_quant"]),
-        }
-    }
+    inspect_config = _quantization_inspection_config(quantization)
     facts = inference.inspect_quantization_runtime(model, inspect_config, torch)
     if not facts.get("real_nf4_verified") or facts.get("offload_devices"):
         raise QuantizationPlacementError(facts)
