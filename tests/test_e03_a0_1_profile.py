@@ -8,6 +8,7 @@ import pytest
 from src.diagnostics.e03_a0 import PROFILE_DIMS, assign_token_regions
 from src.diagnostics.e03_a0_1_profile import (
     FINE_REGIONS,
+    FineAccumulator,
     _profile_schema,
     assign_profile_fine_regions,
     build_population_summary,
@@ -96,6 +97,35 @@ def test_fine_profile_mapping_uses_exact_json_spans_and_conserves_a0_tokens() ->
     assert mapped["label_exact_tokens"] == {"conservative": len("conservative"), "indirect": len("indirect")}
     # The same text in response_text is not treated as a profile label occurrence.
     assert [item["label"] for item in mapped["label_occurrences"]].count("conservative") == 1
+
+
+def test_empty_decision_counts_are_attributed_to_their_own_dimension() -> None:
+    completion, prefix, _rendered, offsets, labels, top, profile, enums = _fixture()
+    mapped = assign_profile_fine_regions(
+        completion=completion,
+        completion_start=len(prefix),
+        offsets=offsets,
+        labels=labels,
+        top_regions=top,
+        profile_regions=profile,
+        label_enums=enums,
+    )
+    population = {
+        "label_support": {
+            dim: {label: {"positive_sample_count": 1 if label in {"conservative", "indirect"} else 0} for label in values}
+            for dim, values in enums.items()
+        }
+    }
+    accumulator = FineAccumulator(enums)
+    accumulator.add(
+        mapped,
+        {"personality_traits": ["conservative"], "interests": [], "style": ["indirect"]},
+        top.count("user_profile"),
+    )
+    summary = accumulator.summary(enums, population)
+    assert summary["dimensions"]["interests"]["gold_empty"]["fine_region_token_counts"]["profile_empty_decision"] == 2
+    assert summary["dimensions"]["personality_traits"]["gold_empty"]["fine_region_token_counts"]["profile_empty_decision"] == 0
+    assert summary["dimensions"]["personality_traits"]["gold_nonempty"]["fine_region_token_counts"]["profile_empty_decision"] == 0
 
 
 def test_token_crossing_label_quote_is_mixed_and_counted_for_that_label() -> None:

@@ -500,14 +500,18 @@ class FineAccumulator:
             self.category_totals[key] += count
             self.category_per_sample[key].append(count)
             self.category_coverage[key] += count > 0
+        dimension_sample_counts = {
+            dim: Counter({key: 0 for key in FINE_REGIONS})
+            for dim in (*a0.PROFILE_DIMS, "profile_structure", "boundary_mixed")
+        }
         for dim, category in zip(mapped["token_dimensions"], mapped["token_regions"]):
             if dim is not None and category is not None:
                 self.dimension_totals[dim][category] += 1
+                dimension_sample_counts[dim][category] += 1
         for dim in a0.PROFILE_DIMS:
             state = "gold_nonempty" if labels_by_dim[dim] else "gold_empty"
             self.dimension_state_samples[dim][state] += 1
-            for key in FINE_REGIONS:
-                self.dimension_state[dim][state][key] += counts.get(key, 0)
+            self.dimension_state[dim][state].update(dimension_sample_counts[dim])
             for label in labels_by_dim[dim]:
                 self.label_support[label] += 1
         for label, count in mapped["label_exact_tokens"].items():
