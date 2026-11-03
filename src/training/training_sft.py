@@ -29,6 +29,14 @@ import yaml
 from participant import run_inference as inference
 from src.data.sft_collator import SFTDataCollator
 from src.shared.prompting import build_messages, encode_inference_prompt
+from src.training.e03_a1_loss import (
+    E03A1DataCollator,
+    attach_loss_fields,
+    build_alignment_cache,
+    evaluate_loss_breakdown,
+    independently_recomputed_weighted_causal_lm_loss,
+    weighted_causal_lm_loss,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -84,13 +92,27 @@ def load_config(config_path: str | Path) -> tuple[dict[str, Any], Path]:
     if not resolved.is_file():
         raise FileNotFoundError(f"训练配置不存在: {resolved}")
     config = yaml.safe_load(resolved.read_text(encoding="utf-8"))
-    if not isinstance(config, dict) or config.get("version") != "E01-training-v1":
-        raise ValueError("训练配置 version 必须为 E01-training-v1")
+    if not isinstance(config, dict) or config.get("version") not in {"E01-training-v1", "E03-A1-training-v1"}:
+        raise ValueError("训练配置 version 必须为 E01-training-v1 或 E03-A1-training-v1")
     required = {"experiment_id", "status", "base_model", "data", "protocol", "quantization", "lora", "optimizer", "training", "evaluation"}
     if not required <= set(config):
         raise ValueError(f"训练配置缺少字段: {sorted(required - set(config))}")
-    if config["experiment_id"] not in {"E01-A", "E01-B", "E01-B-PILOT"}:
-        raise ValueError("experiment_id 只允许 E01-A、E01-B 或 E01-B-PILOT")
+    if config["experiment_id"] not in {"E01-A", "E01-B", "E01-B-PILOT", "E03-A1"}:
+        raise ValueError("experiment_id 只允许 E01-A、E01-B、E01-B-PILOT 或 E03-A1")
+    if config["experiment_id"] == "E03-A1":
+        if config.get("version") != "E03-A1-training-v1":
+            raise ValueError("E03-A1 requires version E03-A1-training-v1")
+        if config.get("status") != "approved_for_e03_a1" or config.get("training_scope") not in {"short_contrast", "full_contrast"}:
+            raise ValueError("E03-A1 config must record its authorization and short/full scope")
+        approval = config.get("approval") or {}
+        if approval.get("scope") != "E03-A1" or approval.get("approved_at") != "2026-11-03":
+            raise ValueError("E03-A1 authorization record is missing or differs from the approved task")
+        if not isinstance(config.get("loss_contrast"), dict) or config["loss_contrast"].get("variant") not in {"token_mean", "profile_x2", "label_value_x2"}:
+            raise ValueError("E03-A1 requires a known loss_contrast.variant")
+        if float(config["loss_contrast"].get("weight_factor", 0)) != 2.0:
+            raise ValueError("E03-A1 loss weight factor is frozen at 2.0")
+    elif config.get("version") != "E01-training-v1":
+        raise ValueError("E01 configs require version E01-training-v1")
     if config["data"].get("init_adapter") is not None or config["data"].get("resume_from_checkpoint") is not None:
         raise ValueError("E01 baseline 必须从 Base + 新 LoRA 初始化；init_adapter/resume_from_checkpoint 必须为空")
     if config["data"].get("split") != "train":
@@ -118,7 +140,16 @@ def load_config(config_path: str | Path) -> tuple[dict[str, Any], Path]:
     return config, resolved
 
 
-def validate_training_mode(config: dict[str, Any], mode: str, *, allow_full_training: bool = False) -> None:
+def validate_training_mode(
+    config: dict[str, Any], mode: str, *, allow_full_training: bool = False,
+    allow_e03_a1_training: bool = False,
+) -> None:
+    if config["experiment_id"] == "E03-A1":
+        if mode not in {"preflight", "train", "resume", "reload-check"}:
+            raise ValueError("E03-A1 supports preflight, train, resume and reload-check")
+        if mode in {"train", "resume"} and not allow_e03_a1_training:
+            raise ValueError("E03-A1 training requires the explicit --allow-e03-a1-training flag")
+        return
     if config["experiment_id"] == "E01-B" and mode != "preflight":
         if config.get("status") != "approved_for_full_training" or not allow_full_training:
             raise ValueError("E01-B 尚未获人工批准或缺少 --allow-full-training；禁止启动全量训练")
@@ -412,7 +443,7 @@ def _select_real_samples(config: dict[str, Any], train_path: Path, normalized_pa
             seed=int(selection["seed"]),
             length_bins=int(selection["length_bins"]),
         )
-    elif config["experiment_id"] == "E01-B":
+    elif config["experiment_id"] in {"E01-B", "E03-A1"}:
         sources = {row["sample_id"]: row for row in normalized_metadata}
         if len(sources) != len(normalized_metadata):
             raise ValueError("D0.3 Train contains duplicate sample IDs")
@@ -420,7 +451,7 @@ def _select_real_samples(config: dict[str, Any], train_path: Path, normalized_pa
         for row in sft_metadata:
             source = sources.get(row["sample_id"])
             if source is None or row["source_split"] != "train" or row["conversation_id"] != source["conversation_id"]:
-                raise ValueError("Full B must select every effective Train row from its verified D0.3 Train source")
+                raise ValueError("Full B/E03-A1 must select every effective Train row from its verified D0.3 Train source")
             selected.append({
                 **row,
                 "emotion_label": source["target"]["emotion_label"],
@@ -428,7 +459,7 @@ def _select_real_samples(config: dict[str, Any], train_path: Path, normalized_pa
                 "sequence_length": row["prompt_length"] + row["completion_length"],
             })
         if len(selected) != int(config["data"]["expected_train_rows"]) or len({row["sample_id"] for row in selected}) != len(selected):
-            raise ValueError("Full B selection must contain all 16,192 unique effective Train IDs")
+            raise ValueError("Full B/E03-A1 selection must contain all 16,192 unique effective Train IDs")
     else:
         raise ValueError("Unknown training experiment")
     selected_ids = {row["sample_id"] for row in selected}
@@ -514,6 +545,7 @@ def _preflight(config: dict[str, Any], *, include_model_hash: bool = True) -> tu
     if not checks["cuda"]["available"]:
         checks["cuda"]["status"] = "blocked_gpu_unavailable"
 
+    loss_mapping_facts = None
     try:
         train_path, dev_path, normalized_path, manifests = _training_rows(config)
         train_count = _count_jsonl(train_path)
@@ -553,6 +585,17 @@ def _preflight(config: dict[str, Any], *, include_model_hash: bool = True) -> tu
             raise ValueError("runtime chat template differs from D0.4.3")
         if tokenizer.eos_token_id != int(config["protocol"]["eos_token_id"]):
             raise ValueError("runtime tokenizer EOS ID differs from D0.4.3")
+        if config["experiment_id"] == "E03-A1":
+            _mappings, loss_mapping_facts = build_alignment_cache(
+                config=config,
+                tokenizer=tokenizer,
+                prompt_text=p0_path.read_text(encoding="utf-8"),
+                schema=inference.load_submission_schema(),
+                train_samples=samples,
+                dev_rows=_dev_rows,
+                normalized_train_path=normalized_path,
+                cache_root=_resolve(config["data"]["output_root"]) / "E03-A1-mapping-cache",
+            )
         checks["data"] = {
             "status": "passed",
             "train_path": str(train_path.relative_to(PROJECT_ROOT)),
@@ -574,6 +617,7 @@ def _preflight(config: dict[str, Any], *, include_model_hash: bool = True) -> tu
                 else "e01_a_greedy_short_unique_v1" if config["experiment_id"] == "E01-A" else "all_valid_train_in_jsonl_order_v1"
             ),
             "sft_dev_loss_selection": dev_selection_facts,
+            "loss_mapping": loss_mapping_facts,
             "only_train_used_for_selection_and_updates": True,
             "dev_loaded_for_training": False,
             "official_val_used": False,
@@ -644,6 +688,24 @@ def _run_root(config: dict[str, Any], run_id: str) -> Path:
         raise FileExistsError(f"Run ID already exists; refusing to overwrite: {root}")
     root.mkdir(parents=True)
     return root
+
+
+def _config_identity(config: dict[str, Any], config_path: Path) -> str:
+    return canonical_sha256(config) if config["experiment_id"] == "E03-A1" else sha256_file(config_path)
+
+
+def _write_config_snapshot(config: dict[str, Any], config_path: Path, destination: Path) -> None:
+    if config["experiment_id"] == "E03-A1":
+        destination.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    else:
+        destination.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+
+def _snapshot_config_identity(config: dict[str, Any], snapshot_path: Path) -> str:
+    if config["experiment_id"] == "E03-A1":
+        snapshot = yaml.safe_load(snapshot_path.read_text(encoding="utf-8"))
+        return canonical_sha256(snapshot)
+    return sha256_file(snapshot_path)
 
 
 def _write_run_manifest(run_root: Path, manifest: dict[str, Any]) -> None:
@@ -940,7 +1002,35 @@ def _build_sft_trainer(
                 else:
                     target_model.load_adapter = previous_instance_method
 
-    trainer = RecordedSFTTrainer(
+    trainer_class = RecordedSFTTrainer
+    if config["experiment_id"] == "E03-A1":
+        class WeightedRecordedSFTTrainer(RecordedSFTTrainer):
+            a1_loss_formula_audit_calls = 0
+
+            def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+                import torch
+
+                weights = inputs.pop("loss_weights")
+                inputs.pop("primary_region_ids")
+                inputs.pop("label_value_mask")
+                labels = inputs.pop("labels")
+                outputs = model(**inputs)
+                loss = weighted_causal_lm_loss(outputs.logits, labels, weights)
+                if model.training:
+                    audited_loss = independently_recomputed_weighted_causal_lm_loss(
+                        outputs.logits.detach(), labels, weights,
+                    )
+                    if not torch.isclose(loss.detach(), audited_loss, atol=2e-5, rtol=2e-5):
+                        raise RuntimeError(
+                            f"E03-A1 weighted loss differs from independent log-softmax audit: "
+                            f"trainer={float(loss.detach().item())}, independent={float(audited_loss.item())}"
+                        )
+                    self.a1_loss_formula_audit_calls += 1
+                return (loss, outputs) if return_outputs else loss
+
+        trainer_class = WeightedRecordedSFTTrainer
+
+    trainer = trainer_class(
         model=model,
         args=args,
         data_collator=collator,
@@ -990,9 +1080,10 @@ def _build_sft_trainer(
             batches_to_check.append((observed, matched_rows))
     for offset, (observed_batch, source_rows) in enumerate(batches_to_check):
         expected_batch = collator(source_rows)
-        if set(observed_batch) != {"input_ids", "attention_mask", "labels"}:
-            raise RuntimeError(f"SFTTrainer passed unexpected fields to model: {sorted(observed_batch)}")
-        for name in ("input_ids", "attention_mask", "labels"):
+        expected_fields = set(expected_batch)
+        if set(observed_batch) != expected_fields:
+            raise RuntimeError(f"SFTTrainer batch fields differ from the configured collator: {sorted(observed_batch)}")
+        for name in expected_fields:
             if not torch.equal(observed_batch[name].cpu(), expected_batch[name].cpu()):
                 raise RuntimeError(f"SFTTrainer changed pre-encoded {name} in verified batch {offset}")
     trainer.e01_data_path_facts = {
@@ -1014,7 +1105,12 @@ def _build_sft_trainer(
         micro_batches = len(trainer.get_train_dataloader())
         steps_per_epoch = math.ceil(micro_batches / int(training["gradient_accumulation_steps"]))
         expected_steps = steps_per_epoch * int(training["epochs"])
-        if max_steps != expected_steps:
+        if config["experiment_id"] == "E03-A1":
+            if config["training_scope"] == "full_contrast" and max_steps != expected_steps:
+                raise ValueError(f"E03-A1 Full optimizer-step budget differs from one full epoch: configured={max_steps}, actual={expected_steps}")
+            if config["training_scope"] == "short_contrast" and not (0 < max_steps < expected_steps):
+                raise ValueError(f"E03-A1 short contrast must be a positive prefix of one epoch: configured={max_steps}, epoch={expected_steps}")
+        elif max_steps != expected_steps:
             raise ValueError(f"frozen optimizer-step budget differs from actual DataLoader schedule: configured={max_steps}, actual={expected_steps}")
         trainer.e01_data_path_facts.update(train_micro_batches_per_epoch=micro_batches, optimizer_steps_per_epoch=steps_per_epoch, configured_optimizer_steps=max_steps, data_seed=int(training["seed"]))
     return trainer
@@ -1845,7 +1941,14 @@ def execute_training(config: dict[str, Any], config_path: Path, run_id: str, ste
 
 def _staged_checkpoint_identity(config: dict[str, Any], preflight: dict[str, Any], config_sha256: str) -> dict[str, Any]:
     data_facts = preflight["checks"]["data"]
-    return {
+    code_paths = ["src/training/training_sft.py", "src/data/sft_collator.py", "src/shared/prompting.py"]
+    if config["experiment_id"] == "E03-A1":
+        code_paths.extend((
+            "src/training/e03_a1_loss.py",
+            "src/diagnostics/e03_a0.py",
+            "src/diagnostics/e03_a0_1_profile.py",
+        ))
+    identity = {
         "experiment_id": config["experiment_id"],
         "training_scope": config["training_scope"],
         "config_sha256": config_sha256,
@@ -1862,9 +1965,16 @@ def _staged_checkpoint_identity(config: dict[str, Any], preflight: dict[str, Any
         "cuda": preflight["checks"]["cuda"],
         "training_code_sha256": canonical_sha256({
             name: sha256_file(PROJECT_ROOT / name)
-            for name in ("src/training/training_sft.py", "src/data/sft_collator.py", "src/shared/prompting.py")
+            for name in code_paths
         }),
     }
+    if config["experiment_id"] == "E03-A1":
+        identity.update(
+            loss_variant=config["loss_contrast"]["variant"],
+            loss_stage=config["training_scope"],
+            loss_mapping_sha256=(data_facts.get("loss_mapping") or {}).get("mapping_sha256"),
+        )
+    return identity
 
 
 def _successful_staged_preflight(config: dict[str, Any], preflight_root: Path, config_sha256: str) -> dict[str, Any]:
@@ -1881,12 +1991,15 @@ def _successful_staged_preflight(config: dict[str, Any], preflight_root: Path, c
     if (
         manifest.get("experiment_id") != config["experiment_id"]
         or manifest.get("training_scope") != config["training_scope"]
+        or manifest.get("loss_variant") != (config.get("loss_contrast") or {}).get("variant")
         or manifest.get("status") != "passed"
         or preflight.get("status") != "passed"
     ):
         raise ValueError("staged training requires an independently completed passed training preflight")
     if manifest.get("config_sha256") != config_sha256:
         raise ValueError("training preflight config hash differs from the current config")
+    if _snapshot_config_identity(config, root / "config_snapshot.yaml") != config_sha256:
+        raise ValueError("training preflight config snapshot differs from the current effective configuration")
     if manifest.get("preflight_sha256") != sha256_file(preflight_path):
         raise ValueError("training preflight result hash differs from its manifest")
     return preflight
@@ -1933,14 +2046,14 @@ def _execute_staged_training(
     preflight: dict[str, Any] | None,
     stop_after_step: int | None = None,
 ) -> Path:
-    if config["experiment_id"] not in {"E01-B-PILOT", "E01-B"}:
-        raise ValueError("staged training accepts only E01-B-PILOT or E01-B")
-    config_sha = sha256_file(config_path)
+    if config["experiment_id"] not in {"E01-B-PILOT", "E01-B", "E03-A1"}:
+        raise ValueError("staged training accepts only E01-B-PILOT, E01-B, or E03-A1")
+    config_sha = _config_identity(config, config_path)
     if resume_checkpoint is None:
         run_id = run_root.name
         config_snapshot = run_root / "config_snapshot.yaml"
-        config_snapshot.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
-        if sha256_file(config_snapshot) != config_sha:
+        _write_config_snapshot(config, config_path, config_snapshot)
+        if _snapshot_config_identity(config, config_snapshot) != config_sha:
             raise RuntimeError("training config snapshot differs from its source")
         if preflight is None:
             raise ValueError("staged train requires a passed preflight")
@@ -1964,6 +2077,12 @@ def _execute_staged_training(
             "resume_history": [],
             "training_seconds": 0.0,
         }
+        if config["experiment_id"] == "E03-A1":
+            manifest.update(
+                loss_variant=config["loss_contrast"]["variant"],
+                loss_weight_factor=float(config["loss_contrast"]["weight_factor"]),
+                loss_mapping_version=config["loss_contrast"]["mapping_version"],
+            )
         _write_run_manifest(run_root, manifest)
         expected_checkpoint_identity = _staged_checkpoint_identity(config, preflight, config_sha)
         checkpoint_to_resume = None
@@ -1978,8 +2097,10 @@ def _execute_staged_training(
             raise ValueError("resume accepts only the same independently initialized Run")
         if manifest.get("status") in {"passed", "completed"} or manifest.get("optimizer_steps", 0) >= int(config["training"]["max_optimizer_steps"]):
             raise ValueError("completed training Run cannot be resumed")
-        if manifest.get("config_sha256") != config_sha or sha256_file(config_snapshot) != config_sha:
+        if manifest.get("config_sha256") != config_sha or _snapshot_config_identity(config, config_snapshot) != config_sha:
             raise ValueError("resume config does not match the frozen training Run config")
+        if config["experiment_id"] == "E03-A1" and manifest.get("loss_variant") != config["loss_contrast"]["variant"]:
+            raise ValueError("resume loss variant differs from the frozen training Run")
         if manifest.get("preflight_status") != "passed" or not (run_root / "preflight.json").is_file():
             raise ValueError("resume requires the original passed training preflight")
         if sha256_file(run_root / "preflight.json") != manifest.get("preflight_sha256"):
@@ -2048,7 +2169,28 @@ def _execute_staged_training(
             "sample_ids": [row["sample_id"] for row in dev_rows],
         })
         base_path = _resolve(config["base_model"]["local_path"])
-        tokenizer, _prompt, _schema, _enums = _load_protocol(config, base_path)
+        tokenizer, prompt_text, schema, _enums = _load_protocol(config, base_path)
+        if config["experiment_id"] == "E03-A1":
+            loss_mappings, loss_mapping_facts = build_alignment_cache(
+                config=config,
+                tokenizer=tokenizer,
+                prompt_text=prompt_text,
+                schema=schema,
+                train_samples=samples,
+                dev_rows=dev_rows,
+                normalized_train_path=normalized_path,
+                cache_root=_resolve(config["data"]["output_root"]) / "E03-A1-mapping-cache",
+            )
+            if loss_mapping_facts["mapping_sha256"] != current_identity.get("loss_mapping_sha256"):
+                raise ValueError("E03-A1 Token-region mapping changed after the passed preflight")
+            attach_loss_fields(
+                train_samples=samples,
+                dev_rows=dev_rows,
+                mappings=loss_mappings,
+                variant=config["loss_contrast"]["variant"],
+                weight_factor=float(config["loss_contrast"]["weight_factor"]),
+            )
+            _write_json(run_root / "loss_mapping_manifest.json", loss_mapping_facts)
         model, torch, model_facts = _load_train_model(config, base_path)
         torch.cuda.reset_peak_memory_stats()
         model_facts["cuda_peak_memory_scope"] = "reset after Base+LoRA load; includes Trainer setup, training, SFT Dev Loss and checkpoints within this attempt"
@@ -2057,6 +2199,8 @@ def _execute_staged_training(
             tokenizer.pad_token_id,
             max_sequence_length=int(config["protocol"]["max_train_seq_length"]),
         )
+        if config["experiment_id"] == "E03-A1":
+            collator = E03A1DataCollator(collator)
         counters = _TrainingCounters(_read_training_log(run_root))
         trainable = _trainable_parameters(model)
         checkpoint_facts = _staged_checkpoint_identity(config, current_preflight, config_sha)
@@ -2109,12 +2253,24 @@ def _execute_staged_training(
         training_started = time.perf_counter()
         trainer.train(resume_from_checkpoint=str(checkpoint_to_resume) if checkpoint_to_resume else None)
         manifest["training_seconds"] = previous_training_seconds + time.perf_counter() - training_started
+        a1_formula_audit_calls = None
+        if config["experiment_id"] == "E03-A1":
+            a1_formula_audit_calls = int(getattr(trainer, "a1_loss_formula_audit_calls", 0))
+            expected_audit_calls = (
+                int(trainer.state.global_step) - starting_step
+            ) * int(config["training"]["gradient_accumulation_steps"])
+            if a1_formula_audit_calls != expected_audit_calls:
+                raise RuntimeError(
+                    "E03-A1 independent loss-formula audit did not cover every training micro-batch: "
+                    f"observed={a1_formula_audit_calls}, expected={expected_audit_calls}"
+                )
         manifest.setdefault("training_attempts", []).append({
             "starting_optimizer_step": starting_step,
             "ending_optimizer_step": int(trainer.state.global_step),
             "training_seconds": manifest["training_seconds"] - previous_training_seconds,
             "cuda_memory": inference.cuda_memory_facts(torch),
             "stop_reason": callback.stop_reason,
+            **({"loss_formula_audit_calls": a1_formula_audit_calls, "loss_formula_audit_status": "passed"} if config["experiment_id"] == "E03-A1" else {}),
         })
         training_started = None
         if int(trainer.state.global_step) < int(config["training"]["max_optimizer_steps"]):
@@ -2131,7 +2287,21 @@ def _execute_staged_training(
         step_ids = [int(row.get("optimizer_step", -1)) for row in log_rows]
         expected_steps = list(range(1, int(config["training"]["max_optimizer_steps"]) + 1))
         if step_ids != expected_steps or any(not math.isfinite(float(row.get("loss", float("nan")))) for row in log_rows):
-            raise RuntimeError("E01-B optimizer-step log is incomplete, duplicated, out of order, or non-finite")
+            raise RuntimeError("staged optimizer-step log is incomplete, duplicated, out of order, or non-finite")
+        a1_loss_breakdown = None
+        if config["experiment_id"] == "E03-A1":
+            a1_loss_breakdown = evaluate_loss_breakdown(
+                trainer,
+                dev_rows,
+                batch_size=int(config["training"].get("per_device_eval_batch_size", 1)),
+            )
+            _write_json(run_root / "loss_breakdown.json", {
+                "metric_scope": "unweighted_teacher_forced_sft_dev",
+                "loss_variant": config["loss_contrast"]["variant"],
+                "dev_rows": len(dev_rows),
+                "sample_ids_sha256": dev_selection_facts["sample_ids_sha256"],
+                "regions": a1_loss_breakdown,
+            })
         manifest.update(stage="training_complete", optimizer_steps=int(trainer.state.global_step))
         _write_run_manifest(run_root, manifest)
         _write_training_progress(
@@ -2182,6 +2352,15 @@ def _execute_staged_training(
             "cuda": current_preflight["checks"]["cuda"],
             "training_attempts": manifest["training_attempts"],
         }
+        if config["experiment_id"] == "E03-A1":
+            training_evidence.update(
+                loss_variant=config["loss_contrast"]["variant"],
+                loss_weight_factor=float(config["loss_contrast"]["weight_factor"]),
+                loss_mapping_sha256=loss_mapping_facts["mapping_sha256"],
+                loss_breakdown=a1_loss_breakdown,
+                loss_formula_audit_status="passed",
+                loss_formula_audit_calls=sum(int(attempt.get("loss_formula_audit_calls", 0)) for attempt in manifest["training_attempts"]),
+            )
         _write_json(run_root / "training_evidence.json", training_evidence)
         manifest.update(training_evidence)
         _write_run_manifest(run_root, manifest)
@@ -2245,12 +2424,17 @@ def _execute_staged_training(
 
 def execute_staged_train(
     config: dict[str, Any], config_path: Path, run_id: str, preflight_root: Path,
-    *, allow_full_training: bool = False, stop_after_step: int | None = None,
+    *, allow_full_training: bool = False, allow_e03_a1_training: bool = False,
+    stop_after_step: int | None = None,
 ) -> Path:
-    validate_training_mode(config, "train", allow_full_training=allow_full_training)
+    validate_training_mode(
+        config, "train", allow_full_training=allow_full_training,
+        allow_e03_a1_training=allow_e03_a1_training,
+    )
     _validate_staged_budget(config)
-    _verify_full_approval_source(config)
-    config_sha = sha256_file(config_path)
+    if config["experiment_id"] != "E03-A1":
+        _verify_full_approval_source(config)
+    config_sha = _config_identity(config, config_path)
     preflight = _successful_staged_preflight(config, preflight_root, config_sha)
     run_root = _run_root(config, run_id)
     return _execute_staged_training(
@@ -2260,11 +2444,16 @@ def execute_staged_train(
 
 def execute_staged_resume(
     config: dict[str, Any], config_path: Path, run_root: Path, checkpoint: Path,
-    *, allow_full_training: bool = False, stop_after_step: int | None = None,
+    *, allow_full_training: bool = False, allow_e03_a1_training: bool = False,
+    stop_after_step: int | None = None,
 ) -> Path:
-    validate_training_mode(config, "resume", allow_full_training=allow_full_training)
+    validate_training_mode(
+        config, "resume", allow_full_training=allow_full_training,
+        allow_e03_a1_training=allow_e03_a1_training,
+    )
     _validate_staged_budget(config)
-    _verify_full_approval_source(config)
+    if config["experiment_id"] != "E03-A1":
+        _verify_full_approval_source(config)
     root = run_root.resolve()
     output_root = _resolve(config["data"]["output_root"])
     if not root.is_relative_to(output_root):
@@ -2273,6 +2462,37 @@ def execute_staged_resume(
 
 
 def _validate_staged_budget(config: dict[str, Any]) -> None:
+    if config["experiment_id"] == "E03-A1":
+        if not _resolve(config["data"]["output_root"]).is_relative_to((PROJECT_ROOT / "outputs/training").resolve()):
+            raise ValueError("E03-A1 output_root must remain under outputs/training")
+        reference = yaml.safe_load((PROJECT_ROOT / "configs/training/e01_a.yaml").read_text(encoding="utf-8"))
+        for key in ("base_model", "protocol", "quantization", "lora"):
+            if config[key] != reference[key]:
+                raise ValueError(f"E03-A1 must preserve the E01-A {key} identity")
+        if int(config["data"]["expected_train_rows"]) != 16192 or int(config["data"]["expected_dev_rows"]) != 1821:
+            raise ValueError("E03-A1 must use all 16,192 Train rows and the locked 1,821-row SFT Dev")
+        training = config["training"]
+        expected_budget = 128 if config["training_scope"] == "short_contrast" else 4048
+        expected_dev = 128 if config["training_scope"] == "short_contrast" else 1821
+        if int(training.get("max_optimizer_steps", 0)) != expected_budget:
+            raise ValueError(f"E03-A1 {config['training_scope']} requires exactly {expected_budget} optimizer steps")
+        if int(config["evaluation"].get("sft_dev_loss_rows", 0)) != expected_dev:
+            raise ValueError(f"E03-A1 {config['training_scope']} requires exactly {expected_dev} fixed SFT Dev rows")
+        if int(training.get("epochs", 0)) != 1 or training.get("train_sampling_strategy") != "random":
+            raise ValueError("E03-A1 requires one epoch budget and the frozen seeded random row order")
+        if int(training.get("per_device_micro_batch_size", 0)) != 1 or int(training.get("gradient_accumulation_steps", 0)) != 4:
+            raise ValueError("E03-A1 requires micro batch 1 and gradient accumulation 4")
+        if not training.get("checkpointing") or int(training.get("save_total_limit", 0)) < 2:
+            raise ValueError("E03-A1 requires full Trainer checkpoints and at least two retained checkpoints")
+        for key in ("save_interval_steps", "evaluation_interval_steps", "parameter_check_interval_steps", "max_training_seconds"):
+            value = training.get(key)
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"E03-A1 training.{key} requires a frozen positive value")
+        if config["optimizer"].get("name") != "AdamW" or not math.isclose(float(config["optimizer"].get("learning_rate", 0)), 1e-4, rel_tol=0, abs_tol=1e-12):
+            raise ValueError("E03-A1 must preserve the Full B AdamW learning rate 1e-4")
+        if config["evaluation"].get("do_sample") is not False or config["evaluation"].get("max_new_tokens") != 1200:
+            raise ValueError("E03-A1 must preserve the frozen greedy evaluation protocol")
+        return
     if not _resolve(config["data"]["output_root"]).is_relative_to((PROJECT_ROOT / "outputs/training").resolve()):
         raise ValueError("E01-B training output_root must remain under outputs/training")
     reference = yaml.safe_load((PROJECT_ROOT / "configs/training/e01_a.yaml").read_text(encoding="utf-8"))
@@ -2336,7 +2556,7 @@ def execute_preflight(config: dict[str, Any], config_path: Path, run_id: str) ->
     validate_training_mode(config, "preflight")
     run_root = _run_root(config, run_id)
     snapshot = run_root / "config_snapshot.yaml"
-    snapshot.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
+    _write_config_snapshot(config, config_path, snapshot)
     result, _ = _preflight(config)
     _write_json(run_root / "preflight.json", result)
     manifest = {
@@ -2345,11 +2565,13 @@ def execute_preflight(config: dict[str, Any], config_path: Path, run_id: str) ->
         "training_scope": config.get("training_scope", "micro_overfit"),
         "status": result["status"],
         "created_at_utc": _now(),
-        "config_sha256": sha256_file(snapshot),
+        "config_sha256": _config_identity(config, config_path),
         "preflight_sha256": sha256_file(run_root / "preflight.json"),
         "init_adapter": None,
         "resume_from_checkpoint": None,
     }
+    if config["experiment_id"] == "E03-A1":
+        manifest["loss_variant"] = config["loss_contrast"]["variant"]
     _write_run_manifest(run_root, manifest)
     return run_root
 
@@ -2368,7 +2590,7 @@ def execute_reload_check(config: dict[str, Any], run_root: Path) -> dict[str, An
     if manifest.get("experiment_id") != config["experiment_id"] or manifest.get("init_adapter") is not None:
         raise ValueError("reload-check Run identity differs from the independently initialized experiment")
     snapshot = root / "config_snapshot.yaml"
-    if not snapshot.is_file() or sha256_file(snapshot) != manifest.get("config_sha256"):
+    if not snapshot.is_file() or _snapshot_config_identity(config, snapshot) != manifest.get("config_sha256"):
         raise ValueError("reload-check frozen training config snapshot changed")
     observed_adapter, _ = inference.adapter_weight_identity(adapter_dir)
     recorded_adapter = manifest.get("adapter_identity") or {}

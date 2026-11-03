@@ -926,6 +926,7 @@ def _build_sample_mapping(
     prompt_text: str,
     schema: dict[str, Any],
     max_prompt_tokens: int,
+    expected_sft_split: str = "train",
 ) -> tuple[
     str,
     str,
@@ -937,7 +938,7 @@ def _build_sample_mapping(
     dict[str, Any],
 ]:
     try:
-        validate_train_row(sft_row, expected_eos_token_id=int(tokenizer.eos_token_id), expected_split="train")
+        validate_train_row(sft_row, expected_eos_token_id=int(tokenizer.eos_token_id), expected_split=expected_sft_split)
     except (TypeError, ValueError) as exc:
         raise AlignmentError("D0.4.3 SFT row violates stored input/label invariants") from exc
     if source.get("sample_id") != sft_row.get("sample_id"):
