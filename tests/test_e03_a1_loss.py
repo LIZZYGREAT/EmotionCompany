@@ -309,3 +309,27 @@ def test_dev_alignment_reads_matching_source_from_normalized_d03_dev(tmp_path, m
         "label_value_mask": [0, 1],
     }
     assert facts["normalized_dev_sha256"]
+
+
+def test_train_schema_path_is_verified_against_d043_and_d042_manifests(tmp_path):
+    import pytest
+
+    from src.training import training_sft
+
+    schema_path = tmp_path / "train_public.schema.json"
+    schema_path.write_text(json.dumps({"$defs": {"emotion": {"enum": ["neutral"]}}}), encoding="utf-8")
+    schema_sha = training_sft.sha256_file(schema_path)
+    sft_manifest = {
+        "inputs": {
+            "train_schema": {"path": str(schema_path), "sha256": schema_sha},
+        },
+    }
+    d042_manifest = {
+        "input_hashes_unchanged_after_run": {"train_schema": schema_sha},
+    }
+
+    assert training_sft._verified_train_schema_path(sft_manifest, d042_manifest) == schema_path
+
+    d042_manifest["input_hashes_unchanged_after_run"]["train_schema"] = "0" * 64
+    with pytest.raises(ValueError, match="D0.4.2/D0.4.3 Manifest identities"):
+        training_sft._verified_train_schema_path(sft_manifest, d042_manifest)

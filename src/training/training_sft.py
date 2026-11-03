@@ -379,6 +379,22 @@ def deterministic_select_pilot_samples(
     return selected
 
 
+def _verified_train_schema_path(sft_manifest: dict[str, Any], d042_manifest: dict[str, Any]) -> Path:
+    schema_input = sft_manifest.get("inputs", {}).get("train_schema", {})
+    schema_value = schema_input.get("path")
+    expected_sft_sha = schema_input.get("sha256")
+    if not isinstance(schema_value, str) or not schema_value or not isinstance(expected_sft_sha, str):
+        raise ValueError("D0.4.3 Manifest lacks its official Train Schema identity")
+    schema_path = _resolve(schema_value)
+    if not schema_path.is_file():
+        raise FileNotFoundError(f"official D0.3 Train Schema is missing: {schema_path}")
+    observed_sha = sha256_file(schema_path)
+    expected_d042_sha = d042_manifest.get("input_hashes_unchanged_after_run", {}).get("train_schema")
+    if observed_sha != expected_sft_sha or observed_sha != expected_d042_sha:
+        raise ValueError("official Train Schema differs from the D0.4.2/D0.4.3 Manifest identities")
+    return schema_path
+
+
 def _training_rows(config: dict[str, Any]) -> tuple[Path, Path, Path, dict[str, Any]]:
     data = config["data"]
     train_path = _resolve(data["train_path"])
@@ -408,6 +424,11 @@ def _training_rows(config: dict[str, Any]) -> tuple[Path, Path, Path, dict[str, 
     if d03_sha != manifest.get("d03_manifest_sha256") or d042_sha != manifest.get("d042_manifest_sha256"):
         raise ValueError("D0.4.3 source manifests do not match the recorded D0.3/D0.4.2 hashes")
     d03 = json.loads(d03_manifest_path.read_text(encoding="utf-8"))
+    d042 = (
+        json.loads(d042_manifest_path.read_text(encoding="utf-8"))
+        if config["experiment_id"] == "E03-A1"
+        else {}
+    )
     if d03.get("pipeline_version") != "D0.3-v1":
         raise ValueError("D0.3 manifest version must remain D0.3-v1")
     normalized_train_path = _resolve(data["normalized_train_path"])
@@ -417,7 +438,9 @@ def _training_rows(config: dict[str, Any]) -> tuple[Path, Path, Path, dict[str, 
     if output.get("records") != int(data["expected_source_train_rows"]):
         raise ValueError("D0.3 Train row count differs from E01 config")
     normalized_dev_path = None
+    train_schema_path = None
     if config["experiment_id"] == "E03-A1":
+        train_schema_path = _verified_train_schema_path(manifest, d042)
         normalized_dev_path = _resolve(data["normalized_dev_path"])
         dev_output = next((item for item in d03.get("outputs", []) if item.get("path") == data["normalized_dev_path"]), None)
         if dev_output is None or sha256_file(normalized_dev_path) != dev_output.get("sha256"):
@@ -429,6 +452,7 @@ def _training_rows(config: dict[str, Any]) -> tuple[Path, Path, Path, dict[str, 
         "d03": d03,
         "d03_manifest_path": d03_manifest_path,
         "normalized_dev_path": normalized_dev_path,
+        "train_schema_path": train_schema_path,
     }
 
 
@@ -603,7 +627,7 @@ def _preflight(config: dict[str, Any], *, include_model_hash: bool = True) -> tu
                 config=config,
                 tokenizer=tokenizer,
                 prompt_text=p0_path.read_text(encoding="utf-8"),
-                schema=inference.load_submission_schema(),
+                schema=json.loads(manifests["train_schema_path"].read_text(encoding="utf-8")),
                 train_samples=samples,
                 dev_rows=_dev_rows,
                 normalized_train_path=normalized_path,
@@ -636,6 +660,11 @@ def _preflight(config: dict[str, Any], *, include_model_hash: bool = True) -> tu
             "dev_loaded_for_training": False,
             "official_val_used": False,
         }
+        if manifests["train_schema_path"] is not None:
+            checks["data"].update(
+                train_schema_path=str(manifests["train_schema_path"].relative_to(PROJECT_ROOT)),
+                train_schema_sha256=sha256_file(manifests["train_schema_path"]),
+            )
         checks["protocol"] = {
             "p0_sha256": p0_hash,
             "tokenizer": tokenizer_facts,
@@ -1988,6 +2017,7 @@ def _staged_checkpoint_identity(config: dict[str, Any], preflight: dict[str, Any
             loss_stage=config["training_scope"],
             loss_mapping_sha256=(data_facts.get("loss_mapping") or {}).get("mapping_sha256"),
             normalized_dev_sha256=(data_facts.get("loss_mapping") or {}).get("normalized_dev_sha256"),
+            train_schema_sha256=data_facts.get("train_schema_sha256"),
         )
     return identity
 
@@ -2190,7 +2220,7 @@ def _execute_staged_training(
                 config=config,
                 tokenizer=tokenizer,
                 prompt_text=prompt_text,
-                schema=schema,
+                schema=json.loads(training_manifests["train_schema_path"].read_text(encoding="utf-8")),
                 train_samples=samples,
                 dev_rows=dev_rows,
                 normalized_train_path=normalized_path,
