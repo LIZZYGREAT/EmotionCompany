@@ -1026,6 +1026,10 @@ def _build_sample_mapping(
         "profile_all_empty": not any(dim_nonempty.values()),
         "dim_nonempty": dim_nonempty,
         "fit_outcome": "unassigned",
+        # Expose the exact boundary already computed above so independent
+        # diagnostics can reuse the verified Offset mapping without a second
+        # T1/tokenizer pass. This does not alter any A0 output or assignment.
+        "completion_start": start,
     }
     return completion, rendered, normalized_offsets, regions, profile_regions, counts, p_counts, metadata
 

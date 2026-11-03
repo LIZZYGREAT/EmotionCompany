@@ -1,0 +1,28 @@
+version: E03-A0.1-v1
+
+base_a0_config: configs/diagnostics/e03_a0.yaml
+output_root: outputs/diagnostics/e03_a0_1
+
+baseline:
+  token_run_id: E03-A0-TOKEN-FULL-20261103-01
+  ce_run_id: E03-A0-CE-128-GPU-NF4FIX-20261103-095814
+
+audit:
+  seed: 20261103
+  focus_labels:
+    - conservative
+    - high_emotional_expression
+    - indirect
+    - emotionally_stable
+    - games
+    - sensitive
+    - rational
+  positives_per_label: 8
+  positives_per_history_stratum: 4
+  negatives_per_label: 4
+
+ce:
+  seed: 42
+  sample_cap: 128
+  logit_chunk_tokens: 32
+  minimum_label_sample_support: 5
