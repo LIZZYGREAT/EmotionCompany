@@ -58,6 +58,14 @@ class AlignmentError(ValueError):
     """The source sequence cannot be assigned to fields without guessing."""
 
 
+class QuantizationPlacementError(RuntimeError):
+    """The loaded frozen model did not satisfy the requested NF4/CUDA placement."""
+
+    def __init__(self, runtime_facts: dict[str, Any]) -> None:
+        self.runtime_facts = runtime_facts
+        super().__init__("loaded model failed NF4/CUDA placement verification")
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -1290,7 +1298,7 @@ def _load_inference_model(
     }
     facts = inference.inspect_quantization_runtime(model, inspect_config, torch)
     if not facts.get("real_nf4_verified") or facts.get("offload_devices"):
-        raise RuntimeError("loaded model failed NF4/CUDA placement verification")
+        raise QuantizationPlacementError(facts)
     return model, torch, facts
 
 
@@ -1441,8 +1449,10 @@ def run_ce_mode(
                 "sample_count": len(selected),
                 "sample_ids_sha256": selection["selected_sample_ids_sha256"],
                 "model_identity": model_identity,
-                "gpu_model_loaded": False,
+                "gpu_model_loaded": isinstance(exc, QuantizationPlacementError),
             }
+            if isinstance(exc, QuantizationPlacementError):
+                blocked["runtime_facts"] = exc.runtime_facts
             _write_json(run_dir / "ce_summary.json", blocked)
             return {"status": "gpu_blocked", "alignment": alignment_summary, "ce": blocked}
         raise

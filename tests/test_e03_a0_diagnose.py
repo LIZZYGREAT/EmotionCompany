@@ -9,6 +9,7 @@ from src.diagnostics.e03_a0 import (
     AlignmentError,
     PROFILE_DIMS,
     TOP_REGIONS,
+    QuantizationPlacementError,
     TokenAccumulator,
     _aggregate_ce,
     _ce_for_logits,
@@ -191,6 +192,19 @@ def test_ce_mode_requires_a_finite_positive_cap() -> None:
         validate_sample_cap("ce", 129, 128)
     validate_sample_cap("ce", 128, 128)
     validate_sample_cap("token", 0, 128)
+
+
+def test_quantization_placement_failure_retains_runtime_facts() -> None:
+    facts = {
+        "real_nf4_verified": False,
+        "observed_quant_types": ["nf4"],
+        "observed_devices": ["cpu", "cuda:0"],
+        "offload_devices": ["cpu"],
+        "placement_verified": False,
+    }
+    error = QuantizationPlacementError(facts)
+    assert str(error) == "loaded model failed NF4/CUDA placement verification"
+    assert error.runtime_facts == facts
 
 
 def test_run_directory_never_overwrites_existing_output(tmp_path: Path) -> None:
