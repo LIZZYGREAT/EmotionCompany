@@ -120,11 +120,13 @@ def test_loss_breakdown_aggregates_regions_across_batches_with_missing_local_reg
             super().__init__()
             self.embedding = torch.nn.Embedding(16, 8)
             self.output = torch.nn.Linear(8, 16)
+            self.grad_enabled_during_forward = None
 
         def get_input_embeddings(self):
             return self.embedding
 
         def forward(self, input_ids, attention_mask=None):
+            self.grad_enabled_during_forward = torch.is_grad_enabled()
             return SimpleNamespace(logits=self.output(self.embedding(input_ids)))
 
     rows = [
@@ -161,6 +163,7 @@ def test_loss_breakdown_aggregates_regions_across_batches_with_missing_local_reg
     assert result["label_value"]["tokens"] == 1
     assert result["emotion_label"]["tokens"] == 1
     assert result["response_text"]["tokens"] == 3
+    assert trainer.model.grad_enabled_during_forward is False
 
     import pytest
 

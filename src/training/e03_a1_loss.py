@@ -456,24 +456,26 @@ def evaluate_loss_breakdown(trainer: Any, rows: list[dict[str, Any]], *, batch_s
     model.eval()
     totals = {name: {"loss_sum": 0.0, "tokens": 0} for name in ("all_tokens", "user_profile", "label_value", "emotion_label", "response_text")}
     try:
-        for batch in loader:
-            model_batch = {key: value.to(device) for key, value in batch.items() if key in {"input_ids", "attention_mask", "labels"}}
-            labels = model_batch.pop("labels")
-            outputs = model(**model_batch)
-            breakdown = loss_breakdown_from_logits(
-                outputs.logits,
-                labels,
-                batch["primary_region_ids"].to(device),
-                batch["label_value_mask"].to(device),
-            )
-            for name, item in breakdown.items():
-                token_count = int(item["tokens"])
-                if token_count:
-                    mean_ce = item["mean_ce"]
-                    if mean_ce is None:
-                        raise ValueError(f"loss-breakdown region is missing its mean CE: {name}")
-                    totals[name]["loss_sum"] += float(mean_ce) * token_count
-                    totals[name]["tokens"] += token_count
+        with torch.inference_mode():
+            for batch in loader:
+                model_batch = {key: value.to(device) for key, value in batch.items() if key in {"input_ids", "attention_mask", "labels"}}
+                labels = model_batch.pop("labels")
+                outputs = model(**model_batch)
+                breakdown = loss_breakdown_from_logits(
+                    outputs.logits,
+                    labels,
+                    batch["primary_region_ids"].to(device),
+                    batch["label_value_mask"].to(device),
+                )
+                for name, item in breakdown.items():
+                    token_count = int(item["tokens"])
+                    if token_count:
+                        mean_ce = item["mean_ce"]
+                        if mean_ce is None:
+                            raise ValueError(f"loss-breakdown region is missing its mean CE: {name}")
+                        totals[name]["loss_sum"] += float(mean_ce) * token_count
+                        totals[name]["tokens"] += token_count
+                del outputs, breakdown, model_batch, labels
     finally:
         model.train(was_training)
     empty_regions = [name for name, value in totals.items() if value["tokens"] == 0]
