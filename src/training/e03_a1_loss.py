@@ -399,7 +399,7 @@ def loss_breakdown_from_logits(
     *,
     ignore_index: int = -100,
     token_chunk_size: int = 256,
-) -> dict[str, dict[str, float | int]]:
+) -> dict[str, dict[str, float | int | None]]:
     """Aggregate unweighted token CE for the E03-A1 evaluation regions."""
     if logits.ndim != 3 or labels.ndim != 2 or primary_region_ids.shape != labels.shape or label_value_mask.shape != labels.shape:
         raise ValueError("loss-breakdown tensor shapes differ")
@@ -436,11 +436,10 @@ def loss_breakdown_from_logits(
             if bool(mask.any().item()):
                 sums[name] += float(token_losses[mask].sum().item())
                 counts[name] += int(mask.sum().item())
-    result: dict[str, dict[str, float | int]] = {}
+    result: dict[str, dict[str, float | int | None]] = {}
     for name in names:
-        if counts[name] == 0:
-            raise ValueError(f"loss-breakdown region has no supervised tokens: {name}")
-        result[name] = {"tokens": counts[name], "mean_ce": sums[name] / counts[name]}
+        mean_ce = sums[name] / counts[name] if counts[name] else None
+        result[name] = {"tokens": counts[name], "mean_ce": mean_ce}
     return result
 
 
@@ -468,10 +467,21 @@ def evaluate_loss_breakdown(trainer: Any, rows: list[dict[str, Any]], *, batch_s
                 batch["label_value_mask"].to(device),
             )
             for name, item in breakdown.items():
-                totals[name]["loss_sum"] += float(item["mean_ce"]) * int(item["tokens"])
-                totals[name]["tokens"] += int(item["tokens"])
+                token_count = int(item["tokens"])
+                if token_count:
+                    mean_ce = item["mean_ce"]
+                    if mean_ce is None:
+                        raise ValueError(f"loss-breakdown region is missing its mean CE: {name}")
+                    totals[name]["loss_sum"] += float(mean_ce) * token_count
+                    totals[name]["tokens"] += token_count
     finally:
         model.train(was_training)
+    empty_regions = [name for name, value in totals.items() if value["tokens"] == 0]
+    if empty_regions:
+        raise ValueError(
+            "loss-breakdown full Dev subset has no supervised tokens for regions: "
+            + ", ".join(empty_regions)
+        )
     return {
         name: {"tokens": value["tokens"], "mean_ce": value["loss_sum"] / value["tokens"]}
         for name, value in totals.items()

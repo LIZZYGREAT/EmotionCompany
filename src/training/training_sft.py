@@ -47,10 +47,33 @@ EXPECTED_PACKAGES = ("torch", "transformers", "trl", "peft", "bitsandbytes", "da
 RESUME_COMPATIBLE_TRAINING_CODE_SHA256 = frozenset({
     "565a2f8f8a926aade8a7ee0218751c49eda214404c184880d5ca93bf6882bc14",
 })
+# This exact E03-A1 code revision completed the optimizer budget and saved a valid
+# checkpoint, then failed only while aggregating Dev regions one batch at a time.
+E03_A1_EMPTY_BATCH_EVAL_COMPATIBLE_CODE_SHA256 = frozenset({
+    "9408779d9aaa5faacd191a138e4acbe808427d53627de200a79648af4071dae0",
+})
 TRAIN_ROW_FIELDS = {
     "sample_id", "conversation_id", "source_split", "source", "prompt_length",
     "completion_length", "input_ids", "labels",
 }
+
+
+def _resume_compatible_training_code_hashes(experiment_id: str) -> frozenset[str]:
+    compatible = RESUME_COMPATIBLE_TRAINING_CODE_SHA256
+    if experiment_id == "E03-A1":
+        compatible |= E03_A1_EMPTY_BATCH_EVAL_COMPATIBLE_CODE_SHA256
+    return compatible
+
+
+def _checkpoint_reached_training_budget(checkpoint_step: int, max_steps: int) -> bool:
+    if checkpoint_step > max_steps:
+        raise ValueError("resume checkpoint is beyond the configured optimizer-step budget")
+    return checkpoint_step == max_steps
+
+
+def _manifest_records_completed_budget(manifest: dict[str, Any], max_steps: int) -> bool:
+    recorded_steps = manifest.get("optimizer_steps")
+    return recorded_steps is not None and int(recorded_steps) >= max_steps
 
 
 def sha256_file(path: Path) -> str:
@@ -2094,6 +2117,7 @@ def _execute_staged_training(
     if config["experiment_id"] not in {"E01-B-PILOT", "E01-B", "E03-A1"}:
         raise ValueError("staged training accepts only E01-B-PILOT, E01-B, or E03-A1")
     config_sha = _config_identity(config, config_path)
+    compatible_training_code_hashes = _resume_compatible_training_code_hashes(config["experiment_id"])
     if resume_checkpoint is None:
         run_id = run_root.name
         config_snapshot = run_root / "config_snapshot.yaml"
@@ -2140,7 +2164,9 @@ def _execute_staged_training(
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if manifest.get("run_id") != run_id or manifest.get("init_adapter") is not None or manifest.get("experiment_id") != config["experiment_id"] or manifest.get("training_scope") != config["training_scope"]:
             raise ValueError("resume accepts only the same independently initialized Run")
-        if manifest.get("status") in {"passed", "completed"} or manifest.get("optimizer_steps", 0) >= int(config["training"]["max_optimizer_steps"]):
+        if manifest.get("status") in {"passed", "completed"} or _manifest_records_completed_budget(
+            manifest, int(config["training"]["max_optimizer_steps"]),
+        ):
             raise ValueError("completed training Run cannot be resumed")
         if manifest.get("config_sha256") != config_sha or _snapshot_config_identity(config, config_snapshot) != config_sha:
             raise ValueError("resume config does not match the frozen training Run config")
@@ -2162,7 +2188,7 @@ def _execute_staged_training(
             checkpoint_to_resume,
             expected=expected_checkpoint_identity,
             run_id=run_id,
-            compatible_training_code_sha256=RESUME_COMPATIBLE_TRAINING_CODE_SHA256,
+            compatible_training_code_sha256=compatible_training_code_hashes,
         )
         newer = [path for path in checkpoint_root.glob("checkpoint-*") if re.fullmatch(r"checkpoint-[0-9]+", path.name) and int(path.name.split("-")[-1]) > checkpoint_record["optimizer_step"]]
         if newer:
@@ -2171,7 +2197,7 @@ def _execute_staged_training(
             "checkpoint": str(checkpoint_to_resume),
             "checkpoint_manifest_sha256": sha256_file(checkpoint_to_resume / "checkpoint_manifest.json"),
             "optimizer_step": checkpoint_record["optimizer_step"],
-            "compatible_legacy_training_code": checkpoint_record.get("training_code_sha256") in RESUME_COMPATIBLE_TRAINING_CODE_SHA256,
+            "compatible_legacy_training_code": checkpoint_record.get("training_code_sha256") in compatible_training_code_hashes,
             "resumed_at_utc": _now(),
         })
         manifest.update(status="running", stage="resuming", resume_from_checkpoint=str(checkpoint_to_resume))
@@ -2296,9 +2322,24 @@ def _execute_staged_training(
             raise ValueError("--stop-after-step must precede the final optimizer step")
         if previous_training_seconds >= float(config["training"]["max_training_seconds"]):
             raise ValueError("the frozen training time budget has already been exhausted")
-        training_started = time.perf_counter()
-        trainer.train(resume_from_checkpoint=str(checkpoint_to_resume) if checkpoint_to_resume else None)
-        manifest["training_seconds"] = previous_training_seconds + time.perf_counter() - training_started
+        finalize_checkpoint_only = (
+            checkpoint_to_resume is not None
+            and _checkpoint_reached_training_budget(
+                starting_step, int(config["training"]["max_optimizer_steps"]),
+            )
+        )
+        if finalize_checkpoint_only:
+            trainer._load_from_checkpoint(str(checkpoint_to_resume), model=model)
+            trainer.state = type(trainer.state).load_from_json(str(checkpoint_to_resume / "trainer_state.json"))
+            if int(trainer.state.global_step) != starting_step:
+                raise ValueError("finalization checkpoint Trainer state differs from its optimizer step")
+            attempt_training_seconds = 0.0
+            manifest["training_seconds"] = previous_training_seconds
+        else:
+            training_started = time.perf_counter()
+            trainer.train(resume_from_checkpoint=str(checkpoint_to_resume) if checkpoint_to_resume else None)
+            attempt_training_seconds = time.perf_counter() - training_started
+            manifest["training_seconds"] = previous_training_seconds + attempt_training_seconds
         a1_formula_audit_calls = None
         if config["experiment_id"] == "E03-A1":
             a1_formula_audit_calls = int(getattr(trainer, "a1_loss_formula_audit_calls", 0))
@@ -2313,9 +2354,10 @@ def _execute_staged_training(
         manifest.setdefault("training_attempts", []).append({
             "starting_optimizer_step": starting_step,
             "ending_optimizer_step": int(trainer.state.global_step),
-            "training_seconds": manifest["training_seconds"] - previous_training_seconds,
+            "training_seconds": attempt_training_seconds,
             "cuda_memory": inference.cuda_memory_facts(torch),
             "stop_reason": callback.stop_reason,
+            **({"finalization_only_checkpoint": True} if finalize_checkpoint_only else {}),
             **({"loss_formula_audit_calls": a1_formula_audit_calls, "loss_formula_audit_status": "passed"} if config["experiment_id"] == "E03-A1" else {}),
         })
         training_started = None

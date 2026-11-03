@@ -110,6 +110,64 @@ def test_loss_breakdown_reports_global_token_means_for_nested_label_values():
     assert result["label_value"]["tokens"] == 1
 
 
+def test_loss_breakdown_aggregates_regions_across_batches_with_missing_local_regions():
+    from types import SimpleNamespace
+
+    from src.training.e03_a1_loss import evaluate_loss_breakdown
+
+    class TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embedding = torch.nn.Embedding(16, 8)
+            self.output = torch.nn.Linear(8, 16)
+
+        def get_input_embeddings(self):
+            return self.embedding
+
+        def forward(self, input_ids, attention_mask=None):
+            return SimpleNamespace(logits=self.output(self.embedding(input_ids)))
+
+    rows = [
+        {
+            "sample_id": "response-only",
+            "input_ids": [1, 2, 3],
+            "labels": [-100, 2, 3],
+            "prompt_length": 1,
+            "completion_length": 2,
+            "loss_weights": [0.0, 1.0, 1.0],
+            "primary_region_ids": [0, 3, 3],
+            "label_value_mask": [0, 0, 0],
+        },
+        {
+            "sample_id": "mixed-regions",
+            "input_ids": [4, 5, 6, 7],
+            "labels": [-100, 5, 6, 7],
+            "prompt_length": 1,
+            "completion_length": 3,
+            "loss_weights": [0.0, 1.0, 1.0, 1.0],
+            "primary_region_ids": [0, 1, 2, 3],
+            "label_value_mask": [0, 1, 0, 0],
+        },
+    ]
+    trainer = SimpleNamespace(
+        model=TinyModel(),
+        data_collator=E03A1DataCollator(SFTDataCollator(pad_token_id=0)),
+    )
+
+    result = evaluate_loss_breakdown(trainer, rows, batch_size=1)
+
+    assert result["all_tokens"]["tokens"] == 5
+    assert result["user_profile"]["tokens"] == 1
+    assert result["label_value"]["tokens"] == 1
+    assert result["emotion_label"]["tokens"] == 1
+    assert result["response_text"]["tokens"] == 3
+
+    import pytest
+
+    with pytest.raises(ValueError, match="full Dev subset has no supervised tokens.*label_value"):
+        evaluate_loss_breakdown(trainer, rows[:1], batch_size=1)
+
+
 def test_e03_a1_trainer_uses_weighted_loss_and_keeps_region_fields_off_model(tmp_path):
     import copy
 
@@ -333,3 +391,30 @@ def test_train_schema_path_is_verified_against_d043_and_d042_manifests(tmp_path)
     d042_manifest["input_hashes_unchanged_after_run"]["train_schema"] = "0" * 64
     with pytest.raises(ValueError, match="D0.4.2/D0.4.3 Manifest identities"):
         training_sft._verified_train_schema_path(sft_manifest, d042_manifest)
+
+
+def test_completed_step_checkpoint_can_be_finalized_without_an_extra_optimizer_step():
+    import pytest
+
+    from src.training import training_sft
+
+    assert training_sft._checkpoint_reached_training_budget(128, 128)
+    assert not training_sft._checkpoint_reached_training_budget(96, 128)
+    with pytest.raises(ValueError, match="beyond the configured optimizer-step budget"):
+        training_sft._checkpoint_reached_training_budget(129, 128)
+
+
+def test_failed_run_with_missing_recorded_step_count_can_resume_from_checkpoint():
+    from src.training import training_sft
+
+    assert not training_sft._manifest_records_completed_budget({"status": "failed", "optimizer_steps": None}, 128)
+    assert not training_sft._manifest_records_completed_budget({"status": "interrupted", "optimizer_steps": 96}, 128)
+    assert training_sft._manifest_records_completed_budget({"status": "completed", "optimizer_steps": 128}, 128)
+
+
+def test_e03_a1_resume_allows_only_the_known_post_eval_failure_code_hash():
+    from src.training import training_sft
+
+    failed_run_code_sha = "9408779d9aaa5faacd191a138e4acbe808427d53627de200a79648af4071dae0"
+    assert failed_run_code_sha in training_sft._resume_compatible_training_code_hashes("E03-A1")
+    assert failed_run_code_sha not in training_sft._resume_compatible_training_code_hashes("E01-B")
