@@ -18,12 +18,14 @@ data:
   train_path: data/processed/sft/v1/train.jsonl
   dev_path: data/processed/sft/v1/dev.jsonl
   normalized_train_path: data/processed/v1/train.jsonl
+  normalized_dev_path: data/processed/v1/dev.jsonl
   sft_manifest: outputs/sft_data/v1/manifest.json
   d03_manifest: outputs/data_pipeline/v1/manifest.json
   d042_manifest: outputs/token_audit/v1/manifest.json
   expected_train_rows: 16192
   expected_dev_rows: 1821
   expected_source_train_rows: 16312
+  expected_source_dev_rows: 1833
   output_root: outputs/training
   init_adapter: null
   resume_from_checkpoint: null

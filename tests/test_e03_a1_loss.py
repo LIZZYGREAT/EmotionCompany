@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from src.data.sft_collator import SFTDataCollator
 from src.training.e03_a1_loss import (
     E03A1DataCollator,
+    build_alignment_cache,
     build_loss_weights,
     independently_recomputed_weighted_causal_lm_loss,
     loss_breakdown_from_logits,
@@ -233,3 +234,78 @@ def test_short_stage_gate_requires_label_gain_without_total_ce_regression(tmp_pa
         assert "did not pass" in str(exc)
     else:
         raise AssertionError("a total Dev CE increase over 1% must fail the short-stage gate")
+
+
+def test_dev_alignment_reads_matching_source_from_normalized_d03_dev(tmp_path, monkeypatch):
+    from src.diagnostics import e03_a0 as a0
+    from src.diagnostics import e03_a0_1_profile as a01
+
+    dev_sample_id = "train:fixture:dev"
+    normalized_train = tmp_path / "normalized_train.jsonl"
+    normalized_train.write_text('{"sample_id":"train:fixture:other"}\n', encoding="utf-8")
+    normalized_dev = tmp_path / "normalized_dev.jsonl"
+    normalized_dev.write_text(
+        json.dumps({
+            "sample_id": dev_sample_id,
+            "conversation_id": "fixture-conversation",
+            "fixture_split": "d03_dev",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    sft_train = tmp_path / "sft_train.jsonl"
+    sft_train.write_text("{}\n", encoding="utf-8")
+    sft_dev = tmp_path / "sft_dev.jsonl"
+    sft_dev.write_text("{}\n", encoding="utf-8")
+
+    seen_sources = []
+
+    def fake_build_sample_mapping(**kwargs):
+        seen_sources.append((kwargs["source"], kwargs["expected_sft_split"]))
+        return (
+            "completion",
+            "rendered",
+            [(0, 1), (1, 2)],
+            ["other", "user_profile"],
+            [None, "profile_label_value"],
+            {},
+            {},
+            {"completion_start": 0},
+        )
+
+    monkeypatch.setattr(a0, "_build_sample_mapping", fake_build_sample_mapping)
+    monkeypatch.setattr(a01, "_profile_schema", lambda _schema: {})
+    monkeypatch.setattr(
+        a01,
+        "assign_profile_fine_regions",
+        lambda **_kwargs: {"token_regions": ["other", "profile_label_value"]},
+    )
+
+    mappings, facts = build_alignment_cache(
+        config={
+            "data": {"train_path": str(sft_train), "dev_path": str(sft_dev)},
+            "protocol": {
+                "p0_sha256": "p0",
+                "tokenizer_signature_sha256": "tokenizer",
+                "chat_template_sha256": "template",
+                "max_prompt_tokens": 128,
+            },
+        },
+        tokenizer=object(),
+        prompt_text="",
+        schema={"fixture": True},
+        train_samples=[],
+        dev_rows=[{"sample_id": dev_sample_id, "input_ids": [1, 2], "labels": [-100, 2]}],
+        normalized_train_path=normalized_train,
+        normalized_dev_path=normalized_dev,
+        cache_root=tmp_path / "cache",
+    )
+
+    assert len(seen_sources) == 1
+    source, expected_split = seen_sources[0]
+    assert source["fixture_split"] == "d03_dev"
+    assert expected_split == "dev"
+    assert mappings[("dev", dev_sample_id)] == {
+        "primary_region_ids": [0, 1],
+        "label_value_mask": [0, 1],
+    }
+    assert facts["normalized_dev_sha256"]

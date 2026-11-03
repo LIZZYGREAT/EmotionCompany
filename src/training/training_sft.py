@@ -416,7 +416,20 @@ def _training_rows(config: dict[str, Any]) -> tuple[Path, Path, Path, dict[str, 
         raise ValueError("D0.3 Train data is missing or differs from its manifest")
     if output.get("records") != int(data["expected_source_train_rows"]):
         raise ValueError("D0.3 Train row count differs from E01 config")
-    return train_path, dev_path, normalized_train_path, {"sft": manifest, "d03": d03, "d03_manifest_path": d03_manifest_path}
+    normalized_dev_path = None
+    if config["experiment_id"] == "E03-A1":
+        normalized_dev_path = _resolve(data["normalized_dev_path"])
+        dev_output = next((item for item in d03.get("outputs", []) if item.get("path") == data["normalized_dev_path"]), None)
+        if dev_output is None or sha256_file(normalized_dev_path) != dev_output.get("sha256"):
+            raise ValueError("D0.3 Dev data is missing or differs from its manifest")
+        if dev_output.get("records") != int(data["expected_source_dev_rows"]):
+            raise ValueError("D0.3 Dev row count differs from E03-A1 config")
+    return train_path, dev_path, normalized_train_path, {
+        "sft": manifest,
+        "d03": d03,
+        "d03_manifest_path": d03_manifest_path,
+        "normalized_dev_path": normalized_dev_path,
+    }
 
 
 def _select_real_samples(config: dict[str, Any], train_path: Path, normalized_path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -594,6 +607,7 @@ def _preflight(config: dict[str, Any], *, include_model_hash: bool = True) -> tu
                 train_samples=samples,
                 dev_rows=_dev_rows,
                 normalized_train_path=normalized_path,
+                normalized_dev_path=manifests["normalized_dev_path"],
                 cache_root=_resolve(config["data"]["output_root"]) / "E03-A1-mapping-cache",
             )
         checks["data"] = {
@@ -1973,6 +1987,7 @@ def _staged_checkpoint_identity(config: dict[str, Any], preflight: dict[str, Any
             loss_variant=config["loss_contrast"]["variant"],
             loss_stage=config["training_scope"],
             loss_mapping_sha256=(data_facts.get("loss_mapping") or {}).get("mapping_sha256"),
+            normalized_dev_sha256=(data_facts.get("loss_mapping") or {}).get("normalized_dev_sha256"),
         )
     return identity
 
@@ -2160,7 +2175,7 @@ def _execute_staged_training(
         torch = __import__("torch")
         seed = int(config["training"]["seed"])
         _seed_everything(seed, torch)
-        train_path, dev_path, normalized_path, _ = _training_rows(config)
+        train_path, dev_path, normalized_path, training_manifests = _training_rows(config)
         samples, selected_metadata = _select_real_samples(config, train_path, normalized_path)
         _serialize_selected_samples(run_root / "selected_samples.json", samples)
         dev_rows, dev_selection_facts = _select_sft_dev_rows(config, dev_path)
@@ -2179,6 +2194,7 @@ def _execute_staged_training(
                 train_samples=samples,
                 dev_rows=dev_rows,
                 normalized_train_path=normalized_path,
+                normalized_dev_path=training_manifests["normalized_dev_path"],
                 cache_root=_resolve(config["data"]["output_root"]) / "E03-A1-mapping-cache",
             )
             if loss_mapping_facts["mapping_sha256"] != current_identity.get("loss_mapping_sha256"):

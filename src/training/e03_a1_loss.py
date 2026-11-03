@@ -162,6 +162,7 @@ def build_alignment_cache(
     train_samples: list[dict[str, Any]],
     dev_rows: list[dict[str, Any]],
     normalized_train_path: Path,
+    normalized_dev_path: Path,
     cache_root: Path,
 ) -> tuple[dict[tuple[str, str], dict[str, list[int]]], dict[str, Any]]:
     """Build or load A0/A0.1-aligned region IDs without storing dialogue text."""
@@ -175,12 +176,12 @@ def build_alignment_cache(
         raise ValueError("duplicate sample IDs in E03-A1 mapping inputs")
     source_by_id: dict[str, dict[str, Any]] = {}
     dev_id_set = set(dev_ids)
-    for source in training_sft._iter_jsonl(normalized_train_path):
+    for source in training_sft._iter_jsonl(normalized_dev_path):
         sample_id = str(source.get("sample_id", ""))
         if sample_id in dev_id_set:
             source_by_id[sample_id] = source
     if set(source_by_id) != dev_id_set:
-        raise ValueError("one or more selected SFT Dev IDs are absent from normalized D0.3 Train")
+        raise ValueError("one or more selected SFT Dev IDs are absent from normalized D0.3 Dev")
 
     module_paths = (
         Path(__file__),
@@ -193,6 +194,7 @@ def build_alignment_cache(
         "train_sha256": training_sft.sha256_file(training_sft._resolve(config["data"]["train_path"])),
         "dev_sha256": training_sft.sha256_file(training_sft._resolve(config["data"]["dev_path"])),
         "normalized_train_sha256": training_sft.sha256_file(normalized_train_path),
+        "normalized_dev_sha256": training_sft.sha256_file(normalized_dev_path),
         "p0_sha256": config["protocol"]["p0_sha256"],
         "tokenizer_signature_sha256": config["protocol"]["tokenizer_signature_sha256"],
         "chat_template_sha256": config["protocol"]["chat_template_sha256"],
@@ -299,6 +301,7 @@ def build_alignment_cache(
         "cache_path": str(cache_path),
         "train_rows": len(train_samples),
         "dev_rows": len(dev_rows),
+        "normalized_dev_sha256": identity["normalized_dev_sha256"],
         "train_active_tokens": train_active,
         "train_user_profile_tokens": profile_active,
         "train_exact_label_value_tokens": label_active,
