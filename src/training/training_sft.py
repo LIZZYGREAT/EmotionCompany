@@ -71,9 +71,8 @@ def _checkpoint_reached_training_budget(checkpoint_step: int, max_steps: int) ->
     return checkpoint_step == max_steps
 
 
-def _manifest_records_completed_budget(manifest: dict[str, Any], max_steps: int) -> bool:
-    recorded_steps = manifest.get("optimizer_steps")
-    return recorded_steps is not None and int(recorded_steps) >= max_steps
+def _manifest_is_terminal(manifest: dict[str, Any]) -> bool:
+    return manifest.get("status") in {"passed", "completed"}
 
 
 def sha256_file(path: Path) -> str:
@@ -1758,6 +1757,34 @@ def _save_adapter(model: Any, adapter_dir: Path, config: dict[str, Any]) -> dict
     return identity
 
 
+def _reuse_saved_adapter_from_checkpoint(
+    adapter_dir: Path,
+    checkpoint_dir: Path,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Reuse a completed Adapter only when its weights/config match the verified checkpoint."""
+    adapter_identity, adapter_config = inference.adapter_weight_identity(adapter_dir)
+    checkpoint_identity, checkpoint_config = inference.adapter_weight_identity(checkpoint_dir)
+    if adapter_identity.get("weight_sha256") != checkpoint_identity.get("weight_sha256"):
+        raise ValueError("existing Adapter weights do not match the final Trainer checkpoint")
+
+    model_id = config["base_model"]["model_id"]
+    if adapter_config.get("base_model_name_or_path") != model_id:
+        raise ValueError("existing Adapter does not declare the configured Base model ID")
+
+    def normalized(value: dict[str, Any]) -> dict[str, Any]:
+        result = dict(value)
+        result["base_model_name_or_path"] = model_id
+        target_modules = result.get("target_modules")
+        if isinstance(target_modules, list):
+            result["target_modules"] = sorted(target_modules)
+        return result
+
+    if normalized(adapter_config) != normalized(checkpoint_config):
+        raise ValueError("existing Adapter configuration does not match the final Trainer checkpoint")
+    return adapter_identity
+
+
 def _verify_step_proof(path: Path, run_root: Path, expected_base_sha: str) -> dict[str, Any]:
     resolved = path.resolve()
     proof = json.loads(resolved.read_text(encoding="utf-8"))
@@ -2164,9 +2191,7 @@ def _execute_staged_training(
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if manifest.get("run_id") != run_id or manifest.get("init_adapter") is not None or manifest.get("experiment_id") != config["experiment_id"] or manifest.get("training_scope") != config["training_scope"]:
             raise ValueError("resume accepts only the same independently initialized Run")
-        if manifest.get("status") in {"passed", "completed"} or _manifest_records_completed_budget(
-            manifest, int(config["training"]["max_optimizer_steps"]),
-        ):
+        if _manifest_is_terminal(manifest):
             raise ValueError("completed training Run cannot be resumed")
         if manifest.get("config_sha256") != config_sha or _snapshot_config_identity(config, config_snapshot) != config_sha:
             raise ValueError("resume config does not match the frozen training Run config")
@@ -2398,14 +2423,23 @@ def _execute_staged_training(
             optimizer_step=int(trainer.state.global_step),
             max_optimizer_steps=int(config["training"]["max_optimizer_steps"]),
         )
-        adapter_facts = _save_adapter(model, adapter_dir, config)
+        if adapter_dir.exists():
+            if not finalize_checkpoint_only or checkpoint_to_resume is None:
+                raise ValueError("existing Adapter can only be reused while finalizing its matching checkpoint")
+            adapter_facts = _reuse_saved_adapter_from_checkpoint(
+                adapter_dir,
+                checkpoint_to_resume,
+                config,
+            )
+        else:
+            adapter_facts = _save_adapter(model, adapter_dir, config)
         if {name for name, _ in _trainable_parameters(model)} != {name for name, _ in trainable}:
             raise RuntimeError("trainable parameter scope changed during training")
         base_before = inference._weight_identity(base_path, {
             "model_id": config["base_model"]["model_id"],
             "model_revision": config["base_model"].get("revision"),
         })
-        probe_prompt = _make_probe_prompt(samples, tokenizer, _prompt, int(config["protocol"]["max_prompt_tokens"]))
+        probe_prompt = _make_probe_prompt(samples, tokenizer, prompt_text, int(config["protocol"]["max_prompt_tokens"]))
         probe_budget = int(config["evaluation"]["probe_max_new_tokens"])
         probe_before = _capture_probe(model, tokenizer, probe_prompt, max_new_tokens=probe_budget)
         _write_json(run_root / "generation_probe.json", {

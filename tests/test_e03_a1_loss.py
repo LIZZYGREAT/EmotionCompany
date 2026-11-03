@@ -407,12 +407,67 @@ def test_completed_step_checkpoint_can_be_finalized_without_an_extra_optimizer_s
         training_sft._checkpoint_reached_training_budget(129, 128)
 
 
-def test_failed_run_with_missing_recorded_step_count_can_resume_from_checkpoint():
+def test_failed_run_at_completed_step_budget_can_resume_finalization():
     from src.training import training_sft
 
-    assert not training_sft._manifest_records_completed_budget({"status": "failed", "optimizer_steps": None}, 128)
-    assert not training_sft._manifest_records_completed_budget({"status": "interrupted", "optimizer_steps": 96}, 128)
-    assert training_sft._manifest_records_completed_budget({"status": "completed", "optimizer_steps": 128}, 128)
+    assert not training_sft._manifest_is_terminal({"status": "failed", "optimizer_steps": 128})
+    assert not training_sft._manifest_is_terminal({"status": "failed", "optimizer_steps": None})
+    assert not training_sft._manifest_is_terminal({"status": "interrupted", "optimizer_steps": 96})
+    assert training_sft._manifest_is_terminal({"status": "completed", "optimizer_steps": 128})
+    assert training_sft._manifest_is_terminal({"status": "passed", "optimizer_steps": 128})
+
+
+def test_finalization_reuses_adapter_only_when_it_matches_checkpoint(tmp_path):
+    import pytest
+
+    from src.training import training_sft
+
+    adapter_dir = tmp_path / "adapter"
+    checkpoint_dir = tmp_path / "checkpoint-128"
+    adapter_dir.mkdir()
+    checkpoint_dir.mkdir()
+    base_model_id = "Qwen/Qwen3-1.7B"
+    common = {
+        "r": 8,
+        "lora_alpha": 16,
+        "target_modules": ["q_proj", "k_proj", "v_proj"],
+        "peft_type": "LORA",
+        "task_type": "CAUSAL_LM",
+    }
+    adapter_config = {**common, "base_model_name_or_path": base_model_id}
+    checkpoint_config = {
+        **common,
+        "base_model_name_or_path": "/cache/qwen",
+        "target_modules": list(reversed(common["target_modules"])),
+    }
+    for folder, config in ((adapter_dir, adapter_config), (checkpoint_dir, checkpoint_config)):
+        (folder / "adapter_config.json").write_text(json.dumps(config), encoding="utf-8")
+        (folder / "adapter_model.safetensors").write_bytes(b"same verified adapter weights")
+
+    identity = training_sft._reuse_saved_adapter_from_checkpoint(
+        adapter_dir,
+        checkpoint_dir,
+        {"base_model": {"model_id": base_model_id}},
+    )
+    assert identity["identity_status"] == "observed"
+
+    (adapter_dir / "adapter_model.safetensors").write_bytes(b"different weights")
+    with pytest.raises(ValueError, match="do not match the final Trainer checkpoint"):
+        training_sft._reuse_saved_adapter_from_checkpoint(
+            adapter_dir,
+            checkpoint_dir,
+            {"base_model": {"model_id": base_model_id}},
+        )
+
+    (adapter_dir / "adapter_model.safetensors").write_bytes(b"same verified adapter weights")
+    adapter_config["lora_alpha"] = 32
+    (adapter_dir / "adapter_config.json").write_text(json.dumps(adapter_config), encoding="utf-8")
+    with pytest.raises(ValueError, match="configuration does not match"):
+        training_sft._reuse_saved_adapter_from_checkpoint(
+            adapter_dir,
+            checkpoint_dir,
+            {"base_model": {"model_id": base_model_id}},
+        )
 
 
 def test_e03_a1_resume_allows_only_the_known_post_eval_failure_code_hash():
