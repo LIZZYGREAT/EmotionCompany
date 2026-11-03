@@ -73,7 +73,8 @@
 
 ## 八、本地代理评分（情绪与画像）
 
-Gold 取自 al_public.jsonl 每个 prediction_point 的 	arget。口径：本地实现，标签归一化与空值处理按本项目规则，不是官方评分器，只能自比。
+Gold 取自 `val_public.jsonl` 每个 prediction_point 的 `target`。口径：本地实现，不是官方评分器，只能自比。评分前做了两件事：非 list 的画像字段（如底模把 `style` 写成字符串）整维丢弃，不在词表里的标签丢弃；所以明细里的预测是归一再评的，不是 raw 原样，直接用 raw 复核会差出几百处。
+al_public.jsonl 每个 prediction_point 的 	arget。口径：本地实现，标签归一化与空值处理按本项目规则，不是官方评分器，只能自比。
 
 | Adapter | 情绪准确率 | 画像 33 标签 Micro-F1 | Precision | Recall | personality | interests | style |
 |---|---:|---:|---:|---:|---:|---:|---:|
