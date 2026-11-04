@@ -1,0 +1,142 @@
+version: E03-A3-short-training-v1
+experiment_id: E03-A3
+status: approved_for_short_contrast
+training_scope: short_contrast
+authorization:
+  scope: E03-A3-stage-3-short-contrast
+  authorized: true
+  authorized_on: 2026-11-04
+  source: explicit_user_authorization_in_task_conversation
+
+identity:
+  e01_b_training_run_root: outputs/training/E01-B-FULL-20261028-133805
+  expected_e01_b_manifest_sha256: 9204b7cb374765438fd23054078d28992b240d50c4df8763cae0817f0d7752d7
+  expected_sft_train_sha256: 072076d1a74fe1e29e89a598d2e6acee7188624de0738bfecfe3ea19267f1e79
+  expected_normalized_train_sha256: 1f1030c146792b21c78d2cc2ced83d1e202670562e1b2344a44ed2d43892aaa2
+  expected_d03_manifest_sha256: 605867b5ab0162de05ea9e396bffd574cd4029c5adc3c29d851f41ff73a96b8d
+  expected_sft_manifest_sha256: 26356695d527abb6f24c56f111fff92c8c0b51d0387a726491db6e477e6cfb97
+  expected_d042_manifest_sha256: dd2ef98b33081a1606c431e34bede875cfb41217550ddcc6c27f01a5a5ee5210
+  expected_official_data_schema_sha256: a9467e520b06a96859acaa2ff022e395d08ff6ad5e8ae3532a22cc24c630cada
+  expected_output_schema_sha256: 91c42d56ae433212aab7905eabdbb96cf8463c2f887dc46b3f31647ab3a5d591
+  expected_base_weight_sha256: 005d20550c04f4e246e5b434448786b44a0196b47d758d0acc77aba279e5bbc5
+  expected_initial_adapter_weight_sha256: 77b61e8a4caf46f54a8c813e98def488c7a8493fe891966e47df1cdac6df7d67
+  expected_initial_adapter_config_sha256: 05d578eb242868385839b2bc779c5cb88911973db766e2a793cb361b42aafafd
+  diagnosis_run_root: outputs/diagnostics/e03_a3/E03-A3-DIAG-20261104-05
+  expected_diagnosis_aggregate_sha256: 92175928bd991253e1cf63e8a778f109f7d1479fd7edc4068f9151da5673d897
+  expected_frozen_eval_selection_sha256: 138bc2bf7d07a759ec0305770a43ac5065fba2a2965137430a156c59d6be8c39
+  expected_frozen_eval_ids_sha256: d3c84beb6227e87c0fd09e425619635cd9fc6bac5b087e3f1010fb089f4ff8d2
+
+data:
+  split: train
+  train_path: data/processed/sft/v1/train.jsonl
+  normalized_train_path: data/processed/v1/train.jsonl
+  sft_manifest: outputs/sft_data/v1/manifest.json
+  d03_manifest: outputs/data_pipeline/v1/manifest.json
+  d042_manifest: outputs/token_audit/v1/manifest.json
+  official_data_schema: data/train/train_public.schema.json
+  output_root: outputs/training/E03-A3-short
+  expected_train_rows: 16192
+  expected_d03_train_rows: 16312
+
+base_model:
+  model_id: Qwen/Qwen3-1.7B
+  revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  local_path: participant/model
+  expected_weight_sha256: 005d20550c04f4e246e5b434448786b44a0196b47d758d0acc77aba279e5bbc5
+
+adapter_init:
+  source: outputs/training/E01-B-FULL-20261028-133805/adapter
+  expected_weight_sha256: 77b61e8a4caf46f54a8c813e98def488c7a8493fe891966e47df1cdac6df7d67
+  expected_config_sha256: 05d578eb242868385839b2bc779c5cb88911973db766e2a793cb361b42aafafd
+  load_trainable: true
+  preserve_saved_tensor_values: true
+  optimizer_state: fresh
+  resume_from_checkpoint: null
+
+protocol:
+  prompt_path: configs/prompts/p0.txt
+  prompt_sha256: d427e4996d0075a3adfe03ae25881d093687a6565f5b037f605accecc84c70b2
+  runner_config: participant/configs/inference_config.json
+  output_schema: participant/templates/submission_schema.json
+  tokenizer_id: Qwen/Qwen3-1.7B
+  tokenizer_revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  tokenizer_signature_sha256: 1662c9e99c6185441026a168b2dd6b09af103dc6dc3563b72f598411f14d1913
+  chat_template_sha256: a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8
+  eos_token_id: 151645
+  max_train_seq_length: 2048
+  max_prompt_tokens: 1280
+  max_new_tokens: 1200
+  history_policy: T1_recent_contiguous_complete_message_suffix
+  format_version: F2
+  thinking: false
+  packing: false
+  padding_free: false
+  generation:
+    do_sample: false
+
+quantization:
+  method: bitsandbytes_4bit
+  quant_type: nf4
+  compute_dtype: bfloat16
+  use_double_quant: true
+  device_map: auto
+  cpu_disk_offload: false
+
+lora:
+  r: 8
+  alpha: 16
+  dropout: 0.0
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  bias: none
+
+optimizer:
+  name: AdamW
+  learning_rate: 0.0001
+  lr_scheduler: constant
+  warmup_steps: 0
+  weight_decay: 0.0
+
+sampler:
+  version: e03_a3_short_history_mixture_v1
+  seed: 42
+  raw_history_max_messages: 4
+  natural_fraction: 0.5
+  targeted_fraction: 0.5
+  targeted_gold_all_empty_fraction: 0.5
+  targeted_gold_nonempty_fraction: 0.5
+  candidate_optimizer_window: [natural_full_train, short_history_gold_empty, natural_full_train, short_history_gold_nonempty]
+  replacement_within_target_strata: true
+
+training:
+  seed: 42
+  per_device_micro_batch_size: 1
+  gradient_accumulation_steps: 4
+  max_optimizer_steps: 128
+  checkpoint_steps: [64, 128]
+  save_total_limit: 2
+  gradient_checkpointing: true
+  max_training_seconds: 7200
+  min_free_disk_gb: 5
+  min_total_vram_gb: 8
+  min_free_vram_gb: 6
+  optimizer_state_resume_enabled: false
+
+evaluation:
+  run_root: outputs/evaluation/e03_a3/short
+  e01_b_full_eval_run_root: outputs/evaluation/e01_b/full/E01-B-EVAL-20261028-223105
+  e01_b_full_eval_manifest_sha256: d538ec2e972dc89c8df5ea5af533e3a267f0eed41a002185193fbab694803615
+  frozen_dataset_scope: development_proxy
+  frozen_diagnosis_run_root: outputs/diagnostics/e03_a3/E03-A3-DIAG-20261104-05
+  frozen_eval_points: 224
+  frozen_eval_conversations: 101
+  frozen_eval_input_sha256: 60b33016c53ca65203052c231717efecc07c441e33069a2cd4800148deaec355
+  frozen_eval_references_sha256: 21ce9928a17ea2a6852c7c96e4a291732a453145781f2b6061991f4fa9a3a9d2
+  frozen_eval_id_map_sha256: 13773ff4feb349819de4bc9e00d131603ad0943244c1cc0050b582c7ba777b23
+  do_sample: false
+  max_new_tokens: 1200
+  probe_max_new_tokens: 64
+  bootstrap_seed: 42
+  bootstrap_repetitions: 1000
+  smoke_points: 64
+  full_dev_generation_rows: 1833
+  full_dev_generation_authorization: separate_required
