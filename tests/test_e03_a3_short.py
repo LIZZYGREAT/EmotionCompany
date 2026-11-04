@@ -1,0 +1,179 @@
+from __future__ import annotations
+
+import pytest
+
+from scripts.e03_a3_short_evaluate import paired_cluster_bootstrap
+from src.training.e03_a3_sampling import (
+    NATURAL,
+    SHORT_EMPTY,
+    SHORT_NONEMPTY,
+    build_schedule,
+    materialize_schedule,
+    prepare_training_records,
+    schedule_summary,
+)
+
+
+EOS = 151645
+ENUMS = {
+    "emotion_label": ["neutral"],
+    "personality_traits": ["sensitive"],
+    "interests": ["music"],
+    "style": ["direct"],
+}
+
+
+def _gold(nonempty: bool) -> dict[str, list[str]]:
+    return {
+        "personality_traits": ["sensitive"] if nonempty else [],
+        "interests": [],
+        "style": [],
+    }
+
+
+def _source(index: int, *, history_length: int, nonempty: bool) -> dict:
+    history = []
+    first_role = "assistant" if history_length % 2 == 0 else "user"
+    for position in range(history_length):
+        role = first_role if position % 2 == 0 else ("user" if first_role == "assistant" else "assistant")
+        history.append({"role": role, "content": f"message {index}-{position}"})
+    return {
+        "sample_id": f"train:sample-{index}",
+        "conversation_id": f"conversation-{index // 2}",
+        "history": history,
+        "target": {"user_profile": _gold(nonempty)},
+    }
+
+
+def _encoded(source: dict) -> dict:
+    return {
+        "sample_id": source["sample_id"],
+        "conversation_id": source["conversation_id"],
+        "source_split": "train",
+        "source": {},
+        "prompt_length": 2,
+        "completion_length": 3,
+        "input_ids": [11, 12, 13, EOS, 198],
+        "labels": [-100, -100, 13, EOS, 198],
+    }
+
+
+def _records() -> list[dict]:
+    sources = []
+    encoded = []
+    for index in range(16):
+        sources.append(_source(
+            index,
+            history_length=2 if index < 8 else 6,
+            nonempty=4 <= index < 8 or index >= 8,
+        ))
+        encoded.append(_encoded(sources[-1]))
+    return prepare_training_records(
+        encoded,
+        sources,
+        ENUMS,
+        expected_rows=16,
+        eos_token_id=EOS,
+        max_sequence_length=32,
+    )
+
+
+def test_prepare_training_records_checks_join_mask_eos_and_history() -> None:
+    records = _records()
+
+    assert len(records) == 16
+    assert records[0]["raw_history_length"] == 2
+    assert records[0]["gold_profile_empty"] is True
+    assert records[4]["gold_profile_empty"] is False
+    assert records[0]["encoded"]["labels"][-2] == EOS
+
+
+def test_prepare_training_records_rejects_masked_completion_eos() -> None:
+    sources = [_source(0, history_length=2, nonempty=False)]
+    row = _encoded(sources[0])
+    row["labels"][3] = -100
+
+    with pytest.raises(ValueError, match="completion labels"):
+        prepare_training_records(
+            [row], sources, ENUMS, expected_rows=1, eos_token_id=EOS, max_sequence_length=32,
+        )
+
+
+def test_control_and_candidate_schedules_are_deterministic_and_balanced() -> None:
+    records = _records()
+    kwargs = {
+        "seed": 42,
+        "per_device_micro_batch_size": 1,
+        "gradient_accumulation_steps": 4,
+    }
+    control = build_schedule(records, group="control", **kwargs)
+    candidate = build_schedule(records, group="candidate", **kwargs)
+
+    assert control == build_schedule(records, group="control", **kwargs)
+    assert candidate == build_schedule(records, group="candidate", **kwargs)
+    control_rows = materialize_schedule(records, control)
+    candidate_rows = materialize_schedule(records, candidate)
+    control_summary = schedule_summary(control_rows, optimizer_steps=4, accumulation_steps=4)
+    candidate_summary = schedule_summary(candidate_rows, optimizer_steps=4, accumulation_steps=4)
+
+    assert control_summary["consumed_unique_sample_ids"] == 16
+    assert control_summary["consumed_repeated_draws"] == 0
+    assert candidate_summary["consumed_component_counts"] == {
+        NATURAL: 8,
+        SHORT_EMPTY: 4,
+        SHORT_NONEMPTY: 4,
+    }
+    for start in range(0, 16, 4):
+        components = [row["sampling_component"] for row in candidate_rows[start:start + 4]]
+        assert components.count(NATURAL) == 2
+        assert components.count(SHORT_EMPTY) == 1
+        assert components.count(SHORT_NONEMPTY) == 1
+
+
+def test_candidate_schedule_requires_both_short_history_strata() -> None:
+    records = _records()
+    for row in records:
+        row["gold_profile_empty"] = True
+
+    with pytest.raises(ValueError, match="both short-history"):
+        build_schedule(
+            records,
+            group="candidate",
+            seed=42,
+            per_device_micro_batch_size=1,
+            gradient_accumulation_steps=4,
+        )
+
+
+def _case(index: int, cluster: str, candidate_tp: int, control_tp: int) -> dict:
+    def model(tp: int) -> dict:
+        return {
+            "profile_counts": {
+                "personality_traits": {"tp": tp, "fp": 0, "fn": 1 - tp},
+                "interests": {"tp": 0, "fp": 0, "fn": 0},
+                "style": {"tp": 0, "fp": 0, "fn": 0},
+            },
+            "emotion_correct": bool(tp),
+            "raw_json_valid": True,
+            "raw_a0_schema_valid": True,
+        }
+
+    return {"id": f"eval-{index}", "conversation_id": cluster, "candidate": model(candidate_tp), "control": model(control_tp)}
+
+
+def test_paired_cluster_bootstrap_is_deterministic_and_reports_delta_ci() -> None:
+    cases = [
+        _case(1, "c1", 1, 0),
+        _case(2, "c1", 1, 0),
+        _case(3, "c2", 0, 0),
+        _case(4, "c3", 1, 0),
+    ]
+    groups = {case["id"]: case["conversation_id"] for case in cases}
+    first = paired_cluster_bootstrap(cases, groups, "candidate", "control", repetitions=100)
+    second = paired_cluster_bootstrap(cases, groups, "candidate", "control", repetitions=100)
+
+    assert first == second
+    assert first["cluster_count"] == 3
+    assert first["candidate_minus_control"]["profile_micro_f1"] > 0
+    low, high = first["cluster_bootstrap_95_percent_intervals"]["profile_micro_f1"]
+    assert low <= high
