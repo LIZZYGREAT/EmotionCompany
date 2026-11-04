@@ -1,0 +1,33 @@
+experiment: E03-A3
+inputs:
+  training_run_root: outputs/training/E01-B-FULL-20261028-133805
+  e01_b_comparison_root: outputs/evaluation/e01_b/comparison/full-20261029-062541
+  e01_b_eval_root: outputs/evaluation/e01_b/full/E01-B-EVAL-20261028-223105
+  a1_comparison_root: outputs/evaluation/e03_a1/comparison-label_value_x2
+  a1_eval_root: outputs/evaluation/e03_a1/full/E03-A1-EVAL-label_value_x2
+  d03_manifest: outputs/data_pipeline/v1/manifest.json
+  sft_manifest: outputs/sft_data/v1/manifest.json
+  d042_manifest: outputs/token_audit/v1/manifest.json
+  d042_budget_rows: outputs/token_audit/v1/budget_simulations.jsonl
+  normalized_train: data/processed/v1/train.jsonl
+  normalized_dev: data/processed/v1/dev.jsonl
+  sft_train: data/processed/sft/v1/train.jsonl
+  official_data_schema: data/train/train_public.schema.json
+  output_schema: participant/templates/submission_schema.json
+  prompt: configs/prompts/p0.txt
+protocol:
+  max_prompt_tokens: 1280
+  max_new_tokens: 1200
+  max_train_sequence_tokens: 2048
+  expected_sft_train_rows: 16192
+  expected_d03_train_rows: 16312
+  expected_dev_rows: 1833
+bootstrap:
+  seed: 42
+  repetitions: 1000
+frozen_eval:
+  seed: 20261104
+  target_points: 224
+  min_points: 192
+  max_points: 256
+output_root: outputs/diagnostics/e03_a3
