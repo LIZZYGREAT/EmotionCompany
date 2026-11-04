@@ -1,43 +1,104 @@
 # -*- coding: utf-8 -*-
-"""正式版截断修复器 v2：
-- 句末标点位置需在正文后 30% 内才截；否则在截断处直接补引号收尾（保留半句）。
-- 合法样本必须零改动（自检）。
-- 每条记录 id、原始字数、截断位置、收尾方式。
+"""截断修复器（可进管线版）：无外部依赖，失败分支显式记录。
+
+规则：
+- 合法样本零改动。
+- 句末标点落在正文后 30% 内则截到该句末并补齐收尾字段（sentence_cut）。
+- 否则保留正文、在截断点补引号（close_at_end）。
+- 补完仍解析失败记 failed，不静默当成"不需要修"。
 """
 import argparse
 import json
 import re
-import sys
 from pathlib import Path
 
-sys.path.insert(0, "/mnt/c/Users/sumiha/work/ops/e03")
-from metrics import parse_obj, EMO, DIMS
+EMO = ["", "joy", "gratitude", "relaxed", "care", "pride", "neutral", "surprise",
+       "mixed", "sadness", "loneliness", "anxiety", "anger", "fear", "disgust",
+       "shame", "helplessness"]
+DIMS = {
+    "personality_traits": ["extroverted", "introverted", "open", "conservative",
+                           "high_conscientiousness", "casual", "agreeable",
+                           "assertive", "emotionally_stable", "sensitive"],
+    "interests": ["study_exam", "programming_technology", "reading_writing",
+                  "film_animation", "music", "games", "sports_fitness",
+                  "travel_outdoor", "pets", "social", "career_development",
+                  "art_design"],
+    "style": ["brief", "detailed", "colloquial", "formal", "direct", "indirect",
+              "humorous", "rational", "high_emotional_expression",
+              "low_emotional_expression", "emoji_user"],
+}
+
+
+def parse_obj(text):
+    t = text.strip()
+    try:
+        v = json.loads(t)
+        return v if isinstance(v, dict) else None
+    except Exception:
+        pass
+    s = t.find("{")
+    if s < 0:
+        return None
+    depth = 0
+    instr = False
+    esc = False
+    for i in range(s, len(t)):
+        c = t[i]
+        if instr:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                instr = False
+            continue
+        if c == '"':
+            instr = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    v = json.loads(t[s:i + 1])
+                    return v if isinstance(v, dict) else None
+                except Exception:
+                    return None
+    return None
+
+
+def _valid_escape_tail(text: str) -> str:
+    """去掉结尾不完整的 \\uXXXX 或孤立反斜杠，避免补引号后解析失败。"""
+    text = text.rstrip("\\")
+    m = re.search(r"\\u[0-9a-fA-F]{0,3}$", text)
+    if m:
+        text = text[: m.start()]
+    return text
 
 
 def repair(raw: str):
-    """返回 (文本, 方式, 截断位置)。方式: none / sentence_cut / close_at_end。"""
+    """返回 (文本, 方式, 截断位置)。方式: none / sentence_cut / close_at_end / failed。"""
     obj = parse_obj(raw)
     if obj is not None and raw.strip().endswith("}"):
         return raw, "none", None
     m = re.search(r'"response_text"\s*:\s*"', raw)
     if not m:
-        return raw, "none", None
+        return raw, "failed", None
     head, body = raw[:m.end()], raw[m.end():]
 
     ends = [mm.end() for mm in re.finditer(r"[。！？!?]", body)
             if mm.start() > 0 and body[mm.start() - 1] != "\\"]
     cut = ends[-1] if ends else -1
     if cut > 0 and cut >= 0.7 * len(body):
-        text = body[:cut].rstrip("\\")
+        text = _valid_escape_tail(body[:cut])
         fixed = head + text + '", "memory_refs": []}'
         if parse_obj(fixed) is not None:
             return fixed, "sentence_cut", cut
-    # 保底：保留正文，直接补引号收尾
-    text = body.rstrip("\\")
+    text = _valid_escape_tail(body)
     fixed = head + text + '", "memory_refs": []}'
     if parse_obj(fixed) is not None:
         return fixed, "close_at_end", len(body)
-    return raw, "none", None
+    return raw, "failed", None
 
 
 def valid_structured(obj):
@@ -73,7 +134,7 @@ def main():
         rows = [json.loads(l) for l in f.open(encoding="utf-8")]
         stat = {"round": f.stem, "n": len(rows), "bad_before": 0, "repaired": 0,
                 "unchanged_valid": 0, "sentence_cut": 0, "close_at_end": 0,
-                "valid_after": 0, "structured_after": 0}
+                "failed": 0, "valid_after": 0, "structured_after": 0}
         new_rows = []
         for r in rows:
             obj = parse_obj(r["raw"])
@@ -87,7 +148,9 @@ def main():
                 stat["sentence_cut"] += 1
             if method == "close_at_end":
                 stat["close_at_end"] += 1
-            stat["repaired"] += method != "none"
+            if method == "failed":
+                stat["failed"] += 1
+            stat["repaired"] += method in ("sentence_cut", "close_at_end")
             obj2 = parse_obj(new_raw)
             stat["valid_after"] += obj2 is not None
             stat["structured_after"] += valid_structured(obj2)
@@ -97,8 +160,9 @@ def main():
                                "cut_at": cut})
             rec = dict(r)
             rec["raw"] = new_raw
-            rec["repair"] = {"applied": method != "none", "method": method,
-                             "before_chars": len(r["raw"]), "after_chars": len(new_raw)}
+            rec["repair"] = {"applied": method in ("sentence_cut", "close_at_end"),
+                             "method": method, "before_chars": len(r["raw"]),
+                             "after_chars": len(new_raw)}
             new_rows.append(rec)
         with (out / f"{f.stem}.jsonl").open("w", encoding="utf-8") as fh:
             for r in new_rows:
