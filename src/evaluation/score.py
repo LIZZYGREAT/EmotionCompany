@@ -35,6 +35,7 @@ RAW_FIELDS = {
     "id", "raw_text", "status", "prompt_tokens", "generated_tokens", "stop_reason",
     "latency_ms", "removed_history_messages", "backend", "error_type",
 }
+RAW_OPTIONAL_FIELDS = {"failure_category"}
 
 
 def _resolve(path: Path | str, base: Path = ROOT) -> Path:
@@ -612,7 +613,8 @@ def score_files(
         if set(raw_rows_by_id) != expected_ids:
             raise ValueError("Raw predictions/Reference ID 集合不一致")
         for eval_id, row in raw_rows_by_id.items():
-            if set(row) != RAW_FIELDS:
+            row_fields = set(row)
+            if not RAW_FIELDS <= row_fields or not row_fields <= RAW_FIELDS | RAW_OPTIONAL_FIELDS:
                 raise ValueError(f"Raw prediction 字段不符合 allowlist: {eval_id}")
             if "target" in row or "sample_id" in row:
                 raise ValueError(f"Raw prediction 不得包含 target/sample_id: {eval_id}")

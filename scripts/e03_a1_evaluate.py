@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -25,6 +26,9 @@ _ORIGINAL_E01_CODE_IDENTITY = e01._code_identity()
 _ORIGINAL_E01_TRAINING_RUN = e01._training_run
 _ORIGINAL_E01_SNAPSHOTS = e01._snapshots
 _ORIGINAL_E01_CONFIG = e01._config
+_PRE_FIX_SCORE_SHA256 = "c8b7d92c22c579cda47df1030647a87ba9ebcad30c08dc57de4b4e71b62d3808"
+_PRE_RECOVERY_E03_EVALUATOR_SHA256 = "421df95b58a197f9325b6f344be7881c68c4ecd4351461fd329dc1d8295cb3ba"
+_PRE_FAILURE_CATEGORY_RUNNER_SHA256 = "59082f5f4d7a996dad7b2c7935b9a0b44432297ce5c795432ae903b08d286630"
 
 
 def _e03_code_identity() -> dict[str, Any]:
@@ -92,6 +96,111 @@ def _snapshots(config: dict[str, Any], scope: str, model: str, training_root: Pa
     return inference_config, evaluation_config, training
 
 
+def _current_run_identity(training_root: Path, run_id: str, hardware_label: str) -> dict[str, Any]:
+    config = e01._config("full-dev")
+    dataset = e01._dataset(config, "full-dev")
+    inference_config, evaluation_config, training = e01._snapshots(
+        config, "full-dev", "adapter", training_root, hardware_label
+    )
+    inference_bytes = (json.dumps(inference_config, ensure_ascii=False, indent=2) + "\n").encode()
+    evaluation_bytes = yaml.safe_dump(evaluation_config, allow_unicode=True, sort_keys=False).encode()
+    return {
+        "run_id": run_id,
+        "scope": "full-dev",
+        "model": "adapter",
+        "dataset": dataset,
+        "training_run": training,
+        "source_code": _e03_code_identity(),
+        "inference_config_sha256": hashlib.sha256(inference_bytes).hexdigest(),
+        "evaluation_config_sha256": hashlib.sha256(evaluation_bytes).hexdigest(),
+    }
+
+
+def _is_known_pre_fix_identity(previous: dict[str, Any], current: dict[str, Any]) -> bool:
+    previous_files = previous.get("files")
+    current_files = current.get("files")
+    if previous.get("packages") != current.get("packages") or not isinstance(previous_files, dict):
+        return False
+    if set(previous_files) != set(current_files or {}):
+        return False
+    allowed_previous = {
+        "src/evaluation/score.py": _PRE_FIX_SCORE_SHA256,
+        "scripts/e03_a1_evaluate.py": _PRE_RECOVERY_E03_EVALUATOR_SHA256,
+    }
+    differences = {name for name in previous_files if previous_files[name] != current_files[name]}
+    return bool(differences) and all(
+        name in allowed_previous and previous_files[name] == allowed_previous[name]
+        for name in differences
+    )
+
+
+def _recover_score_only_resume(
+    training_root: Path, run_id: str, hardware_label: str
+) -> None:
+    config = e01._config("full-dev")
+    root = e01._resolve(config["execution"]["output_root"]) / run_id
+    manifest_path = root / "run_manifest.json"
+    if not manifest_path.is_file():
+        return
+    record = e01._json(manifest_path)
+    if record.get("status") != "failed":
+        return
+    error = record.get("error")
+    if not isinstance(error, str) or not error.startswith(
+        "ValueError: Raw prediction 字段不符合 allowlist:"
+    ):
+        return
+
+    current_identity = _current_run_identity(training_root, run_id, hardware_label)
+    if any(
+        record.get(key) != value
+        for key, value in current_identity.items()
+        if key != "source_code"
+    ):
+        raise ValueError("score-only recovery rejected: evaluation, data or Adapter identity changed")
+    if not _is_known_pre_fix_identity(record.get("source_code", {}), current_identity["source_code"]):
+        raise ValueError("score-only recovery rejected: source-code change is not the known scorer fix")
+
+    report = e01._json(root / "runner/performance_report.json")
+    raw_path = root / "raw_predictions.jsonl"
+    submission_path = root / "runner/submission.jsonl"
+    if (
+        report.get("complete") is not True
+        or report.get("run_id") != run_id
+        or report.get("samples") != 1833
+        or report.get("raw_predictions_rows") != 1833
+        or report.get("raw_predictions_sha256") != sha256_file(raw_path)
+        or report.get("submission_sha256") != sha256_file(submission_path)
+    ):
+        raise ValueError("score-only recovery rejected: complete inference artifacts or hashes are missing")
+    raw_rows = read_jsonl(raw_path)
+    expected_fields = {
+        "id", "raw_text", "status", "prompt_tokens", "generated_tokens", "stop_reason",
+        "latency_ms", "removed_history_messages", "backend", "error_type", "failure_category",
+    }
+    raw_by_id = e01._unique_by_id(raw_rows, "id", "Raw predictions")
+    if len(raw_by_id) != 1833 or any(set(row) != expected_fields for row in raw_rows):
+        raise ValueError("score-only recovery rejected: raw prediction rows do not match the expected new schema")
+    dataset_root = Path(current_identity["dataset"]["root"])
+    input_ids = {row["id"] for row in read_jsonl(dataset_root / current_identity["dataset"]["input"])}
+    if set(raw_by_id) != input_ids:
+        raise ValueError("score-only recovery rejected: raw prediction IDs differ from the frozen Dev set")
+
+    record["scoring_recovery"] = {
+        "reason": "rescore after accepting optional failure_category in raw telemetry",
+        "inference_artifacts_reused": True,
+        "previous_error": error,
+        "previous_source_code": record["source_code"],
+        "validated_raw_predictions_sha256": report["raw_predictions_sha256"],
+        "validated_submission_sha256": report["submission_sha256"],
+        "recovered_at_utc": e01._now(),
+    }
+    record["source_code"] = current_identity["source_code"]
+    record.pop("error", None)
+    runner = e01.runner
+    runner._write_json_atomic(manifest_path, record)
+
+
 def _install_e03_hooks() -> None:
     e01._code_identity = _e03_code_identity
     e01._training_run = _training_run
@@ -99,12 +208,20 @@ def _install_e03_hooks() -> None:
     e01._snapshots = _snapshots
 
 
-def _load_scored(root: Path, *, expected_code: dict[str, Any]) -> dict[str, Any]:
+def _load_scored(
+    root: Path,
+    *,
+    expected_code: dict[str, Any],
+    legacy_source_files: dict[str, str] | None = None,
+) -> dict[str, Any]:
     root = root.resolve()
     record = e01._json(root / "run_manifest.json")
     if record.get("status") != "scored" or record.get("model") != "adapter" or record.get("scope") != "full-dev":
         raise ValueError("comparison requires completed Full-Dev Adapter evaluation Runs")
-    if record.get("source_code") != expected_code:
+    actual_code = record.get("source_code") or {}
+    if actual_code != expected_code and not _matches_legacy_source(
+        actual_code, expected_code, legacy_source_files or {}
+    ):
         raise ValueError("evaluation source-code identity differs from the recorded Run")
     for name, expected in record.get("artifacts", {}).items():
         if sha256_file(root / name) != expected:
@@ -113,6 +230,24 @@ def _load_scored(root: Path, *, expected_code: dict[str, Any]) -> dict[str, Any]
         if sha256_file(root / name) != record.get(key):
             raise ValueError("frozen evaluation config snapshot changed")
     return record
+
+
+def _matches_legacy_source(
+    actual: dict[str, Any], expected: dict[str, Any], legacy_files: dict[str, str]
+) -> bool:
+    actual_files, expected_files = actual.get("files"), expected.get("files")
+    if (
+        actual.get("packages") != expected.get("packages")
+        or not isinstance(actual_files, dict)
+        or not isinstance(expected_files, dict)
+        or set(actual_files) != set(expected_files)
+    ):
+        return False
+    differences = {name for name in actual_files if actual_files[name] != expected_files[name]}
+    return bool(differences) and all(
+        name in legacy_files and actual_files[name] == legacy_files[name]
+        for name in differences
+    )
 
 
 def _compare_configs(baseline_root: Path, candidate_root: Path) -> None:
@@ -180,7 +315,14 @@ def compare(baseline_root: Path, candidate_root: Path, output_dir: Path) -> dict
     baseline_root, candidate_root, output_dir = baseline_root.resolve(), candidate_root.resolve(), output_dir.resolve()
     if not output_dir.is_relative_to((ROOT / "outputs/evaluation/e03_a1").resolve()):
         raise ValueError("E03-A1 comparison output must stay under outputs/evaluation/e03_a1")
-    baseline = _load_scored(baseline_root, expected_code=_ORIGINAL_E01_CODE_IDENTITY)
+    baseline = _load_scored(
+        baseline_root,
+        expected_code=_ORIGINAL_E01_CODE_IDENTITY,
+        legacy_source_files={
+            "src/evaluation/score.py": _PRE_FIX_SCORE_SHA256,
+            "participant/run_inference.py": _PRE_FAILURE_CATEGORY_RUNNER_SHA256,
+        },
+    )
     candidate = _load_scored(candidate_root, expected_code=_e03_code_identity())
     if baseline["dataset"] != candidate["dataset"] or baseline["dataset"].get("sample_count") != 1833:
         raise ValueError("paired E03-A1 comparison requires the same complete 1,833-row Dev set")
@@ -313,6 +455,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.mode == "run":
         if not args.training_run_root or not args.run_id:
             raise ValueError("run mode requires --training-run-root and --run-id")
+        if args.resume:
+            _recover_score_only_resume(
+                args.training_run_root, args.run_id, args.hardware_label
+            )
         result = e01.execute(
             "full-dev", "adapter", args.run_id,
             training_root=args.training_run_root,
