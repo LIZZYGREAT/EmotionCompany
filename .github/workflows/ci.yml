@@ -68,4 +68,10 @@ jobs:
             tests/test_e02_token_equivalence.py \
             tests/test_e02_benchmark_selection.py \
             tests/test_e00_2_diagnose.py \
-            tests/test_e00_2_emotion_diag.py
+            tests/test_e00_2_emotion_diag.py \
+            tests/test_e03_a3_profile.py \
+            tests/test_e03_profile_prefix.py \
+            tests/test_e03_profile_fast_eval.py \
+            tests/test_e03_pipeline_audit.py \
+            tests/test_e03_experiment_spec.py \
+            tests/test_e03_experiment_ctl.py
