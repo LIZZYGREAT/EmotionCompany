@@ -53,7 +53,7 @@
 
 Pilot 的训练 Loss 和 SFT Dev Loss 只说明模型在 Completion-only 训练目标上的变化，不替代情绪、画像、Raw JSON/Schema、回复和性能评测。Pilot Run 的 Manifest、日志、Checkpoint 和权重保存在忽略目录 `outputs/training/`，以上摘要来自执行机上的真实结果，不是 Git 中的实验产物。
 
-Full B、完整 Dev 对照和本地 Docker 可行性均有实际 Run。当前下一阶段为 **E03 优化方向讨论与候选准备**，尚未批准具体实验；镜像打包/独立导入和官网提交主动暂缓。Run 路径、复现命令和资源边界见 [`docs/workflow.md`](docs/workflow.md)、[当前状态交接](docs/context/E0.1_当前状态与后续交接.md)和[E03 优化方向总览](docs/task/E0.3_优化方向总览.md)。
+当前处于 **E03-A3 GPU 短程验证待执行、E0.3 工程效率审查已完成 CPU 阶段**；画像快速评测因本机 CUDA 不可用而待 GPU 核验，E01-B 仍是当前基线。最新状态和后续动作见[唯一当前交接](docs/context/E0.1_当前状态与后续交接.md)；工程审查证据见[验收报告](docs/experiments/E0.3_工程效率整改验收报告.md)。镜像打包/独立导入和官网提交仍主动暂缓。
 
 ## 仓库结构
 

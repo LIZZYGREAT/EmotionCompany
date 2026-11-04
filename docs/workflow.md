@@ -10,7 +10,7 @@ The team Git branch, PR review, merge, and `main` protection process is document
 
 E02.0 已完成本地指标口径审计和 Full B Run/Dev 输入身份索引；官方计分等价性仍未确认。E02.1 的 10 条 vLLM `0.11.1` + Full B Adapter GPU Smoke 完成：13/13 Manifest 检查通过，9 条输出有效、1 条 `invalid_label`。E02.2-A Run `E02.2-A-TOKEN-20261101T143137Z` 对 10 条既有无标签样本和 2 条合成 `</think>` 样本完成服务端 Prompt Token ID 核验，12/12 逐 ID 精确相等。E02.2-B 固定 100 条 target-free 基准中 100/100 请求完成、97 条 Raw JSON/A0 有效，3 条格式错误或截断。E02.2-C 修复版 Docker 在 `--network none` 下完成本地 10/10 GPU Smoke；镜像 tar、体积/SHA、干净环境导入和官网提交主动暂缓。解析器修复、E02 证据与边界见 [`E02.2 报告`](experiments/E0.2.2_推理协议与性能验收报告.md)和[Docker 准备说明](../docker/e02/README.md)。服务端权重身份仍为 `unverified`；本地 Smoke 不代表官方评分或最终交付验收。
 
-当前下一阶段是 E03 优化方向讨论。Full B 保持冻结对照，现有实验候选均为 `idea`，没有获批的训练、Prompt 或推理修改。方向见 [E03 优化总览](task/E0.3_优化方向总览.md)，阶段状态见[唯一当前交接](context/E0.1_当前状态与后续交接.md)。
+当前主基线仍为冻结的 E01-B；E03-A3 短程 GPU 验证已获授权、待用户 GPU 环境执行。E0.3 工程效率审查的 CPU 工具、轻依赖 CI 清单、源完整性检查和未来实验接口已实现；画像前缀快速评测尚未通过 GPU 等价性门禁，本机 CUDA 不可用。详见[工程效率整改验收报告](experiments/E0.3_工程效率整改验收报告.md)与[唯一当前交接](context/E0.1_当前状态与后续交接.md)。
 
 ## Environment setup
 
@@ -432,6 +432,84 @@ python scripts/e01_b_evaluate.py --scope compare \
 `compare` 只读取既有预测并复用 E00 Scorer 重新核验与评分，不训练、不生成。它要求两组完整 ID/Reference Hash、协议、解码、硬件标签、代码/依赖一致，拒绝 Pilot/Full 混比和部分完成结果。产物 `comparison_summary.json`、`report.md`、`comparison_cases.jsonl` 汇总情绪逐类指标/混淆矩阵、画像 33 标签及逐维/非空 Gold Recall、Raw 严格 JSON/A0 Schema 与错误分布、Submission Schema、BLEU-4/ROUGE-L、Token/延迟/显存及配对迁移；情绪差值附固定 Seed 的会话簇配对 Bootstrap 区间。逐 ID 表只含 ID 和诊断统计。
 
 BERTScore 按冻结配置为 `not_run`；官方性能口径为 `not_run`。本机 Runner 的 100/100 轮统计已完成，但不是官方容器性能。空画像会影响 Exact Match，必须结合非空 Gold Recall 与标签 Micro-F1 解读。权重、Raw、预测与逐样本比较文件仍在忽略目录；汇总结果已记录在[正式验收报告](experiments/E0.1-B_正式SFT与Dev对照验收报告.md)和[深度诊断报告](experiments/E0.1-B_Full_深度诊断与证据整理.md)。
+
+## E03 — CPU audit → fast-profile-eval → final-full-eval
+
+按三档执行 E03 画像候选的质量核验。CPU audit 先冻结来源、选样和资源账本；GPU fast-profile-eval 只用于低成本判断前缀早停是否值得继续；只有通过 GPU 等价性与提速门槛后，才另行批准最终完整 Dev 生成。**16 点快评不替代 1,833 点完整 Dev 评测，也不能据其分数选择或发布模型。**
+
+### 1. CPU audit（无 GPU、无模型加载）
+
+在已准备 D0.3 Manifest、Dev 无标签输入及 E01-B 运行产物的机器上，运行轻依赖 CI 清单与只读来源/计时核验。以下 Pipeline 命令以当前已有的七个训练 Run 和 Full B Runner 为例；新 Run 应显式追加对应的 `--run-root`，不要把预检目录当作训练 Run。
+
+```bash
+source .venv/bin/activate
+python -m pytest -q \
+  tests/test_e03_a3_profile.py \
+  tests/test_e03_profile_prefix.py \
+  tests/test_e03_profile_fast_eval.py \
+  tests/test_e03_pipeline_audit.py \
+  tests/test_e03_experiment_spec.py \
+  tests/test_e03_experiment_ctl.py
+
+AUDIT_ID="E03-CPU-AUDIT-$(date +%Y%m%d-%H%M%S)"
+python scripts/e03_profile_fast_eval.py --mode audit-source --run-id "$AUDIT_ID-source"
+python scripts/e03_profile_fast_eval.py --mode parse-raw \
+  --raw outputs/evaluation/e01_b/full/E01-B-EVAL-20261028-223105/raw_predictions.jsonl \
+  --run-id "$AUDIT_ID-prefix"
+python scripts/e03_experiment_ctl.py audit \
+  --run-root outputs/training/E01-A-20261027-223703 \
+  --run-root outputs/training/E01-B-PILOT-20261028-092248 \
+  --run-root outputs/training/E01-B-FULL-20261028-133805 \
+  --run-root outputs/training/E03-A1-short-token_mean \
+  --run-root outputs/training/E03-A1-short-profile_x2 \
+  --run-root outputs/training/E03-A1-short-label_value_x2 \
+  --run-root outputs/training/E03-A1-full-label_value_x2 \
+  --runner-report outputs/evaluation/e01_b/full/E01-B-EVAL-20261028-223105/runner/performance_report.json \
+  --output-dir "outputs/diagnostics/e03_engineering/$AUDIT_ID"
+```
+
+`audit-source` checks selected Dev histories against the D0.3 source and manifest, verifies the current user is last, groups by conversation, and checks that generation input contains only `id+history`; it fails before model loading. `parse-raw` reads a completed Raw prediction file and emits aggregate prefix-parse counts only. The Pipeline audit reads existing manifests/logs/Runner metrics and reports absent isolated timings as `unknown`. JSON/Markdown outputs stay under ignored `outputs/`; no training or generation occurs.
+
+The required GitHub Job remains `unit-cpu`. Its exact test list is maintained in [CI 测试覆盖清单](knowledge/CI测试覆盖清单.md); local passes do not establish GitHub Actions status. Torch-dependent A0/A0.1/A1 and A3 short-training synthetic suites are a separate local gate and are not installed into the lightweight CI Job.
+
+### 2. GPU fast-profile-eval（最多 900 秒）
+
+需要已核验的 Full B Adapter、E01-B 推理配置和 CUDA。脚本先重复 CPU 来源门禁，再在同一固定 16 个 Dev 点（每个会话一个点）、同一 P0/F2/T1 与 Greedy 设置下配对完整生成和画像前缀早停；计时预算包含模型加载，最长 900 秒。它比较停止前的真实 Token ID 序列、画像标签、有效率、耗时与峰值显存。References 仅在两路生成后读取，异常不做完整生成回退。低覆盖、任一有效样本 Token/画像不一致、没有足够提速或显存增加时结果为 `not_adopted` / `blocked`。
+
+```bash
+source .venv/bin/activate
+timeout --signal=TERM --kill-after=3s 900s \
+  python scripts/e03_profile_fast_eval.py \
+    --mode gpu-compare \
+    --config configs/evaluation/e03_profile_fast.yaml \
+    --run-id "E03-PROFILE-$(date +%Y%m%d-%H%M%S)"
+```
+
+聚合结果写到 `outputs/diagnostics/e03_engineering/profile_fast/<run-id>/profile_fast_metrics.json`。`blocked_environment`、`budget_exhausted` 或 `not_adopted` 都不是通过；不得将画像片段当作完整赛事 Submission。只有固定 16 点全部满足 Token/画像一致、覆盖率、提速和显存门槛，才允许把该工具用于内部筛选，并保留完整 Dev 为最终质量门禁。
+
+### 3. final-full-eval（完整 1,833 点，独立高成本 Run）
+
+当需要对候选做最终质量判断时，在独立 GPU 资源预算和明确运行授权下，分别对 Base 与同一候选 Adapter 重新生成完整 1,833 条 Dev，再离线配对评分。选择已有且身份通过核验的 Full B 训练 Run；每次使用全新 Run ID。完整评测包含两次全量生成及评分，费用/时长随硬件和模型资产而变；本 E0.3 工程审查没有重跑它。
+
+```bash
+source .venv/bin/activate
+E01_FULL_RUN_ID="E01-B-FULL-20261028-133805"
+E01_BASE_DEV_ID="E00.3-BASE-$(date +%Y%m%d-%H%M%S)"
+E01_ADAPTER_DEV_ID="E01-B-EVAL-$(date +%Y%m%d-%H%M%S)"
+python scripts/e01_b_evaluate.py --scope full-dev --model base \
+  --run-id "$E01_BASE_DEV_ID" --hardware-label local-rtx4060-laptop-8gb \
+  --allow-full-dev
+python scripts/e01_b_evaluate.py --scope full-dev --model adapter \
+  --training-run-root "outputs/training/$E01_FULL_RUN_ID" \
+  --run-id "$E01_ADAPTER_DEV_ID" --hardware-label local-rtx4060-laptop-8gb \
+  --allow-full-dev
+python scripts/e01_b_evaluate.py --scope compare \
+  --base-run-root "outputs/evaluation/e01_b/full/$E01_BASE_DEV_ID" \
+  --adapter-run-root "outputs/evaluation/e01_b/full/$E01_ADAPTER_DEV_ID" \
+  --output-dir "outputs/evaluation/e01_b/comparison/full-$(date +%Y%m%d-%H%M%S)"
+```
+
+此处 `--allow-full-dev` 是评测范围确认参数，不改变模型/数据身份门禁；Runner 会将完整 Raw、预测和资源报告写到忽略目录。出现中断时只对相同的未完成 Run 使用原配置恢复。最终完整 Dev 结果、Raw Schema 与逐维画像指标仍是候选保留的权威质量证据，不能由 fast-profile-eval 代替。
 
 ## Regression suite
 
