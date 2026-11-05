@@ -185,6 +185,20 @@ def test_evaluation_authorization_receipt_matches_json_serialized_yaml_date() ->
     }
 
 
+def test_a3_eval_loader_rejects_runs_outside_the_frozen_output_root(tmp_path: Path) -> None:
+    allowed_root = tmp_path / "allowed"
+    outside_run = tmp_path / "outside" / "control"
+    config = {
+        "evaluation": {"run_root": str(allowed_root)},
+        "identity": {"expected_frozen_eval_ids_sha256": "a" * 64},
+    }
+
+    with pytest.raises(ValueError, match="comparison inputs must remain under"):
+        e03_a3_short_evaluate._load_eval_run(
+            config, outside_run, "control", tmp_path / "evaluation.yaml",
+        )
+
+
 def test_reload_recovery_requires_complete_finite_training_trace() -> None:
     step_rows = [
         {

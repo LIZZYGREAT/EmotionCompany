@@ -540,27 +540,6 @@ def execute(
     return {"status": "scored", "run_root": str(eval_root), "metrics": record["metric_summary"]}
 
 
-def _load_eval_run(config: dict[str, Any], root: Path, expected_group: str, config_path: Path) -> dict[str, Any]:
-    root = root.resolve()
-    manifest = _json(root / "run_manifest.json")
-    if (
-        manifest.get("status") != "scored"
-        or manifest.get("group") != expected_group
-        or manifest.get("dataset", {}).get("ids_sha256") != config["identity"]["expected_frozen_eval_ids_sha256"]
-        or manifest.get("config_sha256") != sha256_file(config_path)
-        or manifest.get("source_code_sha256") != sha256_file(Path(__file__).resolve())
-    ):
-        raise ValueError(f"{expected_group} A3 eval Run is incomplete or belongs to another frozen evaluation")
-    for name, expected in manifest.get("artifacts", {}).items():
-        _verify_hash(root / name, expected, name)
-    _verify_hash(root / "inference_config.json", manifest["inference_config_sha256"], "inference config")
-    _verify_hash(root / "evaluation_config.yaml", manifest["evaluation_config_sha256"], "evaluation config")
-    cases = read_jsonl(root / "cases.jsonl")
-    if len(cases) != int(config["evaluation"]["frozen_eval_points"]):
-        raise ValueError(f"{expected_group} eval case count differs from the frozen set")
-    return manifest
-
-
 def _profile_counts(cases: list[dict[str, Any]], indices: list[int], model: str) -> dict[str, int]:
     tp = fp = fn = 0
     for index in indices:
