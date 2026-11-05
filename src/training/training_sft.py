@@ -819,7 +819,13 @@ def _seed_everything(seed: int, torch: Any) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def _load_train_model(config: dict[str, Any], base_path: Path, *, adapter_path: Path | None = None) -> tuple[Any, Any, dict[str, Any]]:
+def _load_train_model(
+    config: dict[str, Any],
+    base_path: Path,
+    *,
+    adapter_path: Path | None = None,
+    autocast_adapter_dtype: bool | None = None,
+) -> tuple[Any, Any, dict[str, Any]]:
     import torch
     from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 
@@ -850,11 +856,13 @@ def _load_train_model(config: dict[str, Any], base_path: Path, *, adapter_path: 
             prepare_quantized_base=True,
             is_trainable=False,
             local_files_only=True,
+            autocast_adapter_dtype=autocast_adapter_dtype,
         )
         model.eval()
         facts = inference.inspect_quantization_runtime(model, _training_quantization_inspection_config(config), torch)
         if not facts.get("real_nf4_verified") or facts.get("offload_devices"):
             raise RuntimeError("reloaded Adapter failed NF4/BF16/CUDA placement verification")
+        facts["adapter_dtype_autocast"] = "peft_default" if autocast_adapter_dtype is None else autocast_adapter_dtype
         return model, torch, facts
     from peft import prepare_model_for_kbit_training
     prepare_kwargs: dict[str, Any] = {"use_gradient_checkpointing": bool(config["training"]["gradient_checkpointing"])}

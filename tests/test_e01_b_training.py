@@ -115,6 +115,7 @@ def test_training_reload_prepares_quantized_base_before_adapter_load(tmp_path, m
         config,
         tmp_path / "base",
         adapter_path=tmp_path / "adapter",
+        autocast_adapter_dtype=False,
     )
 
     assert loaded is model
@@ -123,6 +124,7 @@ def test_training_reload_prepares_quantized_base_before_adapter_load(tmp_path, m
     assert model.evaluated is True
     assert events[1][0] == "adapter"
     assert events[1][3]["prepare_quantized_base"] is True
+    assert events[1][3]["autocast_adapter_dtype"] is False
 
 
 @pytest.mark.parametrize(

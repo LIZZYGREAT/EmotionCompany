@@ -653,6 +653,8 @@ def _verify_gpu_preflight(config: dict[str, Any], config_path: Path, run_id: str
     expected_implementation = {
         "runner": sha256_file(Path(__file__).resolve()),
         "sampler": sha256_file(ROOT / "src/training/e03_a3_sampling.py"),
+        "training_sft": sha256_file(ROOT / "src/training/training_sft.py"),
+        "inference": sha256_file(ROOT / "participant/run_inference.py"),
     }
     if (
         record.get("run_id") != run_id
@@ -968,6 +970,8 @@ def _training_run(
         "implementation_sha256": {
             "runner": sha256_file(Path(__file__).resolve()),
             "sampler": sha256_file(ROOT / "src/training/e03_a3_sampling.py"),
+            "training_sft": sha256_file(ROOT / "src/training/training_sft.py"),
+            "inference": sha256_file(ROOT / "participant/run_inference.py"),
         },
         "initial_adapter_identity": initial_adapter_identity,
         "initial_adapter_values_exact_match": True,
@@ -1042,7 +1046,7 @@ def _training_run(
             gc.collect()
             torch.cuda.empty_cache()
             reloaded, reload_torch, reload_model_facts = training_sft._load_train_model(
-                config, base_path, adapter_path=adapter_dir,
+                config, base_path, adapter_path=adapter_dir, autocast_adapter_dtype=False,
             )
             probe_after = training_sft._capture_probe(
                 reloaded, tokenizer, probe_prompt, max_new_tokens=int(config["evaluation"]["probe_max_new_tokens"]),
@@ -1155,6 +1159,8 @@ def main(argv: list[str] | None = None) -> int:
                 "implementation_sha256": {
                     "runner": sha256_file(Path(__file__).resolve()),
                     "sampler": sha256_file(ROOT / "src/training/e03_a3_sampling.py"),
+                    "training_sft": sha256_file(ROOT / "src/training/training_sft.py"),
+                    "inference": sha256_file(ROOT / "participant/run_inference.py"),
                 },
                 "gpu_preflight_sha256": sha256_file(root / "gpu_preflight.json"),
             })

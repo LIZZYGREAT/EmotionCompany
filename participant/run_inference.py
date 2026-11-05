@@ -668,6 +668,7 @@ def load_peft_adapter(
     prepare_quantized_base: bool,
     is_trainable: bool = False,
     local_files_only: bool = True,
+    autocast_adapter_dtype: bool | None = None,
 ) -> Any:
     """Load an Adapter with the same non-quantized parameter dtypes as QLoRA training."""
     try:
@@ -683,12 +684,13 @@ def load_peft_adapter(
             base_model,
             use_gradient_checkpointing=False,
         )
-    return PeftModel.from_pretrained(
-        base_model,
-        str(adapter_path),
-        is_trainable=is_trainable,
-        local_files_only=local_files_only,
-    )
+    load_kwargs: dict[str, Any] = {
+        "is_trainable": is_trainable,
+        "local_files_only": local_files_only,
+    }
+    if autocast_adapter_dtype is not None:
+        load_kwargs["autocast_adapter_dtype"] = autocast_adapter_dtype
+    return PeftModel.from_pretrained(base_model, str(adapter_path), **load_kwargs)
 
 
 def resolve_raw_output_path(result_dir: Path, submission_path: Path) -> Path | None:

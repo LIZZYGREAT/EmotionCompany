@@ -371,6 +371,35 @@ def test_i11_unquantized_adapter_load_skips_kbit_preparation(monkeypatch, tmp_pa
     assert events == [(base, str(tmp_path / "adapter"), {"is_trainable": False, "local_files_only": True})]
 
 
+def test_i11_adapter_load_can_preserve_saved_adapter_dtype(monkeypatch, tmp_path):
+    events = []
+
+    class FakePeftModel:
+        @staticmethod
+        def from_pretrained(model, adapter_path, **kwargs):
+            events.append((model, adapter_path, kwargs))
+            return model
+
+    monkeypatch.setitem(sys.modules, "peft", SimpleNamespace(
+        PeftModel=FakePeftModel,
+        prepare_model_for_kbit_training=lambda model, **_kwargs: model,
+    ))
+    base = object()
+    result = runner.load_peft_adapter(
+        base,
+        tmp_path / "adapter",
+        prepare_quantized_base=False,
+        autocast_adapter_dtype=False,
+    )
+
+    assert result is base
+    assert events == [(
+        base,
+        str(tmp_path / "adapter"),
+        {"is_trainable": False, "local_files_only": True, "autocast_adapter_dtype": False},
+    )]
+
+
 def test_i10_budget_preflight_rejects_p_plus_g_over_k(tmp_path, monkeypatch):
     config = json.loads((ROOT / "participant/configs/inference_config.json").read_text(encoding="utf-8"))
     config["context"]["serving_context_limit"] = 2000
