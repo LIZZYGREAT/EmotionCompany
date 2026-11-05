@@ -53,7 +53,7 @@
 
 Pilot 的训练 Loss 和 SFT Dev Loss 只说明模型在 Completion-only 训练目标上的变化，不替代情绪、画像、Raw JSON/Schema、回复和性能评测。Pilot Run 的 Manifest、日志、Checkpoint 和权重保存在忽略目录 `outputs/training/`，以上摘要来自执行机上的真实结果，不是 Git 中的实验产物。
 
-当前处于 **E03-A3 GPU 短程验证待执行、E0.3 工程效率审查已完成 CPU 阶段**；画像快速评测因本机 CUDA 不可用而待 GPU 核验，E01-B 仍是当前基线。最新状态和后续动作见[唯一当前交接](docs/context/E0.1_当前状态与后续交接.md)；工程审查证据见[验收报告](docs/experiments/E0.3_工程效率整改验收报告.md)。镜像打包/独立导入和官网提交仍主动暂缓。
+当前 E03-A3 阶段 3 短程对照已完成，结论为 `negative_result`，不继续扩训；E0.3 补充修订已交付。固定 224 点 `gpu-fast-only` 验收在 449.10 秒内完成 224/224 画像前缀生成，状态 `passed` 仅表示快评完整性与覆盖率门槛通过，不替代完整 Dev 候选评测。E01-B 仍是当前基线。最新状态和后续动作见[唯一当前交接](docs/context/E0.1_当前状态与后续交接.md)；代码与验收证据见[工程效率验收报告](docs/experiments/E0.3_工程效率整改验收报告.md)。镜像打包/独立导入和官网提交仍主动暂缓。
 
 ## 仓库结构
 
