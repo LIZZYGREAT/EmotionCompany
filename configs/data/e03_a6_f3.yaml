@@ -1,0 +1,33 @@
+version: E03-A6-F3-data-v1
+format_version: F3
+inputs:
+  normalized_dir: data/processed/v1
+  f2_dataset_dir: data/processed/sft/v1
+  f2_manifest: outputs/sft_data/v1/manifest.json
+  d03_manifest: outputs/data_pipeline/v1/manifest.json
+  d042_manifest: outputs/token_audit/v1/manifest.json
+  d042_budget_rows: outputs/token_audit/v1/budget_simulations.jsonl
+  train_schema: data/train/train_public.schema.json
+  p0_prompt: configs/prompts/p0.txt
+  f3_prompt: configs/prompts/p_a6_f3.txt
+  inference_config: participant/configs/inference_config.json
+outputs:
+  dataset_dir: data/processed/sft/e03_a6_f3
+  run_dir: outputs/e03_a6/preparation
+profile:
+  max_prompt_tokens: 1280
+  max_train_seq_length: 2048
+  history_policy: P0_T1_same_selected_history_then_F3_prompt
+  completion_policy: complete_or_block
+  padding_side: right
+  packing: false
+  padding_free: false
+expected_counts:
+  train: 16192
+  dev: 1821
+tokenizer:
+  model_id: Qwen/Qwen3-1.7B
+  revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  signature_sha256: 1662c9e99c6185441026a168b2dd6b09af103dc6dc3563b72f598411f14d1913
+  chat_template_sha256: a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8
+  eos_token_id: 151645
