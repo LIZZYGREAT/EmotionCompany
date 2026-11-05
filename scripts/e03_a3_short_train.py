@@ -21,6 +21,8 @@ from typing import Any
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+# Tolerate small driver/firmware rounding on nominal VRAM class; free memory stays strict.
+TOTAL_VRAM_REPORTING_TOLERANCE_BYTES = 16 * 1024**2
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -495,16 +497,24 @@ def _gpu_gate(config: dict[str, Any], torch: Any) -> dict[str, Any]:
     free, total = torch.cuda.mem_get_info(device)
     minimum_total = int(config["training"]["min_total_vram_gb"] * 1024 ** 3)
     minimum_free = int(config["training"]["min_free_vram_gb"] * 1024 ** 3)
-    if props.total_memory < minimum_total:
-        raise RuntimeError(f"blocked_total_vram_below_gate: {props.total_memory} < {minimum_total}")
+    effective_minimum_total = max(0, minimum_total - TOTAL_VRAM_REPORTING_TOLERANCE_BYTES)
+    if props.total_memory < effective_minimum_total:
+        raise RuntimeError(
+            "blocked_total_vram_below_gate: "
+            f"{props.total_memory} < {effective_minimum_total} "
+            f"(configured={minimum_total}, reporting_tolerance={TOTAL_VRAM_REPORTING_TOLERANCE_BYTES})"
+        )
     if free < minimum_free:
         raise RuntimeError(f"blocked_free_vram_below_gate: {free} < {minimum_free}")
     return {
         "device": int(device),
         "device_name": torch.cuda.get_device_name(device),
-        "total_vram_bytes": int(total),
+        "total_vram_bytes": int(props.total_memory),
+        "mem_get_info_total_vram_bytes": int(total),
         "free_vram_bytes_before_load": int(free),
         "minimum_total_vram_bytes": minimum_total,
+        "effective_minimum_total_vram_bytes": effective_minimum_total,
+        "total_vram_reporting_tolerance_bytes": TOTAL_VRAM_REPORTING_TOLERANCE_BYTES,
         "minimum_free_vram_bytes": minimum_free,
         "bf16_supported": True,
         "cuda_version": torch.version.cuda,

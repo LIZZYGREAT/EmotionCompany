@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from scripts import e03_a3_short_train
@@ -158,6 +160,61 @@ def test_gpu_preflight_rejects_invalid_run_id_before_gpu(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="valid unique --run-id"):
         e03_a3_short_train.main(["--mode", "gpu-preflight", "--run-id", "!"])
+
+
+def _fake_torch_for_gpu_gate(total_bytes: int, free_bytes: int):
+    cuda = SimpleNamespace(
+        is_available=lambda: True,
+        is_bf16_supported=lambda: True,
+        current_device=lambda: 0,
+        get_device_properties=lambda _device: SimpleNamespace(total_memory=total_bytes),
+        mem_get_info=lambda _device: (free_bytes, total_bytes),
+        get_device_name=lambda _device: "synthetic GPU",
+    )
+    return SimpleNamespace(cuda=cuda, version=SimpleNamespace(cuda="synthetic"))
+
+
+def test_gpu_gate_allows_small_total_memory_reporting_shortfall() -> None:
+    minimum_total = 8 * 1024**3
+    reported_total = minimum_total - 4_718_592
+    minimum_free = 6 * 1024**3
+    torch = _fake_torch_for_gpu_gate(reported_total, minimum_free)
+
+    facts = e03_a3_short_train._gpu_gate(
+        {"training": {"min_total_vram_gb": 8, "min_free_vram_gb": 6}},
+        torch,
+    )
+
+    assert facts["total_vram_bytes"] == reported_total
+    assert facts["minimum_total_vram_bytes"] == minimum_total
+    assert facts["total_vram_reporting_tolerance_bytes"] == 16 * 1024**2
+    assert facts["effective_minimum_total_vram_bytes"] == minimum_total - 16 * 1024**2
+    assert facts["free_vram_bytes_before_load"] == minimum_free
+
+
+def test_gpu_gate_still_rejects_total_memory_below_reporting_tolerance() -> None:
+    minimum_total = 8 * 1024**3
+    reported_total = minimum_total - 16 * 1024**2 - 1
+    torch = _fake_torch_for_gpu_gate(reported_total, 6 * 1024**3)
+
+    with pytest.raises(RuntimeError, match="blocked_total_vram_below_gate"):
+        e03_a3_short_train._gpu_gate(
+            {"training": {"min_total_vram_gb": 8, "min_free_vram_gb": 6}},
+            torch,
+        )
+
+
+def test_gpu_gate_keeps_minimum_free_memory_requirement() -> None:
+    minimum_total = 8 * 1024**3
+    total = minimum_total - 4_718_592
+    minimum_free = 6 * 1024**3
+    torch = _fake_torch_for_gpu_gate(total, minimum_free - 1)
+
+    with pytest.raises(RuntimeError, match="blocked_free_vram_below_gate"):
+        e03_a3_short_train._gpu_gate(
+            {"training": {"min_total_vram_gb": 8, "min_free_vram_gb": 6}},
+            torch,
+        )
 
 
 def _case(index: int, cluster: str, candidate_tp: int, control_tp: int) -> dict:
