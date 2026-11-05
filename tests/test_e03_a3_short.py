@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from scripts import e03_a3_short_train
 from scripts.e03_a3_short_evaluate import paired_cluster_bootstrap
 from src.training.e03_a3_sampling import (
     NATURAL,
@@ -143,6 +144,20 @@ def test_candidate_schedule_requires_both_short_history_strata() -> None:
             per_device_micro_batch_size=1,
             gradient_accumulation_steps=4,
         )
+
+
+def test_gpu_preflight_rejects_invalid_run_id_before_gpu(monkeypatch) -> None:
+    monkeypatch.setattr(e03_a3_short_train, "_resolve", lambda path: path)
+    monkeypatch.setattr(e03_a3_short_train, "_config", lambda path: {"data": {"output_root": "unused"}})
+    monkeypatch.setattr(e03_a3_short_train, "_verify_static_assets", lambda config: {"status": "passed"})
+    monkeypatch.setattr(
+        e03_a3_short_train,
+        "_run_gpu_preflight",
+        lambda *_args: pytest.fail("invalid Run ID must be rejected before GPU preflight"),
+    )
+
+    with pytest.raises(ValueError, match="valid unique --run-id"):
+        e03_a3_short_train.main(["--mode", "gpu-preflight", "--run-id", "!"])
 
 
 def _case(index: int, cluster: str, candidate_tp: int, control_tp: int) -> dict:
