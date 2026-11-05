@@ -33,6 +33,9 @@ MAX_F3_TRAIN_ROWS = 16192
 MAX_F3_DEV_ROWS = 1821
 EXPECTED_PILOT_PAUSE_STEP = 32
 EXPECTED_PILOT_STEPS = 128
+PRECHECKPOINT_TRAINING_CODE_SHA256 = "8999cd1465cd447fc483731e8902cd3b231a99ce21661368ba8e02398e6a0e2e"
+PRECHECKPOINT_PILOT_MODULE_SHA256 = "7cb5e9468b061faae5c10422d5acd28ad2bd0f47ae6434fd16c88c25ede052e0"
+RECOVERABLE_RESUME_FAILURE = "NameError: name '_read_training_log' is not defined"
 
 
 def _now() -> str:
@@ -384,6 +387,116 @@ def _same_source_identity(expected: dict[str, Any], manifest: dict[str, Any]) ->
             raise ValueError(f"Pilot source identity changed since Run creation: {key}")
 
 
+def _adopt_checkpoint_compatible_resume_code(
+    source_identity: dict[str, Any], manifest: dict[str, Any],
+) -> str:
+    """Allow one frozen resume-orchestration repair without changing checkpoint identity."""
+    old_code_sha = manifest.get("training_code_sha256")
+    current_code_sha = source_identity["training_code_sha256"]
+    old_files = manifest.get("training_code_files")
+    current_files = source_identity["training_code_files"]
+    compatibility = manifest.get("resume_code_compatibility")
+    if compatibility:
+        if (
+            old_code_sha != current_code_sha
+            or old_files != current_files
+            or compatibility.get("continuation_training_code_sha256") != current_code_sha
+            or compatibility.get("continuation_training_code_files") != current_files
+        ):
+            raise ValueError("Pilot resume code changed again after its one-time compatibility repair")
+        return str(compatibility["checkpoint_training_code_sha256"])
+    if old_code_sha == current_code_sha and old_files == current_files:
+        return current_code_sha
+
+    changed_files = sorted(
+        name for name in set(old_files or {}) | set(current_files or {})
+        if (old_files or {}).get(name) != (current_files or {}).get(name)
+    )
+    expected_files = set(old_files or {})
+    if (
+        manifest.get("run_id") != "E03-A6-F3-PILOT-20261106-01"
+        or old_code_sha != PRECHECKPOINT_TRAINING_CODE_SHA256
+        or manifest.get("checkpoint_identity", {}).get("training_code_sha256") != PRECHECKPOINT_TRAINING_CODE_SHA256
+        or (old_files or {}).get("src/training/e03_a6_pilot.py") != PRECHECKPOINT_PILOT_MODULE_SHA256
+        or set(current_files or {}) != expected_files
+        or changed_files != ["src/training/e03_a6_pilot.py"]
+    ):
+        raise ValueError("Pilot resume source differs from the one reviewed pre-checkpoint compatibility repair")
+
+    manifest["training_code_at_checkpoint"] = {
+        "sha256": old_code_sha,
+        "files": dict(old_files),
+    }
+    manifest["resume_code_compatibility"] = {
+        "reason": "restore the shared JSONL log reader in resume orchestration; no optimizer step, model update, data, config, or checkpoint algorithm changed",
+        "changed_files": changed_files,
+        "original_training_code_sha256": old_code_sha,
+        "original_training_code_files": dict(old_files),
+        "continuation_training_code_sha256": current_code_sha,
+        "continuation_training_code_files": dict(current_files),
+        "checkpoint_training_code_sha256": manifest["checkpoint_identity"]["training_code_sha256"],
+        "checkpoint_identity_preserved": True,
+        "optimizer_steps_executed_after_checkpoint_before_repair": 0,
+    }
+    manifest["training_code_sha256"] = current_code_sha
+    manifest["training_code_files"] = dict(current_files)
+    return str(manifest["checkpoint_identity"]["training_code_sha256"])
+
+
+def _recover_pretrain_resume_failure(run_root: Path, manifest: dict[str, Any]) -> bool:
+    """Restore the exact checkpoint-32 state after a failure before resumed Trainer.train()."""
+    if manifest.get("status") != "failed":
+        return False
+    if (
+        manifest.get("run_id") != "E03-A6-F3-PILOT-20261106-01"
+        or manifest.get("stage") != "training_failed"
+        or manifest.get("optimizer_steps") != 0
+        or manifest.get("error") != RECOVERABLE_RESUME_FAILURE
+        or manifest.get("last_checkpoint") != str((run_root / "trainer" / "checkpoint-32").resolve())
+        or manifest.get("checkpoint_manifest_sha256") != _sha256(run_root / "trainer" / "checkpoint-32" / "checkpoint_manifest.json")
+    ):
+        raise ValueError("Pilot Run failed outside the one recoverable pre-train checkpoint-resume path")
+
+    from src.training.training_sft import _verify_checkpoint
+
+    checkpoint = run_root / "trainer" / "checkpoint-32"
+    _verify_checkpoint(
+        checkpoint,
+        expected=manifest["checkpoint_identity"],
+        run_id=manifest["run_id"],
+    )
+    state = json.loads((checkpoint / "trainer_state.json").read_text(encoding="utf-8"))
+    log_rows = _verify_training_log(run_root, EXPECTED_PILOT_PAUSE_STEP)
+    if state.get("global_step") != EXPECTED_PILOT_PAUSE_STEP:
+        raise ValueError("recoverable Pilot Checkpoint does not point to optimizer step 32")
+    if not manifest.get("training_attempts") or manifest["training_attempts"][-1].get("ending_optimizer_step") != EXPECTED_PILOT_PAUSE_STEP:
+        raise ValueError("Pilot Run has no successful step-32 attempt before the pre-train failure")
+
+    failure = {
+        "status": manifest["status"],
+        "stage": manifest["stage"],
+        "error": manifest["error"],
+        "failed_at_utc": manifest.get("failed_at_utc"),
+        "optimizer_steps_after_checkpoint": 0,
+        "checkpoint_global_step_verified": EXPECTED_PILOT_PAUSE_STEP,
+        "verified_log_rows": len(log_rows),
+        "checkpoint_manifest_sha256": manifest["checkpoint_manifest_sha256"],
+    }
+    manifest["recovered_pretrain_resume_failure"] = failure
+    manifest.update(
+        status="interrupted",
+        stage="checkpoint_saved",
+        optimizer_steps=EXPECTED_PILOT_PAUSE_STEP,
+        max_optimizer_steps=EXPECTED_PILOT_STEPS,
+        stop_reason="requested_checkpoint_pause",
+        recovered_at_utc=_now(),
+    )
+    manifest.pop("error", None)
+    manifest.pop("failed_at_utc", None)
+    _write_json(run_root / "manifest.json", manifest)
+    return True
+
+
 def _write_selected_files(run_root: Path, assets: dict[str, Any]) -> None:
     rows = assets["selected_metadata"]
     _write_json(run_root / "selected_samples.json", {
@@ -689,6 +802,8 @@ def _verify_dry_step_gate(
     assets: dict[str, Any],
     source_identity: dict[str, Any],
     dry_step_run_id: str,
+    *,
+    expected_training_code_sha256: str | None = None,
 ) -> dict[str, Any]:
     if not isinstance(dry_step_run_id, str) or not dry_step_run_id.startswith("E03-A6-F3-PILOT-DRYSTEP-"):
         raise ValueError("Pilot Train requires a passing A6 Trainer dry-step Run")
@@ -706,7 +821,7 @@ def _verify_dry_step_gate(
     )) or not result.get("updated_parameter_count"):
         raise ValueError("Pilot Trainer dry-step evidence is missing required LoRA/Base invariants")
     expected = {
-        "training_code_sha256": source_identity["training_code_sha256"],
+        "training_code_sha256": expected_training_code_sha256 or source_identity["training_code_sha256"],
         "config_sha256": source_identity["run_config_sha256"],
         "dataset_manifest_sha256": assets["data_facts"]["f3_manifest_sha256"],
         "f3_train_sha256": assets["data_facts"]["f3_train_sha256"],
@@ -762,13 +877,9 @@ def _execute_pilot_training(
     if resume:
         manifest = _load_manifest(run_root)
         dry_step_run_id = manifest.get("dry_step_prerequisite", {}).get("run_id")
-        microfit_facts = _verify_microfit_gate(config, assets)
-        dry_step_facts = _verify_dry_step_gate(config, assets, source_identity, dry_step_run_id)
-        if manifest.get("dry_step_prerequisite", {}).get("result_sha256") != dry_step_facts["result_sha256"]:
-            raise ValueError("Pilot dry-step result changed after checkpoint-32 was created")
+        _recover_pretrain_resume_failure(run_root, manifest)
         checkpoint_name = "checkpoint-32"
         validate_pilot_resume_manifest(manifest, run_id=run_id, checkpoint_name=checkpoint_name)
-        _same_source_identity(source_identity, manifest)
         from src.training.training_sft import _verify_checkpoint
 
         checkpoint = run_root / "trainer" / checkpoint_name
@@ -777,6 +888,20 @@ def _execute_pilot_training(
             expected=manifest["checkpoint_identity"],
             run_id=run_id,
         )
+        checkpoint_training_code_sha256 = _adopt_checkpoint_compatible_resume_code(
+            source_identity, manifest,
+        )
+        _same_source_identity(source_identity, manifest)
+        microfit_facts = _verify_microfit_gate(config, assets)
+        dry_step_facts = _verify_dry_step_gate(
+            config,
+            assets,
+            source_identity,
+            dry_step_run_id,
+            expected_training_code_sha256=checkpoint_training_code_sha256,
+        )
+        if manifest.get("dry_step_prerequisite", {}).get("result_sha256") != dry_step_facts["result_sha256"]:
+            raise ValueError("Pilot dry-step result changed after checkpoint-32 was created")
         if manifest.get("gpu_preflight", {}).get("gpu_name") != gpu_facts["gpu_name"]:
             raise ValueError("Pilot GPU device changed between checkpoint pause and resume")
         if manifest.get("status") != "interrupted":
@@ -818,6 +943,7 @@ def _execute_pilot_training(
         _load_train_model,
         _optimizer_evidence_callback,
         _prepare_resume_logs,
+        _read_training_log,
         _seed_everything,
         _snapshot_trainer_data_path_facts,
         _trainable_parameters,

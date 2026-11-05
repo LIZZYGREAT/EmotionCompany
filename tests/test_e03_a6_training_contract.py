@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -15,6 +17,13 @@ from src.training.e03_a6_contract import (
     validate_microfit_config,
     validate_pilot_config,
     validate_pilot_resume_manifest,
+)
+from src.training.e03_a6_pilot import (
+    PRECHECKPOINT_PILOT_MODULE_SHA256,
+    PRECHECKPOINT_TRAINING_CODE_SHA256,
+    RECOVERABLE_RESUME_FAILURE,
+    _adopt_checkpoint_compatible_resume_code,
+    _recover_pretrain_resume_failure,
 )
 
 
@@ -142,6 +151,101 @@ def test_pilot_resume_requires_its_own_exact_checkpoint_32_manifest():
             run_id=manifest["run_id"],
             checkpoint_name="checkpoint-32",
         )
+
+
+def test_pilot_resume_records_only_the_frozen_checkpoint_compatible_code_repair():
+    old_files = {
+        "scripts/e03_a6_train.py": "1" * 64,
+        "src/training/e03_a6_pilot.py": PRECHECKPOINT_PILOT_MODULE_SHA256,
+        "src/training/e03_a6_contract.py": "2" * 64,
+    }
+    current_files = {**old_files, "src/training/e03_a6_pilot.py": "3" * 64}
+    source_identity = {
+        "training_code_files": current_files,
+        "training_code_sha256": canonical_sha256(current_files),
+    }
+    manifest = {
+        "run_id": "E03-A6-F3-PILOT-20261106-01",
+        "training_code_files": old_files,
+        "training_code_sha256": PRECHECKPOINT_TRAINING_CODE_SHA256,
+        "checkpoint_identity": {
+            "training_code_sha256": PRECHECKPOINT_TRAINING_CODE_SHA256,
+        },
+    }
+    assert _adopt_checkpoint_compatible_resume_code(source_identity, manifest) == PRECHECKPOINT_TRAINING_CODE_SHA256
+    assert manifest["training_code_at_checkpoint"]["sha256"] == PRECHECKPOINT_TRAINING_CODE_SHA256
+    assert manifest["resume_code_compatibility"]["changed_files"] == ["src/training/e03_a6_pilot.py"]
+    assert manifest["resume_code_compatibility"]["checkpoint_identity_preserved"] is True
+    assert manifest["training_code_files"] == current_files
+    assert _adopt_checkpoint_compatible_resume_code(source_identity, manifest) == PRECHECKPOINT_TRAINING_CODE_SHA256
+
+    unsafe_manifest = {
+        "run_id": "E03-A6-F3-PILOT-20261106-01",
+        "training_code_files": old_files,
+        "training_code_sha256": PRECHECKPOINT_TRAINING_CODE_SHA256,
+        "checkpoint_identity": {"training_code_sha256": PRECHECKPOINT_TRAINING_CODE_SHA256},
+    }
+    unsafe_files = {**current_files, "src/training/training_sft.py": "4" * 64}
+    with pytest.raises(ValueError, match="compatibility repair"):
+        _adopt_checkpoint_compatible_resume_code(
+            {"training_code_files": unsafe_files, "training_code_sha256": canonical_sha256(unsafe_files)},
+            unsafe_manifest,
+        )
+
+
+def test_pilot_resume_recovers_only_pretrain_failure_with_verified_checkpoint32(tmp_path):
+    from src.training.training_sft import _write_checkpoint_manifest
+
+    run_id = "E03-A6-F3-PILOT-20261106-01"
+    run_root = tmp_path / run_id
+    checkpoint = run_root / "trainer" / "checkpoint-32"
+    checkpoint.mkdir(parents=True)
+    for name in (
+        "optimizer.pt", "scheduler.pt", "rng_state.pth", "adapter_config.json",
+        "adapter_model.safetensors",
+    ):
+        (checkpoint / name).write_bytes(b"verified checkpoint fixture")
+    (checkpoint / "trainer_state.json").write_text(json.dumps({"global_step": 32}))
+    checkpoint_identity = {"run_id": run_id, "training_code_sha256": PRECHECKPOINT_TRAINING_CODE_SHA256}
+    _write_checkpoint_manifest(
+        checkpoint,
+        {**checkpoint_identity, "optimizer_step": 32},
+    )
+    rows = [{
+        "optimizer_step": step,
+        "loss": 1.0,
+        "finite_gradients": True,
+        "nonzero_gradient_parameter_count": 1,
+        "parameter_update_checked": True,
+        "updated_parameter_count": 1,
+    } for step in range(1, 33)]
+    (run_root / "train_log.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    manifest_path = checkpoint / "checkpoint_manifest.json"
+    manifest = {
+        "run_id": run_id,
+        "status": "failed",
+        "stage": "training_failed",
+        "optimizer_steps": 0,
+        "error": RECOVERABLE_RESUME_FAILURE,
+        "last_checkpoint": str(checkpoint.resolve()),
+        "checkpoint_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        "checkpoint_identity": checkpoint_identity,
+        "training_attempts": [{"ending_optimizer_step": 32}],
+    }
+    assert _recover_pretrain_resume_failure(run_root, manifest) is True
+    assert manifest["status"] == "interrupted"
+    assert manifest["optimizer_steps"] == 32
+    assert manifest["recovered_pretrain_resume_failure"]["optimizer_steps_after_checkpoint"] == 0
+    assert manifest["recovered_pretrain_resume_failure"]["verified_log_rows"] == 32
+
+    manifest.update(
+        status="failed",
+        stage="training_failed",
+        optimizer_steps=0,
+        error="RuntimeError: partial optimizer update",
+    )
+    with pytest.raises(ValueError, match="recoverable pre-train"):
+        _recover_pretrain_resume_failure(run_root, manifest)
 
 
 def test_f3_protocol_reload_prefix_stops_after_actual_r_marker_tokens():
