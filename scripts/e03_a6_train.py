@@ -22,7 +22,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.shared.f3_protocol import parse_f3
-from src.training.e03_a6_contract import canonical_sha256, validate_microfit_config
+from src.training.e03_a6_contract import (
+    canonical_sha256,
+    f3_prefix_through_r_marker,
+    validate_microfit_config,
+)
 
 
 def _now() -> str:
@@ -238,6 +242,15 @@ def _generate(model: Any, tokenizer: Any, prompt_ids: list[int], max_new_tokens:
     return captured
 
 
+def _protocol_prefix_ids(generation: dict[str, Any], tokenizer: Any) -> tuple[list[int], str]:
+    prefix_ids, prefix_text = f3_prefix_through_r_marker(
+        generation["generated_token_ids"],
+        lambda ids: tokenizer.decode(ids, skip_special_tokens=True),
+    )
+    parse_f3(prefix_text, _f3_enums())
+    return prefix_ids, prefix_text
+
+
 def _f3_enums() -> dict[str, list[str]]:
     from participant import run_inference as inference
 
@@ -268,6 +281,12 @@ def execute_microfit(config_path: Path, run_id: str) -> Path:
         "selected_samples": selected_metadata,
         "train_sample_count": len(rows),
     }
+    code_files = {
+        "scripts/e03_a6_train.py": _sha256(Path(__file__).resolve()),
+        "src/training/e03_a6_contract.py": _sha256(ROOT / "src/training/e03_a6_contract.py"),
+        "src/training/training_sft.py": _sha256(ROOT / "src/training/training_sft.py"),
+        "participant/run_inference.py": _sha256(ROOT / "participant/run_inference.py"),
+    }
     _write_json(run_root / "selected_samples.json", data_facts)
     manifest: dict[str, Any] = {
         "run_id": run_id,
@@ -277,6 +296,8 @@ def execute_microfit(config_path: Path, run_id: str) -> Path:
         "stage": "preflight",
         "created_at_utc": _now(),
         "config_sha256": config_sha,
+        "training_code_files": code_files,
+        "training_code_sha256": canonical_sha256(code_files),
         "data": data_facts,
         "training_budget": {
             "max_optimizer_steps": int(config["training"]["max_optimizer_steps"]),
@@ -303,6 +324,11 @@ def execute_microfit(config_path: Path, run_id: str) -> Path:
         tokenizer, tokenizer_facts = _load_tokenizer(config)
         training_config = _training_config(config)
         model, torch, model_facts = _load_train_model(training_config, base_path)
+        trained_lora_dtypes = sorted({
+            str(parameter.dtype)
+            for parameter in model.parameters()
+            if parameter.requires_grad
+        })
         trainable_before = {
             name: parameter.detach().to(device="cpu", copy=True)
             for name, parameter in model.named_parameters() if parameter.requires_grad
@@ -372,6 +398,18 @@ def execute_microfit(config_path: Path, run_id: str) -> Path:
             before["generated_token_ids"] == after["generated_token_ids"]
             for before, after in zip(trained, after_reload)
         ]
+        prefix_pairs = [
+            (_protocol_prefix_ids(before, tokenizer), _protocol_prefix_ids(after, tokenizer))
+            for before, after in zip(trained, after_reload)
+        ]
+        prefix_match = [before[0] == after[0] for before, after in prefix_pairs]
+        prefix_text_match = [before[1] == after[1] for before, after in prefix_pairs]
+        reloaded_lora_dtypes = sorted({
+            str(parameter.dtype)
+            for name, parameter in reloaded.named_parameters()
+            if ".lora_A." in name or ".lora_B." in name
+        })
+        dtype_match = trained_lora_dtypes == reloaded_lora_dtypes
         base_after = _base_identity(config)
         base_unchanged = base_after.get("observed_weight_hash") == expected_base_sha == base_before.get("observed_weight_hash")
         nonempty_predictions = sum(
@@ -379,9 +417,16 @@ def execute_microfit(config_path: Path, run_id: str) -> Path:
             for prediction in after_reload
         )
         _write_json(run_root / "reload_check.json", {
-            "status": "passed" if all(reload_match) and base_unchanged else "failed",
-            "token_ids_exact_match_per_sample": reload_match,
-            "token_ids_exact_match": all(reload_match),
+            "status": "passed" if all(prefix_match) and all(prefix_text_match) and dtype_match and base_unchanged else "failed",
+            "full_generation_token_ids_exact_match_per_sample": reload_match,
+            "full_generation_token_ids_exact_match": all(reload_match),
+            "f3_protocol_prefix_token_ids_exact_match_per_sample": prefix_match,
+            "f3_protocol_prefix_text_exact_match_per_sample": prefix_text_match,
+            "f3_protocol_prefix_token_ids_exact_match": all(prefix_match),
+            "f3_protocol_prefix_text_exact_match": all(prefix_text_match),
+            "trainable_lora_dtypes_before_save": trained_lora_dtypes,
+            "lora_dtypes_after_reload": reloaded_lora_dtypes,
+            "lora_dtype_exact_match": dtype_match,
             "base_weights_unchanged": base_unchanged,
             "base_weight_sha256_before": base_before.get("observed_weight_hash"),
             "base_weight_sha256_after": base_after.get("observed_weight_hash"),
@@ -394,7 +439,9 @@ def execute_microfit(config_path: Path, run_id: str) -> Path:
             "after_reload": after_reload,
         })
         losses = [float(row["loss"]) for row in step_log]
-        engineering_passed = all(reload_match) and base_unchanged
+        engineering_passed = (
+            all(prefix_match) and all(prefix_text_match) and dtype_match and base_unchanged
+        )
         microfit_passed = (
             len(step_log) == int(config["training"]["max_optimizer_steps"])
             and all(math.isfinite(loss) for loss in losses)
@@ -413,6 +460,10 @@ def execute_microfit(config_path: Path, run_id: str) -> Path:
             "f3_nonempty_profile_predictions_after_reload": nonempty_predictions,
             "selected_nonempty_train_samples": len(rows),
             "reload_token_ids_exact_match": all(reload_match),
+            "reload_f3_protocol_prefix_token_ids_exact_match": all(prefix_match),
+            "reload_lora_dtype_exact_match": dtype_match,
+            "full_generation_response_token_ids_mismatches": sum(not value for value in reload_match),
+            "training_code_sha256": manifest["training_code_sha256"],
             "base_weights_unchanged": base_unchanged,
             "adapter_identity": adapter_facts,
             "cuda_preflight": cuda_facts,

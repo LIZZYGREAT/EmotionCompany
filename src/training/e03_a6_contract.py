@@ -89,3 +89,16 @@ def validate_historical_pilot_selection(selection: Mapping[str, Any]) -> list[st
     ):
         raise ValueError("historical Pilot selection rule differs from the frozen E01-B artifact")
     return ids
+
+
+def f3_prefix_through_r_marker(
+    token_ids: Sequence[int], decode_prefix: Any,
+) -> tuple[list[int], str]:
+    """Return IDs through the token that completes the generated ``\nR=`` marker."""
+    for end in range(1, len(token_ids) + 1):
+        decoded = decode_prefix(list(token_ids[:end]))
+        marker = decoded.find("\nR=")
+        if marker >= 0:
+            boundary = marker + len("\nR=")
+            return list(token_ids[:end]), decoded[:boundary]
+    raise ValueError("generated token IDs did not complete the F3 R= boundary")

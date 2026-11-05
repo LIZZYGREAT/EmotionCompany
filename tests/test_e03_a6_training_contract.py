@@ -9,6 +9,7 @@ import yaml
 from src.training.e03_a6_contract import (
     MICROFIT_EXPERIMENT_ID,
     canonical_sha256,
+    f3_prefix_through_r_marker,
     validate_historical_pilot_selection,
     validate_microfit_config,
 )
@@ -74,3 +75,15 @@ def test_microfit_cli_has_no_full_training_mode():
     assert parser._option_string_actions["--mode"].choices == ("microfit",)
     with pytest.raises(SystemExit):
         parser.parse_args(["--mode", "full-train", "--run-id", "E03-A6-F3-FULL-UNAPPROVED"])
+
+
+def test_f3_protocol_reload_prefix_stops_after_actual_r_marker_tokens():
+    first = list(map(ord, "E=sadness\nP=-\nI=-\nS=brief\nR=回答一"))
+    second = list(map(ord, "E=sadness\nP=-\nI=-\nS=brief\nR=回答二"))
+    decode = lambda ids: "".join(map(chr, ids))
+    first_prefix, first_text = f3_prefix_through_r_marker(first, decode)
+    second_prefix, second_text = f3_prefix_through_r_marker(second, decode)
+    assert first_prefix == second_prefix
+    assert first_text == second_text == "E=sadness\nP=-\nI=-\nS=brief\nR="
+    with pytest.raises(ValueError, match="R= boundary"):
+        f3_prefix_through_r_marker(list(map(ord, "E=sadness\nP=-\nI=-\nS=brief")), decode)
