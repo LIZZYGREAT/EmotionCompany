@@ -1117,6 +1117,26 @@ def _build_sft_trainer(
         processing_class=tokenizer,
         callbacks=[callback],
     )
+    if config.get("experiment_id") == "E03-A6-F3-PILOT":
+        # TRL's SFTTrainer downcasts every trainable parameter to BF16 for
+        # quantized models. A6 F3 saves FP32 LoRA adapters and reloads them
+        # with PEFT's FP32 adapter autocast, so restore the frozen adapter
+        # dtype after SFTTrainer initialization and before optimizer creation.
+        import torch
+
+        expected_dtype_name = config.get("lora", {}).get("checkpoint_dtype")
+        expected_dtype = getattr(torch, expected_dtype_name, None)
+        if expected_dtype is None:
+            raise ValueError("E03-A6 Pilot requires an explicit supported LoRA checkpoint dtype")
+        for target_model in (model, trainer.model):
+            for _name, parameter in _trainable_parameters(target_model):
+                parameter.data = parameter.data.to(dtype=expected_dtype)
+        observed_dtypes = {parameter.dtype for _name, parameter in _trainable_parameters(trainer.model)}
+        if observed_dtypes != {expected_dtype}:
+            raise RuntimeError(
+                "TRL did not preserve the frozen E03-A6 Pilot LoRA dtype after initialization: "
+                f"expected={expected_dtype_name}, actual={sorted(map(str, observed_dtypes))}"
+            )
     if not trainer._skip_prepare_dataset or trainer.data_collator is not collator:
         raise RuntimeError("SFTTrainer must preserve the pre-tokenized D0.4.3 dataset and custom collator")
     if trainer.args.max_length is not None or trainer.args.packing or trainer.args.padding_free:
