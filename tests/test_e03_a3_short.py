@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from datetime import date
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -160,6 +163,17 @@ def test_gpu_preflight_rejects_invalid_run_id_before_gpu(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="valid unique --run-id"):
         e03_a3_short_train.main(["--mode", "gpu-preflight", "--run-id", "!"])
+
+
+def test_run_manifest_writer_serializes_yaml_date_values(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    e03_a3_short_train._write_json(
+        manifest_path,
+        {"authorization_receipt": {"authorized_on": date(2026, 11, 4)}},
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["authorization_receipt"]["authorized_on"] == "2026-11-04"
 
 
 def _fake_torch_for_gpu_gate(total_bytes: int, free_bytes: int):
