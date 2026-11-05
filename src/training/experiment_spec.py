@@ -102,25 +102,90 @@ def validate_experiment_spec(
         raise ValueError("resource_gate.max_gpu_memory_bytes must be explicitly positive")
 
     initialization = spec.get("initialization")
-    if not isinstance(initialization, Mapping) or initialization.get("source") != "base":
-        raise ValueError("new LoRA comparison Runs must initialize from the Base model")
-    if initialization.get("adapter_path") not in (None, ""):
-        raise ValueError("new experiment specs cannot initialize from an existing Adapter")
+    if not isinstance(initialization, Mapping):
+        raise ValueError("initialization mode is required")
+    initialization_mode = initialization.get("mode")
+    if initialization_mode not in {"new_adapter_from_base", "new_run_from_existing_adapter"}:
+        raise ValueError("initialization.mode must choose one of the two supported isolated routes")
     if initialization.get("resume_from_checkpoint") not in (None, ""):
-        raise ValueError("new experiment specs cannot resume another Run")
+        raise ValueError("new experiment specs cannot resume another Run checkpoint")
+    if initialization.get("optimizer_state") != "fresh":
+        raise ValueError("new experiment specs require a fresh optimizer state")
     base_sha = initialization.get("base_weight_sha256")
     if not isinstance(base_sha, str) or len(base_sha) != 64 or any(ch not in "0123456789abcdef" for ch in base_sha.lower()):
         raise ValueError("initialization.base_weight_sha256 must identify the frozen Base")
-    if observed_adapter is not None:
-        configured_base_sha = initialization.get("base_weight_sha256")
+    if initialization_mode == "new_adapter_from_base":
+        if initialization.get("source") != "base":
+            raise ValueError("new_adapter_from_base must initialize from Base")
+        if any(initialization.get(field) not in (None, "") for field in (
+            "adapter_path", "adapter_weight_sha256", "adapter_config_sha256",
+        )):
+            raise ValueError("new_adapter_from_base cannot carry an existing Adapter identity")
+        if observed_adapter is not None:
+            observed_base_sha = observed_adapter.get("base_weight_sha256")
+            if observed_base_sha is not None and observed_base_sha.lower() != base_sha.lower():
+                raise ValueError("configured Base weight identity differs from the observed Adapter Base")
+    else:
+        if initialization.get("source") != "existing_adapter":
+            raise ValueError("new_run_from_existing_adapter must name an existing Adapter source")
+        adapter_path = initialization.get("adapter_path")
+        if not isinstance(adapter_path, str) or not adapter_path.strip():
+            raise ValueError("same-rank continuation requires an explicit read-only adapter_path")
+        expected_adapter_weight_sha = initialization.get("adapter_weight_sha256")
+        expected_adapter_config_sha = initialization.get("adapter_config_sha256")
+        for field, value in (
+            ("adapter_weight_sha256", expected_adapter_weight_sha),
+            ("adapter_config_sha256", expected_adapter_config_sha),
+        ):
+            if (
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value.lower())
+            ):
+                raise ValueError(f"initialization.{field} must pin the source Adapter identity")
+        if observed_adapter is None:
+            raise ValueError("existing Adapter initialization requires an observed Adapter identity")
         observed_base_sha = observed_adapter.get("base_weight_sha256")
-        if configured_base_sha and observed_base_sha and configured_base_sha != observed_base_sha:
+        if not isinstance(observed_base_sha, str) or observed_base_sha.lower() != base_sha.lower():
             raise ValueError("configured Base weight identity differs from the observed Adapter Base")
-        observed_rank = observed_adapter.get("r")
-        configured_rank = lora["r"]
-        if observed_rank is not None and configured_rank != observed_rank:
-            if initialization.get("source") != "base" or initialization.get("adapter_path") not in (None, ""):
-                raise ValueError("a changed LoRA rank cannot load or resume the existing Adapter")
+        observed_adapter_weight_sha = observed_adapter.get("weight_sha256")
+        if (
+            not isinstance(observed_adapter_weight_sha, str)
+            or observed_adapter_weight_sha.lower() != expected_adapter_weight_sha.lower()
+        ):
+            raise ValueError("configured Adapter weight SHA differs from the observed Adapter")
+        observed_adapter_config_sha = observed_adapter.get("config_sha256")
+        if (
+            not isinstance(observed_adapter_config_sha, str)
+            or observed_adapter_config_sha.lower() != expected_adapter_config_sha.lower()
+        ):
+            raise ValueError("configured Adapter config SHA differs from the observed Adapter")
+        if observed_adapter.get("r") != lora["r"] or observed_adapter.get("alpha") != lora["alpha"]:
+            raise ValueError("existing Adapter continuation must preserve LoRA rank and alpha")
+        observed_modules = observed_adapter.get("target_modules")
+        if (
+            not isinstance(observed_modules, list)
+            or any(not isinstance(name, str) or not name for name in observed_modules)
+            or len(observed_modules) != len(set(observed_modules))
+            or set(observed_modules) != set(target_modules)
+        ):
+            raise ValueError("existing Adapter continuation must preserve target modules")
+        expected_quantization = initialization.get("quantization")
+        observed_quantization = observed_adapter.get("quantization")
+        if not isinstance(expected_quantization, Mapping) or not isinstance(observed_quantization, Mapping):
+            raise ValueError("existing Adapter continuation requires an explicit quantization identity")
+        required_quantization_fields = {
+            "method", "load_in_4bit", "quant_type", "compute_dtype", "use_double_quant",
+        }
+        if not required_quantization_fields <= set(expected_quantization) or not required_quantization_fields <= set(observed_quantization):
+            raise ValueError("existing Adapter continuation quantization identity is incomplete")
+        if dict(expected_quantization) != dict(observed_quantization):
+            raise ValueError("existing Adapter continuation must preserve quantization settings")
+        parameter_dtype = initialization.get("parameter_dtype")
+        if not isinstance(parameter_dtype, str) or not parameter_dtype.strip():
+            raise ValueError("existing Adapter continuation requires an explicit parameter_dtype")
+        if observed_adapter.get("parameter_dtype") != parameter_dtype:
+            raise ValueError("existing Adapter continuation must preserve LoRA parameter dtype")
 
     bce = spec.get("bce")
     if objective == "sft_plus_bce":
@@ -151,7 +216,15 @@ def validate_experiment_spec(
         "lora_alpha": lora["alpha"],
         "target_modules": list(target_modules),
         "max_gpu_memory_bytes": memory_budget,
-        "initialization_source": "base",
+        "initialization_mode": initialization_mode,
+        "initialization_source": initialization.get("source"),
+        "source_adapter_weight_sha256": (
+            initialization.get("adapter_weight_sha256")
+            if initialization_mode == "new_run_from_existing_adapter"
+            else None
+        ),
+        "optimizer_state": "fresh",
+        "resume_from_checkpoint": None,
         "training_enabled": False,
         "authorization_status": "requires_separate_approval",
     }

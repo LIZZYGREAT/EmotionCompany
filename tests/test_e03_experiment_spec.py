@@ -48,9 +48,11 @@ def _spec():
         "lora": {"r": 16, "alpha": 32, "target_modules": ["q_proj", "v_proj"]},
         "resource_gate": {"max_gpu_memory_bytes": 8_000_000_000},
         "initialization": {
+            "mode": "new_adapter_from_base",
             "source": "base",
             "adapter_path": None,
             "resume_from_checkpoint": None,
+            "optimizer_state": "fresh",
             "base_weight_sha256": "a" * 64,
         },
     }
@@ -124,6 +126,7 @@ def test_experiment_spec_is_validation_only_and_rank_change_starts_from_base():
     assert result["status"] == "validation_passed"
     assert result["lora_r"] == 16
     assert result["initialization_source"] == "base"
+    assert result["initialization_mode"] == "new_adapter_from_base"
     assert result["training_enabled"] is False
     assert result["authorization_status"] == "requires_separate_approval"
     unsafe = _spec()
@@ -141,3 +144,100 @@ def test_spec_cannot_enable_training_or_use_old_a1_identity():
     old_identity["experiment_id"] = "E03-A1"
     with pytest.raises(ValueError, match="new versioned"):
         validate_experiment_spec(old_identity)
+
+
+def test_base_route_cannot_mix_observed_adapter_from_another_base():
+    spec = _spec()
+    with pytest.raises(ValueError, match="Base weight identity"):
+        validate_experiment_spec(
+            spec,
+            observed_adapter={"base_weight_sha256": "b" * 64, "r": 8},
+        )
+
+
+def _same_rank_continuation():
+    spec = _spec()
+    spec["lora"].update(r=8, alpha=16, target_modules=["q_proj", "v_proj"])
+    spec["initialization"] = {
+        "mode": "new_run_from_existing_adapter",
+        "source": "existing_adapter",
+        "adapter_path": "outputs/training/E01-B-FULL/adapter",
+        "base_weight_sha256": "a" * 64,
+        "adapter_weight_sha256": "b" * 64,
+        "adapter_config_sha256": "c" * 64,
+        "optimizer_state": "fresh",
+        "resume_from_checkpoint": None,
+        "quantization": {
+            "method": "bitsandbytes_4bit",
+            "load_in_4bit": True,
+            "quant_type": "nf4",
+            "compute_dtype": "bfloat16",
+            "use_double_quant": True,
+        },
+        "parameter_dtype": "bfloat16",
+    }
+    observed = {
+        "base_weight_sha256": "a" * 64,
+        "weight_sha256": "b" * 64,
+        "config_sha256": "c" * 64,
+        "r": 8,
+        "alpha": 16,
+        "target_modules": ["q_proj", "v_proj"],
+        "quantization": {
+            "method": "bitsandbytes_4bit",
+            "load_in_4bit": True,
+            "quant_type": "nf4",
+            "compute_dtype": "bfloat16",
+            "use_double_quant": True,
+        },
+        "parameter_dtype": "bfloat16",
+    }
+    return spec, observed
+
+
+def test_same_rank_continuation_requires_matching_adapter_and_fresh_optimizer():
+    spec, observed = _same_rank_continuation()
+    result = validate_experiment_spec(spec, observed_adapter=observed)
+    assert result["status"] == "validation_passed"
+    assert result["initialization_mode"] == "new_run_from_existing_adapter"
+    assert result["initialization_source"] == "existing_adapter"
+    assert result["source_adapter_weight_sha256"] == "b" * 64
+    assert result["optimizer_state"] == "fresh"
+    assert result["resume_from_checkpoint"] is None
+    assert result["training_enabled"] is False
+
+
+@pytest.mark.parametrize(
+    ("observed_field", "observed_value", "message"),
+    [
+        ("base_weight_sha256", "d" * 64, "Base weight identity"),
+        ("weight_sha256", "d" * 64, "Adapter weight SHA"),
+        ("config_sha256", "d" * 64, "Adapter config SHA"),
+        ("r", 16, "rank and alpha"),
+        ("alpha", 32, "rank and alpha"),
+        ("target_modules", ["q_proj"], "target modules"),
+        ("quantization", {
+            "method": "bitsandbytes_4bit", "load_in_4bit": True,
+            "quant_type": "nf4", "compute_dtype": "float16", "use_double_quant": True,
+        }, "quantization settings"),
+        ("parameter_dtype", "float32", "parameter dtype"),
+    ],
+)
+def test_same_rank_continuation_rejects_source_identity_or_runtime_mismatch(
+    observed_field, observed_value, message,
+):
+    spec, observed = _same_rank_continuation()
+    observed[observed_field] = observed_value
+    with pytest.raises(ValueError, match=message):
+        validate_experiment_spec(spec, observed_adapter=observed)
+
+
+def test_same_rank_continuation_rejects_checkpoint_and_old_optimizer_state():
+    spec, observed = _same_rank_continuation()
+    spec["initialization"]["resume_from_checkpoint"] = "outputs/training/old/checkpoint-128"
+    with pytest.raises(ValueError, match="cannot resume"):
+        validate_experiment_spec(spec, observed_adapter=observed)
+    spec, observed = _same_rank_continuation()
+    spec["initialization"]["optimizer_state"] = "restored"
+    with pytest.raises(ValueError, match="fresh optimizer"):
+        validate_experiment_spec(spec, observed_adapter=observed)
