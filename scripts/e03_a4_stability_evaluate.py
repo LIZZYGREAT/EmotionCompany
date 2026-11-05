@@ -457,11 +457,44 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("prepare", "compare"))
     parser.add_argument("--config", default="configs/training/e03_a4_lr_stability.yaml")
+    parser.add_argument(
+        "--require-quality-passed",
+        action="store_true",
+        help=(
+            "for compare, return nonzero unless quality status is "
+            "stability_preliminarily_passed; rejected with prepare"
+        ),
+    )
     args = parser.parse_args(argv)
+    if args.mode == "prepare" and args.require_quality_passed:
+        parser.error("--require-quality-passed is only valid with compare")
+
     config_path = _resolve(args.config)
-    result = prepare(config_path) if args.mode == "prepare" else compare(config_path)
-    print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))
-    return 0 if result.get("status") in {"prepared", "stability_preliminarily_passed", "stability_failed"} else 2
+    try:
+        result = prepare(config_path) if args.mode == "prepare" else compare(config_path)
+    except Exception as exc:
+        print(json.dumps({
+            "status": "error",
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "threshold_failures": None,
+            "report_path": None,
+        }, ensure_ascii=False, indent=2, allow_nan=False))
+        return 2
+
+    # Preserve the original result fields and status while giving automation
+    # stable names for the report path and quality-gate findings.
+    console_result = {
+        **result,
+        "threshold_failures": result.get("threshold_failures"),
+        "report_path": result.get("summary") or result.get("evaluation_manifest"),
+    }
+    print(json.dumps(console_result, ensure_ascii=False, indent=2, allow_nan=False))
+
+    status = result.get("status")
+    if args.mode == "compare" and args.require_quality_passed:
+        return 0 if status == "stability_preliminarily_passed" else 1
+    return 0 if status in {"prepared", "stability_preliminarily_passed", "stability_failed"} else 2
 
 
 if __name__ == "__main__":
