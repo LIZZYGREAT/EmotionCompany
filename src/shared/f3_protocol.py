@@ -41,6 +41,27 @@ def submission_enums(submission_schema: dict[str, Any]) -> dict[str, list[str]]:
     return enums
 
 
+def validate_f3_prompt_enum_order(
+    prompt_text: str,
+    enums: dict[str, list[str]],
+) -> None:
+    """Require the isolated F3 prompt to list the submission labels canonically."""
+    expected_prefixes = {
+        "emotion_label": "E 标签（选一个）：",
+        "personality_traits": "P 标签：",
+        "interests": "I 标签：",
+        "style": "S 标签：",
+    }
+    lines = prompt_text.splitlines()
+    for name, prefix in expected_prefixes.items():
+        line = next((value for value in lines if value.startswith(prefix)), None)
+        if line is None:
+            raise ValueError(f"F3 prompt is missing label heading: {prefix}")
+        labels = [value.strip() for value in line[len(prefix):].split(",") if value.strip()]
+        if labels != enums[name] or len(labels) != len(set(labels)):
+            raise ValueError(f"F3 prompt {name} labels/order do not match the official submission schema")
+
+
 def _validate_target(target: dict[str, Any], official_schema: dict[str, Any]) -> None:
     definitions = official_schema.get("$defs", {})
     if "target" not in definitions:

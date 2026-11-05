@@ -77,4 +77,7 @@ jobs:
             tests/test_e03_a4_stability_eval.py \
             tests/test_e03_pipeline_audit.py \
             tests/test_e03_experiment_spec.py \
-            tests/test_e03_experiment_ctl.py
+            tests/test_e03_experiment_ctl.py \
+            tests/test_e03_a6_protocol.py \
+            tests/test_e03_a6_data.py \
+            tests/test_e03_a6_runner.py

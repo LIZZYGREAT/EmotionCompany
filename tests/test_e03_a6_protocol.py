@@ -14,6 +14,7 @@ from src.shared.f3_protocol import (
     parse_f3_prediction,
     serialize_f3,
     submission_enums,
+    validate_f3_prompt_enum_order,
 )
 
 
@@ -23,6 +24,7 @@ SUBMISSION_SCHEMA = json.loads(
     (ROOT / "participant/templates/submission_schema.json").read_text(encoding="utf-8")
 )
 ENUMS = submission_enums(SUBMISSION_SCHEMA)
+F3_PROMPT = (ROOT / "configs/prompts/p_a6_f3.txt").read_text(encoding="utf-8")
 
 
 def _target(response: str = "合成回复") -> dict:
@@ -76,6 +78,12 @@ def test_f3_prediction_fills_id_and_passes_unchanged_submission_schema():
     Draft202012Validator(SUBMISSION_SCHEMA).validate(prediction)
     assert prediction["id"] == "test_000001_t1"
     assert prediction["memory_refs"] == []
+
+
+def test_f3_prompt_label_lists_match_the_unchanged_submission_schema():
+    validate_f3_prompt_enum_order(F3_PROMPT, ENUMS)
+    with pytest.raises(ValueError, match="official submission schema"):
+        validate_f3_prompt_enum_order(F3_PROMPT.replace("E 标签（选一个）：joy", "E 标签（选一个）：not-a-label"), ENUMS)
 
 
 @pytest.mark.parametrize(
