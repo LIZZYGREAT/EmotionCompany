@@ -1346,6 +1346,17 @@ def _optimizer_evidence_callback(
             current = _trainable_parameters(self.model)
             if {name for name, _parameter in current} != set(self.expected_trainable_names):
                 raise RuntimeError("Trainer checkpoint restore changed the trainable LoRA parameter set")
+            expected_adapter_dtype = config.get("lora", {}).get("checkpoint_dtype")
+            if expected_adapter_dtype:
+                import torch
+
+                expected_dtype = getattr(torch, expected_adapter_dtype, None)
+                actual_dtypes = {parameter.dtype for _name, parameter in current}
+                if expected_dtype is None or actual_dtypes != {expected_dtype}:
+                    raise RuntimeError(
+                        "Trainer initialized/restored LoRA dtype differs from its frozen checkpoint dtype: "
+                        f"expected={expected_adapter_dtype}, actual={sorted(map(str, actual_dtypes))}"
+                    )
             self.trainable = current
             self.training_started = time.perf_counter()
             return control

@@ -507,17 +507,44 @@ def execute_microfit(config_path: Path, run_id: str) -> Path:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("microfit",), required=True)
     parser.add_argument(
-        "--config", type=Path, default=ROOT / "configs/training/e03_a6_f3_microfit.yaml"
+        "--mode", choices=("microfit", "pilot-dry-step", "pilot-train", "resume", "reload-check"), required=True,
     )
+    parser.add_argument("--config", type=Path)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument("--dry-step-run-id")
     return parser
 
 
-def main() -> None:
-    args = _build_parser().parse_args()
-    run_root = execute_microfit(args.config.resolve(), args.run_id)
+def main(argv: list[str] | None = None) -> None:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    config_path = args.config.resolve() if args.config else ROOT / (
+        "configs/training/e03_a6_f3_microfit.yaml" if args.mode == "microfit"
+        else "configs/training/e03_a6_f3_pilot.yaml"
+    )
+    if args.mode == "microfit":
+        run_root = execute_microfit(config_path, args.run_id)
+    else:
+        from src.training.e03_a6_pilot import (
+            execute_pilot_dry_step,
+            execute_pilot_reload_check,
+            execute_pilot_resume,
+            execute_pilot_train,
+        )
+
+        if args.mode == "pilot-train" and not args.dry_step_run_id:
+            parser.error("--mode pilot-train requires --dry-step-run-id from a passed Trainer dry-step")
+        action = {
+            "pilot-dry-step": lambda path, run: execute_pilot_dry_step(path, run),
+            "pilot-train": execute_pilot_train,
+            "resume": execute_pilot_resume,
+            "reload-check": execute_pilot_reload_check,
+        }[args.mode]
+        if args.mode == "pilot-train":
+            run_root = action(config_path, args.run_id, args.dry_step_run_id)
+        else:
+            run_root = action(config_path, args.run_id)
     print(json.dumps({"status": "passed", "run_root": str(run_root)}, ensure_ascii=False, indent=2))
 
 
