@@ -33,6 +33,7 @@ def test_microfit_config_freezes_bounded_f3_identity_and_budget():
     {"training_scope": "full"},
     {"training.max_optimizer_steps": 4048},
     {"protocol.format_version": "F2"},
+    {"evaluation.autocast_adapter_dtype": False},
 ])
 def test_microfit_rejects_other_scope_protocol_or_budget(mutation):
     config = yaml.safe_load((ROOT / "configs/training/e03_a6_f3_microfit.yaml").read_text())

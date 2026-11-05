@@ -385,7 +385,7 @@ def execute_microfit(config_path: Path, run_id: str) -> Path:
             training_config,
             base_path,
             adapter_path=run_root / "adapter",
-            autocast_adapter_dtype=False,
+            autocast_adapter_dtype=bool(config["evaluation"]["autocast_adapter_dtype"]),
         )
         after_reload = [
             _generate(
@@ -432,7 +432,7 @@ def execute_microfit(config_path: Path, run_id: str) -> Path:
             "base_weight_sha256_after": base_after.get("observed_weight_hash"),
             "adapter_identity": adapter_facts,
             "reload_runtime": reload_facts,
-            "adapter_dtype_autocast": False,
+            "adapter_dtype_autocast": bool(config["evaluation"]["autocast_adapter_dtype"]),
         })
         _write_json(run_root / "generation_reload.json", {
             "sample_ids": selected_ids,

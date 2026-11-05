@@ -33,6 +33,8 @@ def validate_microfit_config(config: Mapping[str, Any]) -> None:
         raise ValueError("microfit budget is frozen at four samples and 32 optimizer steps")
     if training.get("max_training_seconds") != 1200:
         raise ValueError("microfit time budget must remain fixed at 1200 seconds")
+    if config.get("evaluation", {}).get("autocast_adapter_dtype") is not True:
+        raise ValueError("microfit reload must restore the verified FP32 LoRA checkpoint dtype")
     if config.get("base_model", {}).get("expected_weight_sha256") != (
         "005d20550c04f4e246e5b434448786b44a0196b47d758d0acc77aba279e5bbc5"
     ):

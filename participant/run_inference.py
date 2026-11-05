@@ -700,6 +700,13 @@ def load_peft_adapter(
     return PeftModel.from_pretrained(base_model, str(adapter_path), **load_kwargs)
 
 
+def adapter_autocast_dtype_for_format(format_version: str) -> bool | None:
+    """Keep F2 loading unchanged; F3 QLoRA saves its trainable adapters in FP32."""
+    if format_version == "F3":
+        return True
+    return None
+
+
 def resolve_raw_output_path(result_dir: Path, submission_path: Path) -> Path | None:
     configured = os.environ.get("EVALUATION_RAW_OUTPUT_PATH")
     if not configured:
@@ -1589,6 +1596,7 @@ def main() -> None:
                 prepare_quantized_base=quantization_config is not None,
                 is_trainable=False,
                 local_files_only=True,
+                autocast_adapter_dtype=adapter_autocast_dtype_for_format(config.get("format_version", "F2")),
             )
         model.eval()
         model_load_seconds = time.perf_counter() - model_load_started

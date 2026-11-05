@@ -400,6 +400,11 @@ def test_i11_adapter_load_can_preserve_saved_adapter_dtype(monkeypatch, tmp_path
     )]
 
 
+def test_f3_adapter_dtype_autocast_is_explicit_and_f2_remains_unchanged():
+    assert runner.adapter_autocast_dtype_for_format("F3") is True
+    assert runner.adapter_autocast_dtype_for_format("F2") is None
+
+
 def test_i10_budget_preflight_rejects_p_plus_g_over_k(tmp_path, monkeypatch):
     config = json.loads((ROOT / "participant/configs/inference_config.json").read_text(encoding="utf-8"))
     config["context"]["serving_context_limit"] = 2000

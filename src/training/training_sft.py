@@ -1063,7 +1063,12 @@ def _build_sft_trainer(
             previous_instance_method = target_model.__dict__.get("load_adapter", missing)
 
             def _load_adapter_without_autocast(_model, *args, **kwargs):
-                kwargs["autocast_adapter_dtype"] = False
+                # A6 LoRA weights are saved as FP32; PEFT must upcast a freshly
+                # injected BF16 adapter before restoring those Trainer checkpoints.
+                # Existing E01/A1 checkpoints retain their historical dtype path.
+                kwargs["autocast_adapter_dtype"] = (
+                    True if config.get("experiment_id") == "E03-A6-F3-PILOT" else False
+                )
                 return load_adapter(*args, **kwargs)
 
             target_model.load_adapter = MethodType(_load_adapter_without_autocast, target_model)

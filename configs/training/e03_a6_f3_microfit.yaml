@@ -50,3 +50,4 @@ training:
 evaluation:
   max_new_tokens: 320
   expected_nonempty_profile_predictions: 1
+  autocast_adapter_dtype: true
