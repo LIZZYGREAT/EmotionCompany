@@ -1,0 +1,52 @@
+version: E03-A6-F3-microfit-v1
+experiment_id: E03-A6-F3-MICROFIT
+training_scope: bounded_microfit
+
+base_model:
+  model_id: Qwen/Qwen3-1.7B
+  revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  local_path: participant/model
+  expected_weight_sha256: 005d20550c04f4e246e5b434448786b44a0196b47d758d0acc77aba279e5bbc5
+
+data:
+  dataset_dir: data/processed/sft/e03_a6_f3
+  normalized_train: data/processed/v1/train.jsonl
+  manifest: data/processed/sft/e03_a6_f3/manifest.json
+
+protocol:
+  format_version: F3
+  inference_config: participant/configs/e03_a6_f3_inference_config.json
+  max_train_seq_length: 2048
+
+quantization:
+  method: bitsandbytes_4bit
+  quant_type: nf4
+  compute_dtype: bfloat16
+  use_double_quant: true
+  device_map:
+    "": 0
+  max_cuda_memory_fraction: 0.92
+
+lora:
+  r: 8
+  alpha: 16
+  dropout: 0.0
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  bias: none
+
+optimizer:
+  name: AdamW
+  learning_rate: 0.0001
+  weight_decay: 0.0
+
+training:
+  seed: 42
+  max_optimizer_steps: 32
+  gradient_accumulation_steps: 1
+  gradient_checkpointing: true
+  max_training_seconds: 1200
+  sample_count: 4
+
+evaluation:
+  max_new_tokens: 320
+  expected_nonempty_profile_predictions: 1
