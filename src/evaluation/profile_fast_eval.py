@@ -107,34 +107,36 @@ def select_frozen_id_samples(
 def run_profile_fast_only_attempts(
     samples: Sequence[Mapping[str, Any]],
     generate_candidate_once: Any,
+    *,
+    on_attempt: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Run one candidate-generation callback per row; never request full output."""
     attempts: list[dict[str, Any]] = []
+
+    def record(attempt: dict[str, Any]) -> None:
+        attempts.append(attempt)
+        if on_attempt is not None:
+            on_attempt(dict(attempt), len(attempts) - 1)
+
     for index, sample in enumerate(samples):
         try:
             result = generate_candidate_once(sample)
         except KeyboardInterrupt:
             result = {"status": "incomplete", "reason": "interrupted"}
-            attempts.append({"id": sample.get("id"), **result})
-            attempts.extend(
-                {"id": pending.get("id"), "status": "incomplete", "reason": "interrupted_before_generation"}
-                for pending in samples[index + 1:]
-            )
+            record({"id": sample.get("id"), **result})
+            for pending in samples[index + 1:]:
+                record({"id": pending.get("id"), "status": "incomplete", "reason": "interrupted_before_generation"})
             break
         if not isinstance(result, Mapping):
             result = {"status": "invalid", "reason": "invalid_generation_result"}
-        attempts.append({"id": sample.get("id"), **dict(result)})
+        record({"id": sample.get("id"), **dict(result)})
         if result.get("status") == "budget_exhausted":
-            attempts.extend(
-                {"id": pending.get("id"), "status": "budget_exhausted", "reason": "run_budget_exhausted"}
-                for pending in samples[index + 1:]
-            )
+            for pending in samples[index + 1:]:
+                record({"id": pending.get("id"), "status": "budget_exhausted", "reason": "run_budget_exhausted"})
             break
         if result.get("status") == "incomplete" and str(result.get("reason", "")).startswith("generation_error:"):
-            attempts.extend(
-                {"id": pending.get("id"), "status": "incomplete", "reason": "run_stopped_after_generation_error"}
-                for pending in samples[index + 1:]
-            )
+            for pending in samples[index + 1:]:
+                record({"id": pending.get("id"), "status": "incomplete", "reason": "run_stopped_after_generation_error"})
             break
     return attempts
 

@@ -5,9 +5,11 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 from src.evaluation.metrics import profile_metrics
+from src.evaluation.source_integrity import unique_index
 
 
 PROFILE_DIMENSIONS = ("personality_traits", "interests", "style")
+PROFILE_PREDICTION_STATUSES = {"valid", "invalid", "incomplete", "unsupported_order", "budget_exhausted"}
 
 
 def empty_profile() -> dict[str, list[str]]:
@@ -127,3 +129,39 @@ def compare_profile_lists(
         "right_minus_left": deltas,
         "per_dimension_right_minus_left": per_dimension_deltas,
     }
+
+
+def index_profile_prediction_rows(
+    rows: Sequence[Mapping[str, Any]],
+    expected_ids: Sequence[str],
+    enums: dict[str, list[str]],
+    *,
+    require_all_valid: bool = False,
+) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
+    """Validate a minimal Fast-only JSONL artifact and enforce exact ID coverage."""
+    if len(expected_ids) != len(set(expected_ids)):
+        raise ValueError("expected Fast-only IDs contain duplicates")
+    indexed = unique_index(rows, "id", "Fast-only profile predictions")
+    if set(indexed) != set(expected_ids) or len(rows) != len(expected_ids):
+        raise ValueError("Fast-only profile prediction IDs or row count differ from the frozen cohort")
+    counts = {status: 0 for status in sorted(PROFILE_PREDICTION_STATUSES)}
+    for sample_id, row in indexed.items():
+        status = row.get("status")
+        if status not in PROFILE_PREDICTION_STATUSES:
+            raise ValueError(f"Fast-only prediction {sample_id} has unsupported status")
+        counts[status] += 1
+        reason = row.get("reason")
+        if not isinstance(reason, str) or not reason:
+            raise ValueError(f"Fast-only prediction {sample_id} has no reason")
+        if status == "valid":
+            if set(row) != {"id", "status", "emotion_label", "user_profile", "reason"}:
+                raise ValueError(f"valid Fast-only prediction {sample_id} has unexpected fields")
+            emotion = row.get("emotion_label")
+            if not isinstance(emotion, str) or emotion not in enums["emotion_label"]:
+                raise ValueError(f"Fast-only prediction {sample_id} has an invalid emotion label")
+            validate_profile(row.get("user_profile"), enums, label=f"Fast-only prediction {sample_id}")
+        elif set(row) != {"id", "status", "reason"}:
+            raise ValueError(f"failed Fast-only prediction {sample_id} must not contain a fabricated profile")
+    if require_all_valid and counts["valid"] != len(expected_ids):
+        raise ValueError("strict Fast-only quality comparison requires every frozen ID to be valid")
+    return indexed, counts

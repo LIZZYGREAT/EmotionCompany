@@ -4,6 +4,12 @@ import json
 
 import pytest
 
+from scripts.e03_profile_fast_eval import (
+    _append_jsonl_fsynced,
+    _minimal_profile_prediction,
+    _profile_prediction_artifact,
+)
+
 from src.evaluation.profile_fast_eval import (
     compare_generated_prefix,
     profile_nonempty_recall,
@@ -228,6 +234,106 @@ def test_fast_only_budget_termination_marks_unstarted_rows_without_calling_them(
     assert [attempt["status"] for attempt in attempts] == [
         "incomplete", "budget_exhausted", "budget_exhausted", "budget_exhausted",
     ]
+
+
+def test_fast_only_persists_each_budget_attempt_through_the_incremental_callback():
+    persisted = []
+
+    def generate_candidate_once(sample):
+        if sample["id"] == "p2":
+            return {"status": "budget_exhausted", "reason": "deadline"}
+        return {"status": "incomplete", "reason": "early_eos"}
+
+    attempts = run_profile_fast_only_attempts(
+        _inputs(),
+        generate_candidate_once,
+        on_attempt=lambda attempt, index: persisted.append((index, attempt)),
+    )
+
+    assert [index for index, _attempt in persisted] == [0, 1, 2, 3]
+    assert [attempt for _index, attempt in persisted] == attempts
+    assert [attempt["status"] for _index, attempt in persisted] == [
+        "incomplete", "budget_exhausted", "budget_exhausted", "budget_exhausted",
+    ]
+
+
+def test_fast_only_persists_interrupted_and_unstarted_rows_through_callback():
+    persisted = []
+    calls = []
+
+    def generate_candidate_once(sample):
+        calls.append(sample["id"])
+        if sample["id"] == "p2":
+            raise KeyboardInterrupt
+        return {"status": "incomplete", "reason": "early_eos"}
+
+    attempts = run_profile_fast_only_attempts(
+        _inputs(),
+        generate_candidate_once,
+        on_attempt=lambda attempt, index: persisted.append((index, attempt)),
+    )
+
+    assert calls == ["p1", "p2"]
+    assert [index for index, _attempt in persisted] == [0, 1, 2, 3]
+    assert [attempt for _index, attempt in persisted] == attempts
+    assert [attempt["status"] for _index, attempt in persisted] == ["incomplete"] * 4
+    assert [attempt["reason"] for _index, attempt in persisted] == [
+        "early_eos", "interrupted", "interrupted_before_generation", "interrupted_before_generation",
+    ]
+
+
+def test_profile_prediction_writer_keeps_only_minimal_fields_and_complete_jsonl_records(tmp_path):
+    path = tmp_path / "profile_predictions.jsonl"
+    valid = _minimal_profile_prediction({
+        "id": "p1",
+        "status": "valid",
+        "reason": "profile_prefix_closed",
+        "emotion_label": "neutral",
+        "user_profile": {"personality_traits": [], "interests": ["games"], "style": []},
+        "raw_text": "must not be persisted",
+        "response_text": "must not be persisted",
+    })
+    failed = _minimal_profile_prediction({
+        "id": "p2",
+        "status": "incomplete",
+        "reason": "interrupted_before_generation",
+        "user_profile": {"personality_traits": ["fabricated"], "interests": [], "style": []},
+    })
+
+    _append_jsonl_fsynced(path, valid)
+    _append_jsonl_fsynced(path, failed)
+    lines = path.read_text(encoding="utf-8").splitlines()
+
+    assert [json.loads(line) for line in lines] == [valid, failed]
+    assert set(valid) == {"id", "status", "emotion_label", "user_profile", "reason"}
+    assert set(failed) == {"id", "status", "reason"}
+    assert "must not be persisted" not in path.read_text(encoding="utf-8")
+
+
+def test_profile_prediction_artifact_binds_rows_and_withholds_strict_ready_on_failures(tmp_path):
+    path = tmp_path / "profile_predictions.jsonl"
+    _append_jsonl_fsynced(path, {
+        "id": "p1",
+        "status": "valid",
+        "emotion_label": "neutral",
+        "user_profile": {"personality_traits": [], "interests": [], "style": []},
+        "reason": "profile_prefix_closed",
+    })
+    _append_jsonl_fsynced(path, {"id": "p2", "status": "budget_exhausted", "reason": "deadline"})
+
+    artifact = _profile_prediction_artifact(path, ["p1", "p2"], {
+        "emotion_label": ["neutral"],
+        "personality_traits": [],
+        "interests": [],
+        "style": [],
+    })
+
+    assert artifact["rows"] == artifact["expected_rows"] == 2
+    assert artifact["complete_id_coverage"] is True
+    assert artifact["all_selected_rows_valid"] is False
+    assert artifact["strict_quality_comparison_ready"] is False
+    assert artifact["status_counts"]["budget_exhausted"] == 1
+    assert len(artifact["sha256"]) == 64
 
 
 def test_fast_only_generation_error_marks_remaining_rows_incomplete():

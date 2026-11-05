@@ -32,6 +32,7 @@ from src.evaluation.profile_fast_eval import (
     select_unique_conversation_samples,
 )
 from src.evaluation.profile_prefix import ProfilePrefixStopper, parse_profile_prefix
+from src.evaluation.profile_reconcile import index_profile_prediction_rows
 from src.evaluation.source_integrity import (
     audit_prediction_point_sources,
     build_source_manifest,
@@ -94,6 +95,105 @@ def _write_json(path: Path, value: Any) -> None:
         encoding="utf-8",
     )
     os.replace(temporary, path)
+
+
+def _append_jsonl_fsynced(path: Path, row: dict[str, Any]) -> None:
+    """Persist one complete profile-only record before the next sample starts."""
+    encoded = json.dumps(row, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    with path.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(encoded)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _minimal_profile_prediction(attempt: dict[str, Any]) -> dict[str, Any]:
+    sample_id = attempt.get("id")
+    status = attempt.get("status")
+    reason = attempt.get("reason")
+    if not isinstance(sample_id, str) or not sample_id:
+        raise ValueError("profile-only prediction is missing a sample ID")
+    if not isinstance(status, str) or not isinstance(reason, str) or not reason:
+        raise ValueError(f"profile-only prediction {sample_id} has no status/reason")
+    if status == "valid":
+        profile = attempt.get("user_profile")
+        emotion = attempt.get("emotion_label")
+        if not isinstance(profile, dict) or not isinstance(emotion, str):
+            raise ValueError(f"valid profile-only prediction {sample_id} has no complete parsed result")
+        return {
+            "id": sample_id,
+            "status": status,
+            "emotion_label": emotion,
+            "user_profile": profile,
+            "reason": reason,
+        }
+    return {"id": sample_id, "status": status, "reason": reason}
+
+
+def _profile_prediction_artifact(
+    path: Path,
+    expected_ids: list[str],
+    enums: dict[str, list[str]],
+) -> dict[str, Any]:
+    if not path.is_file():
+        return {
+            "path": str(path),
+            "sha256": None,
+            "rows": 0,
+            "expected_rows": len(expected_ids),
+            "ids_sha256": None,
+            "status_counts": {},
+            "complete_id_coverage": False,
+            "all_selected_rows_valid": False,
+            "strict_quality_comparison_ready": False,
+            "validation_error": "prediction_file_missing",
+            "write_mode": "append_fsync_per_record",
+            "response_text_saved": False,
+        }
+    try:
+        rows = _read_jsonl(path)
+    except (OSError, ValueError) as exc:
+        payload = path.read_bytes()
+        row_count = payload.count(b"\n") + int(bool(payload) and not payload.endswith(b"\n"))
+        return {
+            "path": str(path),
+            "sha256": _sha256_file(path),
+            "rows": row_count,
+            "expected_rows": len(expected_ids),
+            "ids_sha256": None,
+            "status_counts": {},
+            "complete_id_coverage": False,
+            "all_selected_rows_valid": False,
+            "strict_quality_comparison_ready": False,
+            "validation_error": f"{type(exc).__name__}: {exc}",
+            "write_mode": "append_fsync_per_record",
+            "response_text_saved": False,
+        }
+    indexed: dict[str, dict[str, Any]] = {}
+    status_counts: dict[str, int] = {}
+    validation_error: str | None = None
+    try:
+        indexed, status_counts = index_profile_prediction_rows(rows, expected_ids, enums)
+    except (KeyError, TypeError, ValueError) as exc:
+        validation_error = f"{type(exc).__name__}: {exc}"
+    all_valid = (
+        validation_error is None
+        and status_counts.get("valid") == len(expected_ids)
+    )
+    return {
+        "path": str(path),
+        "sha256": _sha256_file(path),
+        "rows": len(rows),
+        "expected_rows": len(expected_ids),
+        "ids_sha256": selected_id_sha256(list(indexed)) if validation_error is None else None,
+        "status_counts": status_counts,
+        "complete_id_coverage": validation_error is None,
+        "all_selected_rows_valid": all_valid,
+        "strict_quality_comparison_ready": all_valid,
+        "validation_error": validation_error,
+        "write_mode": "append_fsync_per_record",
+        "response_text_saved": False,
+    }
 
 
 def _load_config(path: Path) -> dict[str, Any]:
@@ -976,13 +1076,66 @@ def run_gpu_fast_only(
         },
         "gpu_budget_seconds_including_model_load": budget_seconds,
     })
+    selected_ids = [row["id"] for row in selected]
+    prediction_path = output_path.with_name("profile_predictions.jsonl")
+    with prediction_path.open("x", encoding="utf-8", newline="\n"):
+        pass
+    generation_call_ids: list[str] = []
+    prediction_rows_written = 0
+    prediction_status_counts: Counter[str] = Counter()
+    progress["profile_predictions"] = {
+        "path": str(prediction_path),
+        "expected_rows": len(selected_ids),
+        "rows_written": 0,
+        "write_mode": "append_fsync_per_record",
+        "contains_only_profile_predictions": True,
+        "response_text_saved": False,
+    }
+
+    def persist_prediction(attempt: dict[str, Any], index: int) -> None:
+        nonlocal prediction_rows_written
+        row = _minimal_profile_prediction(attempt)
+        if index != prediction_rows_written or row["id"] != selected_ids[index]:
+            raise ValueError("profile prediction writes must preserve frozen cohort order")
+        _append_jsonl_fsynced(prediction_path, row)
+        prediction_rows_written += 1
+        prediction_status_counts[row["status"]] += 1
+        progress["accounted_count"] = prediction_rows_written
+        progress["attempted_count"] = sum(sample_id in generation_call_ids for sample_id in selected_ids[:prediction_rows_written])
+        progress["completed_attempt_count"] = sum(
+            any(
+                previous.get("id") == sample_id and "generation_seconds" in previous
+                for previous in attempt_history
+            )
+            for sample_id in selected_ids[:prediction_rows_written]
+        )
+        progress["valid_count"] = prediction_status_counts["valid"]
+        progress["case_status_counts"] = dict(sorted(prediction_status_counts.items()))
+        progress["profile_predictions"]["rows_written"] = prediction_rows_written
+        _write_json(output_path, progress)
+
+    attempt_history: list[dict[str, Any]] = []
+
+    def persist_attempt(attempt: dict[str, Any], index: int) -> None:
+        attempt_history.append(dict(attempt))
+        persist_prediction(attempt, index)
+
+    def persist_unstarted(reason: str) -> None:
+        for index, sample in enumerate(selected[prediction_rows_written:], prediction_rows_written):
+            persist_attempt(
+                {"id": sample["id"], "status": "incomplete", "reason": reason},
+                index,
+            )
+
     _write_json(output_path, progress)
     if not torch.cuda.is_available():
+        persist_unstarted("cuda_unavailable")
         report = {
             **progress,
             "status": "blocked_environment",
             "reason": "cuda_unavailable",
             "elapsed_seconds": round(time.monotonic() - started, 6),
+            "profile_predictions": _profile_prediction_artifact(prediction_path, selected_ids, enums),
         }
         _write_json(output_path, report)
         return report
@@ -990,12 +1143,14 @@ def run_gpu_fast_only(
     try:
         model, tokenizer, _model_config, model_facts = _load_model(inference_config, runner, torch)
     except (OSError, RuntimeError, ValueError) as exc:
+        persist_unstarted(f"model_load_failed:{type(exc).__name__}")
         report = {
             **progress,
             "status": "blocked_environment",
             "reason": f"model_load_failed:{type(exc).__name__}:{exc}",
             "elapsed_seconds": round(time.monotonic() - started, 6),
             "gpu_used": True,
+            "profile_predictions": _profile_prediction_artifact(prediction_path, selected_ids, enums),
         }
         _write_json(output_path, report)
         return report
@@ -1005,9 +1160,10 @@ def run_gpu_fast_only(
             {"id": sample["id"], "status": "budget_exhausted", "reason": "model_load_exhausted_budget"}
             for sample in selected
         ]
+        for index, attempt in enumerate(attempts):
+            persist_attempt(attempt, index)
     else:
         generation = dict(inference_config["generation"])
-        generation_call_ids: list[str] = []
         progress["gpu_used"] = True
         progress["generation_started"] = True
         _write_json(output_path, progress)
@@ -1107,7 +1263,11 @@ def run_gpu_fast_only(
 
         try:
             signal.signal(signal.SIGTERM, _handle_sigterm)
-            attempts = run_profile_fast_only_attempts(selected, generate_candidate_once)
+            attempts = run_profile_fast_only_attempts(
+                selected,
+                generate_candidate_once,
+                on_attempt=persist_attempt,
+            )
         finally:
             signal.signal(signal.SIGTERM, previous_sigterm)
     if "generation_call_ids" not in locals():
@@ -1159,6 +1319,8 @@ def run_gpu_fast_only(
             valid_emotion_correct += int(is_correct)
             valid_emotion_count += 1
     score = score_profile_attempts(gold_profiles, ordered_attempts_list, enums)
+    prediction_artifact = _profile_prediction_artifact(prediction_path, selected_ids, enums)
+    prediction_validation_error = prediction_artifact["validation_error"]
     source_manifest["references_path"] = str(references_path)
     source_manifest["references_sha256"] = _sha256_file(references_path)
     source_manifest["selected_reference_rows"] = len(selected_ids)
@@ -1166,7 +1328,9 @@ def run_gpu_fast_only(
     valid_coverage = valid_count / len(selected_ids) if selected_ids else 0.0
     gates = config["adoption_gates"]
     status_counts = score["status_counts"]
-    if status_counts["budget_exhausted"]:
+    if prediction_validation_error is not None:
+        status = "incomplete"
+    elif status_counts["budget_exhausted"]:
         status = "budget_exhausted"
     elif status_counts["incomplete"]:
         status = "incomplete"
@@ -1201,6 +1365,7 @@ def run_gpu_fast_only(
         ),
         "valid_count": valid_count,
         "valid_coverage": valid_coverage,
+        "profile_predictions": prediction_artifact,
         "fixed_denominator_profile_metrics": score["profile_metrics"],
         "valid_only_profile_diagnostic": score["valid_only_diagnostic"],
         "case_status_counts": score["status_counts"],

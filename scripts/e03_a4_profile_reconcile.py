@@ -31,6 +31,7 @@ from src.evaluation.profile_reconcile import (
     classify_historical_difference,
     compare_profile_lists,
     empty_profile,
+    index_profile_prediction_rows,
     profile_difference_dimensions,
     validate_profile,
 )
@@ -359,7 +360,114 @@ def _brief_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def reconcile(run_id: str, candidate_config_path: Path, a3_config_path: Path, output_root: Path) -> dict[str, Any]:
+def _brief_pairwise(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "left_name": result["left_name"],
+        "right_name": result["right_name"],
+        "sample_count": result["sample_count"],
+        "different_sample_count": result["different_sample_count"],
+        "different_sample_ids": result["different_sample_ids"],
+        "different_sample_count_by_dimension": result["different_sample_count_by_dimension"],
+        "left_metrics": _brief_metrics(result["left_metrics"]),
+        "right_metrics": _brief_metrics(result["right_metrics"]),
+        "right_minus_left": result["right_minus_left"],
+        "per_dimension_right_minus_left": result["per_dimension_right_minus_left"],
+    }
+
+
+def _load_fast_only_predictions(
+    fast_report_path: Path,
+    expected_ids: list[str],
+    candidate: dict[str, Any],
+    a3_config: dict[str, Any],
+    source_facts: dict[str, Any],
+    eval_manifest: dict[str, Any],
+    enums: dict[str, list[str]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    report = _json_object(fast_report_path)
+    artifact = report.get("profile_predictions", {})
+    run_identity = report.get("run_identity", {})
+    generation = report.get("generation", {})
+    model_facts = run_identity.get("model_facts", {})
+    tokenizer_facts = run_identity.get("tokenizer_facts", {})
+    expected_ids_sha256 = candidate["selection"]["expected_ids_sha256"]
+    prediction_path_value = artifact.get("path")
+    if not isinstance(prediction_path_value, str):
+        raise ValueError("Fast-only report has no profile prediction artifact path")
+    prediction_path = _resolve(prediction_path_value)
+    if prediction_path != fast_report_path.parent.resolve() / "profile_predictions.jsonl":
+        raise ValueError("Fast-only predictions must be adjacent to their bound report")
+    expected_adapter = a3_config["identity"]
+    expected_protocol = a3_config["protocol"]
+    if (
+        report.get("status") != "passed"
+        or report.get("gpu_used") is not True
+        or report.get("references_read_by_generator") is not False
+        or report.get("sample_count") != len(expected_ids)
+        or report.get("valid_count") != len(expected_ids)
+        or report.get("attempted_count") != len(expected_ids)
+        or generation.get("model_generate_call_count") != len(expected_ids)
+        or generation.get("full_generation_performed") is not False
+        or generation.get("response_text_generated_or_saved") is not False
+        or artifact.get("rows") != len(expected_ids)
+        or artifact.get("expected_rows") != len(expected_ids)
+        or artifact.get("all_selected_rows_valid") is not True
+        or artifact.get("strict_quality_comparison_ready") is not True
+        or artifact.get("ids_sha256") != expected_ids_sha256
+        or artifact.get("sha256") != sha256_file(prediction_path)
+        or run_identity.get("config_sha256") != source_facts["a4_candidate_config"]["sha256"]
+        or run_identity.get("inference_config_sha256") != eval_manifest.get("inference_config_sha256")
+        or run_identity.get("base_weight_sha256") != expected_adapter["expected_base_weight_sha256"]
+        or run_identity.get("adapter_weight_sha256") != expected_adapter["expected_initial_adapter_weight_sha256"]
+        or run_identity.get("adapter_config_sha256") != expected_adapter["expected_initial_adapter_config_sha256"]
+        or run_identity.get("prompt_facts", {}).get("sha256") != candidate["protocol"]["prompt_sha256"]
+        or run_identity.get("generation", {}).get("do_sample") is not False
+        or run_identity.get("generation", {}).get("max_new_tokens") != candidate["generation"]["max_new_tokens"]
+        or tokenizer_facts.get("signature_sha256") != expected_protocol["tokenizer_signature_sha256"]
+        or tokenizer_facts.get("template_sha256") != expected_protocol["chat_template_sha256"]
+        or model_facts.get("quantization", {}).get("real_nf4_verified") is not True
+    ):
+        raise ValueError("Fast-only report is incomplete or model/protocol identity differs from E01-B")
+    rows = read_jsonl(prediction_path)
+    indexed, status_counts = index_profile_prediction_rows(
+        rows,
+        expected_ids,
+        enums,
+        require_all_valid=True,
+    )
+    if status_counts.get("valid") != len(expected_ids):
+        raise ValueError("strict A4 comparison requires 224 valid Fast-only profiles")
+    source_selection = report.get("source_manifest", {}).get("selection", {})
+    if source_selection.get("ids_sha256") != expected_ids_sha256:
+        raise ValueError("Fast-only source selection does not match the frozen ID set")
+    return indexed, {
+        "run_id": fast_report_path.parent.name,
+        "report_path": str(fast_report_path),
+        "report_sha256": sha256_file(fast_report_path),
+        "predictions_path": str(prediction_path),
+        "predictions_sha256": artifact["sha256"],
+        "predictions_rows": len(rows),
+        "predictions_ids_sha256": artifact["ids_sha256"],
+        "status_counts": status_counts,
+        "elapsed_seconds": report.get("timing", {}).get("elapsed_seconds_including_model_load"),
+        "generation_seconds": generation.get("generation_seconds"),
+        "model_load_seconds": report.get("timing", {}).get("model_load_seconds"),
+        "base_weight_sha256": run_identity.get("base_weight_sha256"),
+        "adapter_weight_sha256": run_identity.get("adapter_weight_sha256"),
+        "adapter_config_sha256": run_identity.get("adapter_config_sha256"),
+        "tokenizer_signature_sha256": tokenizer_facts.get("signature_sha256"),
+        "chat_template_sha256": tokenizer_facts.get("template_sha256"),
+        "fast_alignment_status": "pending_pairwise_comparison",
+    }
+
+
+def reconcile(
+    run_id: str,
+    candidate_config_path: Path,
+    a3_config_path: Path,
+    output_root: Path,
+    fast_report_path: Path | None = None,
+) -> dict[str, Any]:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,100}", run_id):
         raise ValueError("run ID contains unsupported path characters")
     run_root = output_root / run_id
@@ -407,6 +515,59 @@ def reconcile(run_id: str, candidate_config_path: Path, a3_config_path: Path, ou
         left_name="S_submission",
         right_name="R_raw_profile_prefix",
     )
+    fast_index: dict[str, dict[str, Any]] | None = None
+    fast_metadata: dict[str, Any] | None = None
+    fast_pairs: dict[str, dict[str, Any]] = {}
+    emotion_alignment: dict[str, Any] | None = None
+    if fast_report_path is not None:
+        fast_index, fast_metadata = _load_fast_only_predictions(
+            fast_report_path,
+            ids,
+            loaded["candidate_config"],
+            loaded["a3_config"],
+            loaded["source_facts"],
+            loaded["eval_manifest"],
+            loaded["enums"],
+        )
+        fast_profiles = [fast_index[sample_id]["user_profile"] for sample_id in ids]
+        fast_pairs = {
+            "S_submission_vs_R_raw_prefix": _brief_pairwise(comparison),
+            "R_raw_prefix_vs_F_fast_only": _brief_pairwise(compare_profile_lists(
+                ids=ids,
+                gold_profiles=gold_profiles,
+                left_profiles=prefix_profiles,
+                right_profiles=fast_profiles,
+                enums=loaded["enums"],
+                left_name="R_raw_profile_prefix",
+                right_name="F_fast_only",
+            )),
+            "S_submission_vs_F_fast_only": _brief_pairwise(compare_profile_lists(
+                ids=ids,
+                gold_profiles=gold_profiles,
+                left_profiles=submission_profiles,
+                right_profiles=fast_profiles,
+                enums=loaded["enums"],
+                left_name="S_submission",
+                right_name="F_fast_only",
+            )),
+        }
+        emotion_alignment = {
+            "raw_prefix_vs_fast_only_different_count": sum(
+                prefix_results[sample_id].emotion_label != fast_index[sample_id].get("emotion_label")
+                for sample_id in ids
+            ),
+            "submission_vs_fast_only_different_count": sum(
+                selected_submission[sample_id].get("emotion_label") != fast_index[sample_id].get("emotion_label")
+                for sample_id in ids
+            ),
+        }
+        fast_metadata["fast_alignment_status"] = (
+            "reconciled"
+            if fast_pairs["R_raw_prefix_vs_F_fast_only"]["different_sample_count"] == 0
+            and emotion_alignment["raw_prefix_vs_fast_only_different_count"] == 0
+            else "unresolved"
+        )
+        fast_metadata["legacy_full_run_token_ids_available"] = False
     raw_status_counts = Counter(selected_raw[sample_id].get("status", "missing_status") for sample_id in ids)
     prefix_status_counts = Counter(prefix_results[sample_id].status for sample_id in ids)
     full_json_status_counts = Counter(full_statuses.values())
@@ -415,30 +576,61 @@ def reconcile(run_id: str, candidate_config_path: Path, a3_config_path: Path, ou
     for sample_id, submission_profile, prefix_profile in zip(ids, submission_profiles, prefix_profiles):
         parsed = prefix_results[sample_id]
         different_dimensions = profile_difference_dimensions(submission_profile, prefix_profile)
-        cases.append(
-            {
-                "id": sample_id,
-                "raw_status": selected_raw[sample_id].get("status"),
-                "prefix_status": parsed.status,
-                "prefix_reason": parsed.reason,
-                "full_json_status": full_statuses[sample_id],
-                "S_submission_profile": submission_profile,
-                "R_prefix_profile": prefix_profile,
-                "different_dimensions": different_dimensions,
-                "difference_type": classify_historical_difference(
-                    submission_profile=submission_profile,
-                    prefix_profile=prefix_profile,
-                    prefix_status=parsed.status,
-                    full_json_status="valid" if full_statuses[sample_id] == "valid_object" else full_statuses[sample_id],
-                ),
-            }
-        )
+        case = {
+            "id": sample_id,
+            "raw_status": selected_raw[sample_id].get("status"),
+            "prefix_status": parsed.status,
+            "prefix_reason": parsed.reason,
+            "full_json_status": full_statuses[sample_id],
+            "S_submission_profile": submission_profile,
+            "R_prefix_profile": prefix_profile,
+            "different_dimensions": different_dimensions,
+            "difference_type": classify_historical_difference(
+                submission_profile=submission_profile,
+                prefix_profile=prefix_profile,
+                prefix_status=parsed.status,
+                full_json_status="valid" if full_statuses[sample_id] == "valid_object" else full_statuses[sample_id],
+            ),
+        }
+        if fast_index is not None:
+            fast_prediction = fast_index[sample_id]
+            fast_profile = fast_prediction["user_profile"]
+            case.update({
+                "S_emotion_label": selected_submission[sample_id].get("emotion_label"),
+                "R_emotion_label": parsed.emotion_label,
+                "F_status": fast_prediction["status"],
+                "F_reason": fast_prediction["reason"],
+                "F_emotion_label": fast_prediction["emotion_label"],
+                "F_profile": fast_profile,
+                "R_F_different_dimensions": profile_difference_dimensions(prefix_profile, fast_profile),
+                "S_F_different_dimensions": profile_difference_dimensions(submission_profile, fast_profile),
+                "R_F_emotion_match": parsed.emotion_label == fast_prediction["emotion_label"],
+                "S_F_emotion_match": selected_submission[sample_id].get("emotion_label") == fast_prediction["emotion_label"],
+            })
+        cases.append(case)
+
+    source_file_facts = dict(loaded["source_facts"])
+    output_descriptions = {
+        "historical_comparison.json": "S and R-prefix profile metrics, statuses, and pairwise deltas",
+        "historical_cases.jsonl": "ID and minimal profile-only alignment facts; no dialogue or response text",
+    }
+    if fast_metadata is not None:
+        source_file_facts["fast_only_report"] = {
+            "path": fast_metadata["report_path"],
+            "sha256": fast_metadata["report_sha256"],
+        }
+        source_file_facts["fast_only_profile_predictions"] = {
+            "path": fast_metadata["predictions_path"],
+            "sha256": fast_metadata["predictions_sha256"],
+        }
+        output_descriptions["historical_cases.jsonl"] = "Per-ID S/R/F profiles and differences; no dialogue or response text"
+        output_descriptions["fast_alignment.json"] = "S/R/F pairwise profile and emotion alignment metrics"
 
     source_manifest = {
         "run_id": run_id,
         "status": "completed",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "purpose": "historical_submission_vs_raw_profile_prefix_reconciliation",
+        "purpose": "historical_submission_raw_prefix_and_optional_fast_only_reconciliation",
         "cohort": {
             "count": len(ids),
             "conversation_count": loaded["source_integrity"]["conversation_count"],
@@ -469,11 +661,9 @@ def reconcile(run_id: str, candidate_config_path: Path, a3_config_path: Path, ou
             "adapter_identity": loaded["performance"].get("adapter_identity"),
             "quantization": loaded["performance"].get("quantization"),
         },
-        "source_files": loaded["source_facts"],
-        "outputs": {
-            "historical_comparison.json": "S and R-prefix profile metrics, statuses, and pairwise deltas",
-            "historical_cases.jsonl": "ID and minimal profile-only alignment facts; no dialogue or response text",
-        },
+        "source_files": source_file_facts,
+        "fast_only_run": fast_metadata,
+        "outputs": output_descriptions,
     }
     historical_comparison = {
         "status": "completed",
@@ -496,15 +686,34 @@ def reconcile(run_id: str, candidate_config_path: Path, a3_config_path: Path, ou
         ),
         "interpretation": "S is the historical normalized Submission; R is the parsed emotion/profile prefix from the same Raw generation. Full response content does not contribute to R profile scoring.",
     }
+    if fast_metadata is not None:
+        historical_comparison["fast_only_profile_metrics"] = fast_pairs["S_submission_vs_F_fast_only"]["right_metrics"]
+        historical_comparison["fast_only_status_counts"] = fast_metadata["status_counts"]
+        historical_comparison["pairwise_comparisons"] = fast_pairs
+        historical_comparison["emotion_label_alignment"] = emotion_alignment
+        historical_comparison["fast_alignment_status"] = fast_metadata["fast_alignment_status"]
     report = _render_report(source_manifest, historical_comparison)
 
     run_root.mkdir(parents=True)
     _write_json(run_root / "historical_comparison.json", historical_comparison)
     _write_jsonl(run_root / "historical_cases.jsonl", cases)
+    if fast_metadata is not None:
+        _write_json(run_root / "fast_alignment.json", {
+            "status": fast_metadata["fast_alignment_status"],
+            "sample_count": len(ids),
+            "pairwise_comparisons": fast_pairs,
+            "emotion_label_alignment": emotion_alignment,
+            "legacy_full_run_token_ids_available": False,
+        })
     (run_root / "report.md").write_text(report, encoding="utf-8")
     source_manifest["output_artifacts"] = {
         name: {"sha256": sha256_file(run_root / name), "row_count": len(cases) if name.endswith(".jsonl") else None}
-        for name in ("historical_comparison.json", "historical_cases.jsonl", "report.md")
+        for name in (
+            "historical_comparison.json",
+            "historical_cases.jsonl",
+            *( ("fast_alignment.json",) if fast_metadata is not None else () ),
+            "report.md",
+        )
     }
     _write_json(run_root / "source_manifest.json", source_manifest)
     return historical_comparison
@@ -514,34 +723,50 @@ def _render_report(manifest: dict[str, Any], result: dict[str, Any]) -> str:
     s = result["source_submission"]
     r = result["raw_prefix_fixed_denominator"]
     diff = result["submission_minus_raw_prefix"]
-    return "\n".join(
-        [
-            "# E03-A4-1A 历史画像评测口径核对",
+    lines = [
+        "# E03-A4-1 历史画像评测口径核对",
+        "",
+        f"- Run：`{manifest['run_id']}`；状态：`{result['status']}`。",
+        f"- 冻结 Cohort：{manifest['cohort']['count']} 点 / {manifest['cohort']['conversation_count']} 段完整会话；ID SHA-256 `{manifest['cohort']['ids_sha256']}`。",
+        f"- 源历史核验：{manifest['source_integrity']['status']}；逐点核验当前 user turn、角色、内容与顺序。",
+        "- 输入仅为 target-free `{id, history}`；报告不包含源对话或模型回复文本。",
+        "",
+        "## 同一模型、同一 ID 上的画像分数",
+        "",
+        "| 口径 | TP | FP | FN | Micro-F1 | Macro-F1 |",
+        "|---|---:|---:|---:|---:|---:|",
+        f"| S：历史 Submission | {s['overall_33_label_tp']} | {s['overall_33_label_fp']} | {s['overall_33_label_fn']} | {s['overall_33_label_micro_f1']:.6f} | {s['overall_33_label_macro_f1']:.6f} |",
+        f"| R：Raw 的已闭合画像前缀（固定 224 分母） | {r['overall_33_label_tp']} | {r['overall_33_label_fp']} | {r['overall_33_label_fn']} | {r['overall_33_label_micro_f1']:.6f} | {r['overall_33_label_macro_f1']:.6f} |",
+    ]
+    if "fast_only_profile_metrics" in result:
+        f = result["fast_only_profile_metrics"]
+        rf = result["pairwise_comparisons"]["R_raw_prefix_vs_F_fast_only"]
+        emotion = result["emotion_label_alignment"]
+        lines.extend([
+            f"| F：新 Fast-only 逐 ID 结果（固定 224 分母） | {f['overall_33_label_tp']} | {f['overall_33_label_fp']} | {f['overall_33_label_fn']} | {f['overall_33_label_micro_f1']:.6f} | {f['overall_33_label_macro_f1']:.6f} |",
             "",
-            f"- Run：`{manifest['run_id']}`；状态：`{result['status']}`。",
-            f"- 冻结 Cohort：{manifest['cohort']['count']} 点 / {manifest['cohort']['conversation_count']} 段完整会话；ID SHA-256 `{manifest['cohort']['ids_sha256']}`。",
-            f"- 源历史核验：{manifest['source_integrity']['status']}；逐点核验当前 user turn、角色、内容与顺序。",
-            "- 输入仅为 target-free `{id, history}`；报告不包含源对话或模型回复文本。",
-            "",
-            "## 同一模型、同一 ID 上的画像分数",
-            "",
-            "| 口径 | TP | FP | FN | Micro-F1 | Macro-F1 |",
-            "|---|---:|---:|---:|---:|---:|",
-            f"| S：历史 Submission | {s['overall_33_label_tp']} | {s['overall_33_label_fp']} | {s['overall_33_label_fn']} | {s['overall_33_label_micro_f1']:.6f} | {s['overall_33_label_macro_f1']:.6f} |",
-            f"| R：Raw 的已闭合画像前缀（固定 224 分母） | {r['overall_33_label_tp']} | {r['overall_33_label_fp']} | {r['overall_33_label_fn']} | {r['overall_33_label_micro_f1']:.6f} | {r['overall_33_label_macro_f1']:.6f} |",
-            "",
-            f"- R 对 S 的画像差异：{diff['different_sample_count']} 条；按维度 `{json.dumps(diff['different_sample_count_by_dimension'], ensure_ascii=False, sort_keys=True)}`。",
-            f"- Raw Runner 状态：`{json.dumps(result['raw_runner_status_counts'], ensure_ascii=False, sort_keys=True)}`；前缀解析：`{json.dumps(result['raw_prefix_parse_status_counts'], ensure_ascii=False, sort_keys=True)}`；完整 Raw JSON：`{json.dumps(result['full_raw_json_status_counts'], ensure_ascii=False, sort_keys=True)}`。",
-            "",
-            "## 归因与边界",
-            "",
-            "- 逐 ID 对齐表位于忽略目录的 `historical_cases.jsonl`；只保存 ID、状态、画像标签及差异类型，不保存会话、Gold 原始行或回复文本。",
-            "- `S` 与 `R` 评分都使用同一个 `profile_metrics()`，无效 Raw 前缀按固定空画像计入 224 分母。",
-            "- 本阶段没有 F 的逐 ID 预测；不能据此声称历史 `gpu-fast-only` 与 Raw 前缀逐条一致。",
-            "- 后续模型筛选仍以重新运行并保存逐 ID 结果的 E01-B Fast-only 为统一快评基线，历史完整 Dev E01-B 保留为正式指标参照。",
-            "",
-        ]
-    )
+            f"- Fast-only Run：`{manifest['fast_only_run']['run_id']}`；状态 `passed` 表示覆盖门槛通过；本次另核实 224/224 有效并完成严格 ID 对齐。",
+            f"- R↔F 画像不一致：{rf['different_sample_count']} 条；维度计数 `{json.dumps(rf['different_sample_count_by_dimension'], ensure_ascii=False, sort_keys=True)}`；情绪标签不一致 `{emotion['raw_prefix_vs_fast_only_different_count']}` 条。",
+            f"- 配对统计见 `fast_alignment.json`；逐 ID S/R/F 画像与情绪见 `historical_cases.jsonl`。",
+            f"- 语义对齐状态：`{result['fast_alignment_status']}`。旧完整 Run 未保留逐 Token IDs，因此本次不作历史 Token-ID 逐项相等结论。",
+        ])
+    lines.extend([
+        "",
+        f"- R 对 S 的画像差异：{diff['different_sample_count']} 条；按维度 `{json.dumps(diff['different_sample_count_by_dimension'], ensure_ascii=False, sort_keys=True)}`。",
+        f"- Raw Runner 状态：`{json.dumps(result['raw_runner_status_counts'], ensure_ascii=False, sort_keys=True)}`；前缀解析：`{json.dumps(result['raw_prefix_parse_status_counts'], ensure_ascii=False, sort_keys=True)}`；完整 Raw JSON：`{json.dumps(result['full_raw_json_status_counts'], ensure_ascii=False, sort_keys=True)}`。",
+        "",
+        "## 归因与边界",
+        "",
+        "- 逐 ID 对齐表只保存 ID、状态、画像标签及差异类型，不保存会话、Gold 原始行或回复文本。",
+        "- S、R、F 使用同一 `profile_metrics()`；失败项按空画像进入固定 224 分母。严格比较拒绝缺 ID、重复 ID 或非 224 行预测文件。",
+    ])
+    if "fast_only_profile_metrics" not in result:
+        lines.append("- 本 Run 没有 F 的逐 ID 预测；不能据此声称旧 Fast-only 聚合分数与 R 逐条一致。")
+    lines.extend([
+        "- 后续候选筛选使用已核验的 E01-B Fast-only 逐 ID 基线；历史完整 Dev E01-B 保留为正式指标参照。",
+        "",
+    ])
+    return "\n".join(lines)
 
 
 def main() -> int:
@@ -550,6 +775,7 @@ def main() -> int:
     parser.add_argument("--candidate-config", default=str(DEFAULT_CANDIDATE_CONFIG.relative_to(ROOT)))
     parser.add_argument("--a3-config", default=str(DEFAULT_A3_CONFIG.relative_to(ROOT)))
     parser.add_argument("--output-root", default="outputs/diagnostics/e03_a4/reconcile")
+    parser.add_argument("--fast-report", help="strictly validate and pair a completed Fast-only run with S/R")
     args = parser.parse_args()
     try:
         result = reconcile(
@@ -557,6 +783,7 @@ def main() -> int:
             _resolve(args.candidate_config),
             _resolve(args.a3_config),
             _resolve(args.output_root),
+            _resolve(args.fast_report) if args.fast_report else None,
         )
     except (OSError, KeyError, TypeError, ValueError) as exc:
         print(json.dumps({"status": "preflight_failed", "error": f"{type(exc).__name__}: {exc}"}, ensure_ascii=False))
@@ -570,6 +797,8 @@ def main() -> int:
                 "S_micro_f1": result["source_submission"]["overall_33_label_micro_f1"],
                 "R_prefix_micro_f1": result["raw_prefix_fixed_denominator"]["overall_33_label_micro_f1"],
                 "different_sample_count": result["submission_minus_raw_prefix"]["different_sample_count"],
+                "fast_alignment_status": result.get("fast_alignment_status"),
+                "F_fast_micro_f1": result.get("fast_only_profile_metrics", {}).get("overall_33_label_micro_f1"),
             },
             ensure_ascii=False,
         )
