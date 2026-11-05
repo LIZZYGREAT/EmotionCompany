@@ -260,7 +260,12 @@ def test_fast_only_loader_binds_224_style_facts_before_pairing(tmp_path):
             },
             "model_facts": {"quantization": {"real_nf4_verified": True}},
         },
-        "source_manifest": {"selection": {"ids_sha256": ids_sha256}},
+        "source_manifest": {
+            "selection": {
+                "selected_ids_sha256": ids_sha256,
+                "expected_ids_sha256": ids_sha256,
+            }
+        },
         "timing": {"elapsed_seconds_including_model_load": 10.0, "model_load_seconds": 1.0},
     }
     report_path = run_root / "profile_fast_metrics.json"

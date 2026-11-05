@@ -438,7 +438,10 @@ def _load_fast_only_predictions(
     if status_counts.get("valid") != len(expected_ids):
         raise ValueError("strict A4 comparison requires 224 valid Fast-only profiles")
     source_selection = report.get("source_manifest", {}).get("selection", {})
-    if source_selection.get("ids_sha256") != expected_ids_sha256:
+    if (
+        source_selection.get("selected_ids_sha256") != expected_ids_sha256
+        or source_selection.get("expected_ids_sha256") != expected_ids_sha256
+    ):
         raise ValueError("Fast-only source selection does not match the frozen ID set")
     return indexed, {
         "run_id": fast_report_path.parent.name,
@@ -552,6 +555,21 @@ def reconcile(
             )),
         }
         emotion_alignment = {
+            "submission_vs_raw_prefix_different_ids": [
+                sample_id
+                for sample_id in ids
+                if selected_submission[sample_id].get("emotion_label") != prefix_results[sample_id].emotion_label
+            ],
+            "raw_prefix_vs_fast_only_different_ids": [
+                sample_id
+                for sample_id in ids
+                if prefix_results[sample_id].emotion_label != fast_index[sample_id].get("emotion_label")
+            ],
+            "submission_vs_fast_only_different_ids": [
+                sample_id
+                for sample_id in ids
+                if selected_submission[sample_id].get("emotion_label") != fast_index[sample_id].get("emotion_label")
+            ],
             "raw_prefix_vs_fast_only_different_count": sum(
                 prefix_results[sample_id].emotion_label != fast_index[sample_id].get("emotion_label")
                 for sample_id in ids
@@ -560,6 +578,16 @@ def reconcile(
                 selected_submission[sample_id].get("emotion_label") != fast_index[sample_id].get("emotion_label")
                 for sample_id in ids
             ),
+            "submission_vs_fast_only_raw_status_counts": dict(sorted(Counter(
+                selected_raw[sample_id].get("status", "missing_status")
+                for sample_id in ids
+                if selected_submission[sample_id].get("emotion_label") != fast_index[sample_id].get("emotion_label")
+            ).items())),
+            "submission_vs_fast_only_full_json_status_counts": dict(sorted(Counter(
+                full_statuses[sample_id]
+                for sample_id in ids
+                if selected_submission[sample_id].get("emotion_label") != fast_index[sample_id].get("emotion_label")
+            ).items())),
         }
         fast_metadata["fast_alignment_status"] = (
             "reconciled"
@@ -746,7 +774,8 @@ def _render_report(manifest: dict[str, Any], result: dict[str, Any]) -> str:
             f"| F：新 Fast-only 逐 ID 结果（固定 224 分母） | {f['overall_33_label_tp']} | {f['overall_33_label_fp']} | {f['overall_33_label_fn']} | {f['overall_33_label_micro_f1']:.6f} | {f['overall_33_label_macro_f1']:.6f} |",
             "",
             f"- Fast-only Run：`{manifest['fast_only_run']['run_id']}`；状态 `passed` 表示覆盖门槛通过；本次另核实 224/224 有效并完成严格 ID 对齐。",
-            f"- R↔F 画像不一致：{rf['different_sample_count']} 条；维度计数 `{json.dumps(rf['different_sample_count_by_dimension'], ensure_ascii=False, sort_keys=True)}`；情绪标签不一致 `{emotion['raw_prefix_vs_fast_only_different_count']}` 条。",
+            f"- R↔F 画像不一致：{rf['different_sample_count']} 条；维度计数 `{json.dumps(rf['different_sample_count_by_dimension'], ensure_ascii=False, sort_keys=True)}`；R↔F 情绪标签差异 `{emotion['raw_prefix_vs_fast_only_different_count']}` 条。",
+            f"- S↔F 情绪标签差异 `{emotion['submission_vs_fast_only_different_count']}` 条，ID `{json.dumps(emotion['submission_vs_fast_only_different_ids'], ensure_ascii=False)}`；这些行的 Raw 状态 `{json.dumps(emotion['submission_vs_fast_only_raw_status_counts'], ensure_ascii=False, sort_keys=True)}`、完整 JSON 状态 `{json.dumps(emotion['submission_vs_fast_only_full_json_status_counts'], ensure_ascii=False, sort_keys=True)}`。R/F 情绪一致，差异在历史 Submission 的整段输出归一化结果中。",
             f"- 配对统计见 `fast_alignment.json`；逐 ID S/R/F 画像与情绪见 `historical_cases.jsonl`。",
             f"- 语义对齐状态：`{result['fast_alignment_status']}`。旧完整 Run 未保留逐 Token IDs，因此本次不作历史 Token-ID 逐项相等结论。",
         ])
