@@ -530,6 +530,10 @@ python scripts/e01_b_evaluate.py --scope compare \
 
 此处 `--allow-full-dev` 是评测范围确认参数，不改变模型/数据身份门禁；Runner 会将完整 Raw、预测和资源报告写到忽略目录。出现中断时只对相同的未完成 Run 使用原配置恢复。最终完整 Dev 结果、Raw Schema 与逐维画像指标仍是候选保留的权威质量证据，不能由 fast-profile-eval 代替。
 
+### E03-A4 — 已完成实验的评分退出语义
+
+本轮 A4 的指标与停止结论见[A4 验收报告](experiments/E0.3-A4_评测对齐与续训稳定性验收.md)。`scripts/e03_a4_stability_evaluate.py compare` 默认退出码 `0` 表示配对诊断报告已生成；即使状态为 `stability_failed`，控制台仍保留质量状态、计算结果、`threshold_failures` 和报告路径。可选严格门禁 `--require-quality-passed` 只适用于 `compare`：只有 `stability_preliminarily_passed` 返回 `0`，质量门槛失败或执行异常均为非零；`prepare` 模式会拒绝该参数。
+
 ## Regression suite
 
 Run the complete current data and prompt/token audit suite with:
