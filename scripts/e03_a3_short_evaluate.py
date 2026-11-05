@@ -12,7 +12,7 @@ import re
 import subprocess
 import sys
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +47,16 @@ def _json(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise ValueError(f"expected JSON object: {path}")
+    return value
+
+
+def _json_compatible(value: Any) -> Any:
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _json_compatible(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_compatible(item) for item in value]
     return value
 
 
@@ -179,7 +189,7 @@ def _training_run(config: dict[str, Any], path: Path, expected_group: str | None
         or manifest.get("reload_check_status") != "passed"
         or manifest.get("base_weights_unchanged") is not True
         or manifest.get("optimizer_state_resume_enabled") is not False
-        or manifest.get("authorization_receipt") != config["authorization"]
+        or manifest.get("authorization_receipt") != _json_compatible(config["authorization"])
         or (expected_group is not None and manifest.get("group") != expected_group)
     ):
         raise ValueError("evaluation requires an authorized, reloaded 128-step A3 training Run")

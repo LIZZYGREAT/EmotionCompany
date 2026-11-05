@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from scripts import e03_a3_short_train
+from scripts import e03_a3_short_evaluate
 from scripts.e03_a3_short_evaluate import paired_cluster_bootstrap
 from src.training.e03_a3_sampling import (
     NATURAL,
@@ -174,6 +175,14 @@ def test_run_manifest_writer_serializes_yaml_date_values(tmp_path: Path) -> None
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["authorization_receipt"]["authorized_on"] == "2026-11-04"
+
+
+def test_evaluation_authorization_receipt_matches_json_serialized_yaml_date() -> None:
+    receipt = {"scope": "E03-A3", "authorized_on": date(2026, 11, 4)}
+
+    assert e03_a3_short_evaluate._json_compatible(receipt) == {
+        "scope": "E03-A3", "authorized_on": "2026-11-04",
+    }
 
 
 def test_reload_recovery_requires_complete_finite_training_trace() -> None:
