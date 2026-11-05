@@ -176,6 +176,49 @@ def test_run_manifest_writer_serializes_yaml_date_values(tmp_path: Path) -> None
     assert manifest["authorization_receipt"]["authorized_on"] == "2026-11-04"
 
 
+def test_reload_recovery_requires_complete_finite_training_trace() -> None:
+    step_rows = [
+        {
+            "optimizer_step": step,
+            "microbatch_count": 1,
+            "microbatch_losses": [0.5],
+            "finite_gradient_nonzero_checked": True,
+            "parameter_update_checked": step in {1, 64, 128},
+        }
+        for step in range(1, 129)
+    ]
+    trainer_rows = [
+        {"optimizer_step": step, "loss": 0.5, "grad_norm": 1.0, "learning_rate": 1e-4}
+        for step in range(1, 129)
+    ]
+
+    e03_a3_short_train._validate_recovery_optimizer_trace(step_rows, trainer_rows, 128)
+
+    step_rows[80]["microbatch_losses"] = [float("nan")]
+    with pytest.raises(ValueError, match="invalid loss/gradient evidence"):
+        e03_a3_short_train._validate_recovery_optimizer_trace(step_rows, trainer_rows, 128)
+
+
+def test_reload_recovery_rejects_missing_parameter_update_audit() -> None:
+    step_rows = [
+        {
+            "optimizer_step": step,
+            "microbatch_count": 1,
+            "microbatch_losses": [0.5],
+            "finite_gradient_nonzero_checked": True,
+            "parameter_update_checked": step in {1, 64},
+        }
+        for step in range(1, 129)
+    ]
+    trainer_rows = [
+        {"optimizer_step": step, "loss": 0.5, "grad_norm": 1.0, "learning_rate": 1e-4}
+        for step in range(1, 129)
+    ]
+
+    with pytest.raises(ValueError, match="parameter-update evidence"):
+        e03_a3_short_train._validate_recovery_optimizer_trace(step_rows, trainer_rows, 128)
+
+
 def _fake_torch_for_gpu_gate(total_bytes: int, free_bytes: int):
     cuda = SimpleNamespace(
         is_available=lambda: True,

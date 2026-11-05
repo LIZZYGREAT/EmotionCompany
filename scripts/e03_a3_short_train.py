@@ -1122,10 +1122,301 @@ def _training_run(
         raise
 
 
+def _git_source_sha256(commit: str, relative_path: str) -> str:
+    result = subprocess.run(
+        ["git", "show", f"{commit}:{relative_path}"],
+        cwd=ROOT,
+        capture_output=True,
+        check=True,
+    )
+    return hashlib.sha256(result.stdout).hexdigest()
+
+
+def _validate_recovery_optimizer_trace(
+    step_rows: list[dict[str, Any]], trainer_rows: list[dict[str, Any]], expected_steps: int,
+) -> None:
+    expected_sequence = list(range(1, expected_steps + 1))
+    if [row.get("optimizer_step") for row in step_rows] != expected_sequence:
+        raise ValueError("reload recovery requires complete, ordered optimizer-step evidence")
+    if [row.get("optimizer_step") for row in trainer_rows] != expected_sequence:
+        raise ValueError("reload recovery requires complete, ordered Trainer logs")
+    for row in step_rows:
+        losses = row.get("microbatch_losses")
+        if (
+            row.get("finite_gradient_nonzero_checked") is not True
+            or not isinstance(losses, list)
+            or row.get("microbatch_count") != len(losses)
+            or not losses
+            or not all(isinstance(value, (int, float)) and math.isfinite(value) for value in losses)
+        ):
+            raise ValueError("reload recovery found missing or invalid loss/gradient evidence")
+    required_parameter_checks = {1, 64, expected_steps}
+    checked_steps = {
+        int(row["optimizer_step"]) for row in step_rows if row.get("parameter_update_checked") is True
+    }
+    if not required_parameter_checks <= checked_steps:
+        raise ValueError("reload recovery lacks first/checkpoint/final parameter-update evidence")
+    for row in trainer_rows:
+        for field in ("loss", "grad_norm", "learning_rate"):
+            value = row.get(field)
+            if not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"reload recovery found invalid Trainer metric: {field}")
+
+
+def _validate_reload_recovery_artifacts(
+    config: dict[str, Any], config_path: Path, run_id: str, cpu_facts: dict[str, Any],
+) -> dict[str, Any]:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{2,95}", run_id):
+        raise ValueError("reload recovery requires a valid --run-id")
+    run_root = _resolve(config["data"]["output_root"]) / run_id
+    manifest_path = run_root / "manifest.json"
+    manifest = _json(manifest_path)
+    if (
+        manifest.get("run_id") != run_id
+        or manifest.get("experiment_id") != "E03-A3"
+        or manifest.get("training_scope") != "short_contrast"
+        or manifest.get("status") != "failed"
+        or manifest.get("stage") != "training_or_reload_failed"
+        or manifest.get("error") != "RuntimeError: A3 standalone Adapter reload check failed"
+        or manifest.get("optimizer_state_resume_enabled") is not False
+        or manifest.get("optimizer_state") != "fresh_adamw"
+        or manifest.get("resume_from_checkpoint") is not None
+        or manifest.get("initial_adapter_values_exact_match") is not True
+        or manifest.get("recovery") is not None
+    ):
+        raise ValueError("recovery only accepts an untouched Run that failed at the standalone Adapter reload gate")
+    original_reload_path = run_root / "reload_check.json"
+    original_reload = _json(original_reload_path)
+    if (
+        original_reload.get("status") != "failed"
+        or original_reload.get("token_ids_exact_match") is not False
+        or original_reload.get("base_weights_unchanged") is not True
+        or original_reload.get("base_weight_sha256_before") != config["base_model"]["expected_weight_sha256"]
+        or original_reload.get("base_weight_sha256_after") != config["base_model"]["expected_weight_sha256"]
+        or original_reload.get("before_release", {}).get("prompt_token_ids_sha256")
+        != original_reload.get("after_reload", {}).get("prompt_token_ids_sha256")
+    ):
+        raise ValueError("recovery requires an original failure isolated to the reload token comparison")
+    standalone_path = run_root / "reload_check_standalone.json"
+    if standalone_path.exists():
+        raise FileExistsError(f"reload recovery evidence already exists: {standalone_path}")
+
+    snapshot_path = run_root / "config_snapshot.yaml"
+    if sha256_file(snapshot_path) != manifest.get("config_sha256"):
+        raise ValueError("recovery config snapshot hash differs from the original Run Manifest")
+    if yaml.safe_load(snapshot_path.read_text(encoding="utf-8")) != config:
+        raise ValueError("recovery config snapshot differs from the frozen A3 config")
+    if manifest.get("source_hashes") != cpu_facts.get("source_hashes"):
+        raise ValueError("recovery source identities differ from the current frozen assets")
+    if manifest.get("frozen_evaluation") != cpu_facts.get("frozen_evaluation"):
+        raise ValueError("recovery frozen-evaluation identity differs from the CPU preflight")
+
+    schedule_path = run_root / "sample_schedule.jsonl"
+    if sha256_file(schedule_path) != manifest.get("schedule_sha256"):
+        raise ValueError("recovery sample schedule hash differs from the original Run Manifest")
+    expected_steps = int(config["training"]["max_optimizer_steps"])
+    step_rows = read_jsonl(run_root / "optimizer_steps.jsonl")
+    trainer_rows = read_jsonl(run_root / "trainer_logs.jsonl")
+    _validate_recovery_optimizer_trace(step_rows, trainer_rows, expected_steps)
+    schedule_rows = read_jsonl(schedule_path)
+    if len(schedule_rows) != int(manifest.get("training_rows", -1)):
+        raise ValueError("recovery sample schedule is incomplete")
+    if not all((run_root / "trainer" / f"checkpoint-{step}").is_dir() for step in (64, expected_steps)):
+        raise ValueError("recovery requires the frozen step-64 and final-step checkpoints")
+
+    commit = manifest.get("git_commit")
+    if not isinstance(commit, str) or not commit:
+        raise ValueError("recovery Run Manifest lacks its training Git commit")
+    original_implementation = {
+        "runner": _git_source_sha256(commit, "scripts/e03_a3_short_train.py"),
+        "sampler": _git_source_sha256(commit, "src/training/e03_a3_sampling.py"),
+    }
+    if manifest.get("implementation_sha256") != original_implementation:
+        raise ValueError("recovery Run implementation does not match its pinned Git commit")
+
+    preflight_receipt = manifest.get("gpu_preflight") or {}
+    preflight_root = Path(preflight_receipt.get("root", "")).resolve()
+    expected_preflight_root = (
+        _resolve(config["data"]["output_root"]).parent / "E03-A3-preflight" / preflight_root.name
+    ).resolve()
+    if preflight_root != expected_preflight_root:
+        raise ValueError("recovery GPU preflight path escaped the frozen output root")
+    preflight_manifest_path = preflight_root / "manifest.json"
+    preflight_manifest = _json(preflight_manifest_path)
+    preflight_data_path = preflight_root / "gpu_preflight.json"
+    preflight_data = _json(preflight_data_path)
+    if (
+        sha256_file(preflight_manifest_path) != preflight_receipt.get("manifest_sha256")
+        or sha256_file(preflight_data_path) != preflight_receipt.get("preflight_sha256")
+        or preflight_manifest.get("run_id") != preflight_root.name
+        or preflight_manifest.get("status") != "passed_gpu_dry_step_no_optimizer_update"
+        or preflight_manifest.get("stage") != "G2_gpu_dry_step"
+        or preflight_manifest.get("config_sha256") != sha256_file(config_path)
+        or preflight_manifest.get("implementation_sha256") != original_implementation
+        or preflight_manifest.get("gpu_preflight_sha256") != preflight_receipt.get("preflight_sha256")
+        or preflight_data.get("status") != "passed_gpu_dry_step_no_optimizer_update"
+        or preflight_data.get("dry_step", {}).get("optimizer_created") is not False
+        or preflight_data.get("dry_step", {}).get("optimizer_step_count") != 0
+    ):
+        raise ValueError("recovery original GPU preflight receipt is incomplete or changed")
+
+    initial_identity, _initial_config = inference.adapter_weight_identity(_resolve(config["adapter_init"]["source"]))
+    expected_initial = manifest.get("initial_adapter_identity") or {}
+    if any(
+        initial_identity.get(key) != expected_initial.get(key)
+        or initial_identity.get(key) != config["adapter_init"][f"expected_{key}"]
+        for key in ("weight_sha256", "config_sha256")
+    ):
+        raise ValueError("recovery frozen source Adapter no longer matches the original identity")
+    adapter_path = run_root / "adapter"
+    adapter_identity, adapter_config = inference.adapter_weight_identity(adapter_path)
+    inference.validate_adapter_base_reference(
+        adapter_config, config["base_model"]["model_id"], _resolve(config["base_model"]["local_path"]),
+    )
+    final_checkpoint_identity, _checkpoint_config = inference.adapter_weight_identity(
+        run_root / "trainer" / f"checkpoint-{expected_steps}"
+    )
+    if adapter_identity.get("weight_sha256") != final_checkpoint_identity.get("weight_sha256"):
+        raise ValueError("recovery final Adapter does not match the final-step checkpoint")
+    base_identity = inference._weight_identity(_resolve(config["base_model"]["local_path"]), {
+        "model_id": config["base_model"]["model_id"],
+        "model_revision": config["base_model"]["revision"],
+    })
+    if base_identity.get("observed_weight_hash") != config["base_model"]["expected_weight_sha256"]:
+        raise ValueError("recovery Base model identity differs from the frozen config")
+    return {
+        "run_root": run_root,
+        "manifest": manifest,
+        "original_manifest_sha256": sha256_file(manifest_path),
+        "original_reload_sha256": sha256_file(original_reload_path),
+        "original_reload": original_reload,
+        "step_rows": step_rows,
+        "trainer_rows": trainer_rows,
+        "adapter_identity": adapter_identity,
+        "base_identity_before": base_identity,
+        "preflight_manifest_sha256": sha256_file(preflight_manifest_path),
+        "preflight_data_sha256": sha256_file(preflight_data_path),
+    }
+
+
+def _recover_reload_failed_run(
+    config: dict[str, Any], config_path: Path, run_id: str, cpu_facts: dict[str, Any],
+) -> dict[str, Any]:
+    import torch
+    from src.training import training_sft
+
+    evidence = _validate_reload_recovery_artifacts(config, config_path, run_id, cpu_facts)
+    run_root = evidence["run_root"]
+    original_reload = evidence["original_reload"]
+    records, tokenizer, prompt, _schema, _enums = _load_training_protocol(config)
+    probe_row = next(
+        row for row in read_jsonl(_resolve(config["data"]["normalized_train_path"]))
+        if row["sample_id"] == records[0]["sample_id"]
+    )
+    probe_prompt = training_sft._make_probe_prompt(
+        [{"source": {"sample_id": probe_row["sample_id"], "history": probe_row["history"]}}],
+        tokenizer,
+        prompt,
+        int(config["protocol"]["max_prompt_tokens"]),
+    )
+    prompt_sha = training_sft.canonical_sha256(probe_prompt)
+    if prompt_sha != original_reload["before_release"].get("prompt_token_ids_sha256"):
+        raise ValueError("recovery probe prompt Token IDs differ from the original training-time probe")
+
+    model = None
+    try:
+        model, reload_torch, reload_model_facts = training_sft._load_train_model(
+            config,
+            _resolve(config["base_model"]["local_path"]),
+            adapter_path=run_root / "adapter",
+            autocast_adapter_dtype=False,
+        )
+        probe_after = training_sft._capture_probe(
+            model, tokenizer, probe_prompt,
+            max_new_tokens=int(config["evaluation"]["probe_max_new_tokens"]),
+        )
+        base_after = inference._weight_identity(_resolve(config["base_model"]["local_path"]), {
+            "model_id": config["base_model"]["model_id"],
+            "model_revision": config["base_model"]["revision"],
+        })
+        token_match = (
+            original_reload["before_release"].get("generated_token_ids")
+            == probe_after.get("generated_token_ids")
+        )
+        base_unchanged = (
+            evidence["base_identity_before"].get("observed_weight_hash")
+            == base_after.get("observed_weight_hash")
+            == config["base_model"]["expected_weight_sha256"]
+        )
+        if not token_match or not base_unchanged:
+            raise RuntimeError("reloaded Adapter still differs from training-time output or Base identity")
+        report = {
+            "status": "passed",
+            "verification": "post_training_reload_recovery",
+            "recovered_existing_failed_run": True,
+            "original_failed_reload_check_sha256": evidence["original_reload_sha256"],
+            "original_failure_preserved": True,
+            "prompt_token_ids_sha256": prompt_sha,
+            "token_ids_exact_match_to_training_time_probe": True,
+            "base_weights_unchanged": True,
+            "base_weight_sha256_before": evidence["base_identity_before"].get("observed_weight_hash"),
+            "base_weight_sha256_after": base_after.get("observed_weight_hash"),
+            "adapter_identity": evidence["adapter_identity"],
+            "reload_model_facts": reload_model_facts,
+            "before_release": original_reload["before_release"],
+            "after_reload": probe_after,
+            "implementation_sha256": {
+                "runner": sha256_file(Path(__file__).resolve()),
+                "training_sft": sha256_file(ROOT / "src/training/training_sft.py"),
+                "inference": sha256_file(ROOT / "participant/run_inference.py"),
+            },
+            "completed_optimizer_steps": len(evidence["step_rows"]),
+            "checked_at_utc": _now(),
+        }
+        standalone_path = run_root / "reload_check_standalone.json"
+        if standalone_path.exists():
+            raise FileExistsError(f"reload recovery evidence already exists: {standalone_path}")
+        _write_json(standalone_path, report)
+        manifest = evidence["manifest"]
+        manifest.update(
+            status="trained_pending_eval",
+            stage="training_and_reload_complete",
+            optimizer_steps=len(evidence["step_rows"]),
+            reload_check_status="passed",
+            reload_check_standalone_sha256=sha256_file(standalone_path),
+            adapter_identity=evidence["adapter_identity"],
+            base_weight_sha256=base_after.get("observed_weight_hash"),
+            base_weights_unchanged=True,
+            fresh_optimizer_state_verified=True,
+            recovered_after_reload_only_failure=True,
+            recovery={
+                "status": "recovered_post_training_reload_check",
+                "original_manifest_sha256": evidence["original_manifest_sha256"],
+                "original_reload_check_sha256": evidence["original_reload_sha256"],
+                "standalone_reload_check_sha256": sha256_file(standalone_path),
+                "original_failure_record_preserved": True,
+                "optimizer_trace_sha256": sha256_file(run_root / "optimizer_steps.jsonl"),
+                "sample_schedule_sha256": sha256_file(run_root / "sample_schedule.jsonl"),
+                "preflight_manifest_sha256": evidence["preflight_manifest_sha256"],
+                "preflight_data_sha256": evidence["preflight_data_sha256"],
+            },
+            next_stage="frozen_224_point_generation",
+            ended_at_utc=_now(),
+        )
+        _write_json(run_root / "manifest.json", manifest)
+        return manifest
+    finally:
+        if model is not None:
+            del model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("configs/training/e03_a3_short.yaml"))
-    parser.add_argument("--mode", choices=("preflight", "gpu-preflight", "train"), required=True)
+    parser.add_argument("--mode", choices=("preflight", "gpu-preflight", "train", "recover-reload"), required=True)
     parser.add_argument("--group", choices=("control", "candidate"))
     parser.add_argument("--run-id")
     parser.add_argument("--gpu-preflight-run-id")
@@ -1141,6 +1432,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.mode == "preflight":
         print(json.dumps(cpu_facts, ensure_ascii=False, indent=2))
         return 0
+    if args.mode == "recover-reload":
+        if not args.run_id:
+            raise ValueError("recover-reload mode requires --run-id")
+        result = _recover_reload_failed_run(config, config_path, args.run_id, cpu_facts)
+        print(json.dumps({
+            "status": result["status"],
+            "run_id": result["run_id"],
+            "group": result["group"],
+            "optimizer_steps": result.get("optimizer_steps"),
+            "reload_check_status": result.get("reload_check_status"),
+            "output_dir": str(_resolve(config["data"]["output_root"]) / result["run_id"]),
+        }, ensure_ascii=False, indent=2))
+        return 0 if result["status"] == "trained_pending_eval" else 2
     if args.mode == "gpu-preflight":
         if not args.run_id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{2,95}", args.run_id):
             raise ValueError("gpu-preflight mode requires a valid unique --run-id")
