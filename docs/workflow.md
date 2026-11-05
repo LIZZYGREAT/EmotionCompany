@@ -474,7 +474,11 @@ The required GitHub Job remains `unit-cpu`. Its exact test list is maintained in
 
 ### 2. GPU fast-profile-eval（最多 900 秒）
 
-需要已核验的 Full B Adapter、E01-B 推理配置和 CUDA。脚本先重复 CPU 来源门禁，再在同一固定 16 个 Dev 点（每个会话一个点）、同一 P0/F2/T1 与 Greedy 设置下配对完整生成和画像前缀早停；计时预算包含模型加载，最长 900 秒。它比较停止前的真实 Token ID 序列、画像标签、有效率、耗时与峰值显存。References 仅在两路生成后读取，异常不做完整生成回退。低覆盖、任一有效样本 Token/画像不一致、没有足够提速或显存增加时结果为 `not_adopted` / `blocked`。
+快评现分成两种用途。`gpu-compare` 保留原行为：在固定 16 个点上各执行一次完整生成和一次画像前缀早停，用于校验早停与完整 Greedy 输出的 Token/画像一致性。`gpu-fast-only` 用于筛候选：每个选中样本只调用一次 `model.generate`，在完整 `user_profile` 闭合后停止，不运行完整生成，也不生成或写出 `response_text`。因此它报告快速画像分数和真实耗时，但不报告相对于完整生成的节省率，也不单独证明新 Adapter 的完整输出等价性。
+
+`configs/evaluation/e03_profile_fast.yaml` 固定机制验收的 16–32 个点，每个会话一个点。`configs/evaluation/e03_profile_candidate.yaml` 固定了 A3 预先冻结的 224 点/101 个完整会话 ID SHA；启动前脚本核对 ID SHA、输入仅含 `id+history`、完整会话分组、D0.3 来源历史、P0/F2/T1、Tokenizer、Base/Adapter 身份和 900 秒预算。其他候选集合需使用独立配置，先固定 target-free ID 文件、数量、会话数和 ID SHA；不能根据候选预测调整成员。不同 Adapter 复用同一冻结配置及 ID 文件，Manifest 记录实验版本、代码/数据哈希、Base/Adapter 与 Tokenizer 身份。
+
+两个 GPU 模式都需要已核验的模型配置和 CUDA，References 仅在生成结束后读取。早停失败、无效 JSON、字段顺序不支持、提前 EOS、Token 上限和预算终止会写入失败统计；画像主指标把所有失败项按空画像计入固定分母，`valid_only` 仅作诊断。中断或预算耗尽会保留 `incomplete` / `budget_exhausted` 报告，不能变成 `passed`。
 
 ```bash
 source .venv/bin/activate
@@ -486,6 +490,21 @@ timeout --signal=TERM --kill-after=3s 900s \
 ```
 
 聚合结果写到 `outputs/diagnostics/e03_engineering/profile_fast/<run-id>/profile_fast_metrics.json`。`blocked_environment`、`budget_exhausted` 或 `not_adopted` 都不是通过；不得将画像片段当作完整赛事 Submission。只有固定 16 点全部满足 Token/画像一致、覆盖率、提速和显存门槛，才允许把该工具用于内部筛选，并保留完整 Dev 为最终质量门禁。
+
+候选筛选示例（替换为候选 Adapter 对应、身份已锁定的 Transformers 配置）：
+
+```bash
+source .venv/bin/activate
+timeout --signal=TERM --kill-after=3s 900s \
+  python scripts/e03_profile_fast_eval.py \
+    --mode gpu-fast-only \
+    --config configs/evaluation/e03_profile_candidate.yaml \
+    --run-config "$CANDIDATE_INFERENCE_CONFIG" \
+    --run-id "E03-PROFILE-CANDIDATE-$(date +%Y%m%d-%H%M%S)" \
+    --require-passed
+```
+
+省略 `--run-config` 时使用配置中的 E01-B 推理身份。`--require-passed` 使除状态严格为 `passed` 外的报告均返回非零；默认返回码仍区分“成功生成诊断报告”和“门槛通过”。`gpu-fast-only` 的 `passed` 只表示冻结筛选任务完整、有效覆盖率达到门槛，不表示候选模型已获采用；最终模型选择仍须对完整 1,833 点 Dev 运行完整 JSON 和多指标评测。
 
 ### 3. final-full-eval（完整 1,833 点，独立高成本 Run）
 

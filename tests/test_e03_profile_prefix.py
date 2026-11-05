@@ -82,6 +82,20 @@ def test_token_stopper_waits_across_token_boundaries_and_stores_exact_ids():
     assert stopper.result is not None and stopper.result.valid
 
 
+def test_fast_only_stopper_terminates_on_terminal_order_rejection():
+    text = '{"user_profile":{"personality_traits":[],"interests":[],"style":[]},'
+    ids = [ord(character) for character in text]
+    stopper = ProfilePrefixStopper(
+        lambda current: "".join(chr(token) for token in current),
+        ENUMS,
+        stop_on_rejection=True,
+    )
+    assert stopper.inspect(ids)
+    assert stopper.result is not None and stopper.result.status == "unsupported_order"
+    assert stopper.stop_reason == "profile_prefix_rejected"
+    assert stopper.generated_token_ids == tuple(ids)
+
+
 def test_eos_and_token_limit_are_explicitly_incomplete():
     stopper = ProfilePrefixStopper(lambda ids: "".join(chr(token) for token in ids), ENUMS)
     assert stopper.finish("eos", [ord("{")]).reason == "early_eos"

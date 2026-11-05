@@ -1,0 +1,30 @@
+version: E03-profile-fast-v1
+experiment_version: E03-profile-fast-frozen-224-v1
+sources:
+  input_path: outputs/evaluation/e00_1/dev_adapter_v2/inference_input.jsonl
+  id_map_path: outputs/evaluation/e00_1/dev_adapter_v2/id_map.jsonl
+  references_path: outputs/diagnostics/e03_a3/E03-A3-DIAG-20261104-05/frozen_eval_references.jsonl
+  inference_config_path: outputs/evaluation/e01_b/full/E01-B-EVAL-20261028-223105/inference_config.json
+  normalized_dev_path: data/processed/v1/dev.jsonl
+  raw_source_path: data/train/train_public.jsonl
+  dataset_manifest_path: outputs/data_pipeline/v1/manifest.json
+selection:
+  mode: frozen_ids
+  frozen_ids_path: outputs/diagnostics/e03_a3/E03-A3-DIAG-20261104-05/frozen_eval_input.jsonl
+  expected_count: 224
+  expected_conversation_count: 101
+  expected_ids_sha256: d3c84beb6227e87c0fd09e425619635cd9fc6bac5b087e3f1010fb089f4ff8d2
+protocol:
+  prompt_version: P0
+  prompt_sha256: d427e4996d0075a3adfe03ae25881d093687a6565f5b037f605accecc84c70b2
+  format_version: F2
+  truncation_version: T1
+generation:
+  max_new_tokens: 1200
+  do_sample: false
+gpu_budget:
+  max_seconds: 900
+adoption_gates:
+  minimum_valid_coverage: 0.8
+  require_fixed_denominator_metrics: true
+output_root: outputs/diagnostics/e03_engineering/profile_fast

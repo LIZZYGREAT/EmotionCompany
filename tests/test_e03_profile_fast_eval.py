@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from src.evaluation.profile_fast_eval import (
     compare_generated_prefix,
     profile_nonempty_recall,
+    run_profile_fast_only_attempts,
+    score_profile_attempts,
+    selected_id_sha256,
+    select_frozen_id_samples,
     select_unique_conversation_samples,
 )
 from src.evaluation.source_integrity import (
@@ -15,6 +21,7 @@ from src.evaluation.source_integrity import (
     validate_target_free_inputs,
     verify_prompt_token_ids,
 )
+from scripts import e03_profile_fast_eval as fast_eval_cli
 
 
 def _inputs():
@@ -159,3 +166,173 @@ def test_nonempty_dimension_recall_keeps_three_dimensions_separate():
     assert recall["personality_traits"]["recall"] == 0.0
     assert recall["interests"]["recall"] == 1.0
     assert recall["style"]["recall"] == 1.0
+
+
+def test_frozen_selection_pins_id_membership_and_complete_conversation_groups():
+    frozen = [_inputs()[0], _inputs()[1], _inputs()[2]]
+    selected = select_frozen_id_samples(
+        _inputs(),
+        _id_map(),
+        frozen,
+        expected_ids_sha256=selected_id_sha256([row["id"] for row in frozen]),
+        expected_count=3,
+        expected_conversation_count=2,
+    )
+    assert [row["id"] for row in selected] == ["p1", "p2", "p3"]
+    with pytest.raises(ValueError, match="splits one or more conversation groups"):
+        select_frozen_id_samples(
+            _inputs(),
+            _id_map(),
+            [_inputs()[0], _inputs()[2]],
+            expected_ids_sha256=selected_id_sha256(["p1", "p3"]),
+            expected_count=2,
+            expected_conversation_count=2,
+        )
+    with pytest.raises(ValueError, match="SHA-256"):
+        select_frozen_id_samples(
+            _inputs(),
+            _id_map(),
+            frozen,
+            expected_ids_sha256="0" * 64,
+            expected_count=3,
+            expected_conversation_count=2,
+        )
+
+
+def test_fast_only_runner_calls_one_candidate_generation_per_sample():
+    calls = []
+
+    def generate_candidate_once(sample):
+        calls.append(sample["id"])
+        return {"status": "valid", "user_profile": {
+            "personality_traits": [], "interests": [], "style": [],
+        }}
+
+    attempts = run_profile_fast_only_attempts(_inputs()[:3], generate_candidate_once)
+    assert calls == ["p1", "p2", "p3"]
+    assert [attempt["status"] for attempt in attempts] == ["valid", "valid", "valid"]
+    assert [attempt["id"] for attempt in attempts] == calls
+
+
+def test_fast_only_budget_termination_marks_unstarted_rows_without_calling_them():
+    calls = []
+
+    def generate_candidate_once(sample):
+        calls.append(sample["id"])
+        if sample["id"] == "p2":
+            return {"status": "budget_exhausted", "reason": "deadline"}
+        return {"status": "incomplete", "reason": "early_eos"}
+
+    attempts = run_profile_fast_only_attempts(_inputs(), generate_candidate_once)
+    assert calls == ["p1", "p2"]
+    assert [attempt["status"] for attempt in attempts] == [
+        "incomplete", "budget_exhausted", "budget_exhausted", "budget_exhausted",
+    ]
+
+
+def test_fast_only_generation_error_marks_remaining_rows_incomplete():
+    calls = []
+
+    def generate_candidate_once(sample):
+        calls.append(sample["id"])
+        return {"status": "incomplete", "reason": "generation_error:RuntimeError:oom"}
+
+    attempts = run_profile_fast_only_attempts(_inputs(), generate_candidate_once)
+    assert calls == ["p1"]
+    assert [attempt["status"] for attempt in attempts] == ["incomplete"] * 4
+    assert attempts[1]["reason"] == "run_stopped_after_generation_error"
+
+
+def test_fixed_denominator_keeps_invalid_incomplete_and_unsupported_rows():
+    enums = {
+        "personality_traits": ["kind"],
+        "interests": ["music"],
+        "style": ["warm"],
+    }
+    gold = [
+        {"personality_traits": ["kind"], "interests": [], "style": []},
+        {"personality_traits": [], "interests": ["music"], "style": []},
+        {"personality_traits": [], "interests": [], "style": ["warm"]},
+        {"personality_traits": [], "interests": [], "style": []},
+    ]
+    attempts = [
+        {"status": "valid", "user_profile": gold[0]},
+        {"status": "invalid", "reason": "unknown_profile_label"},
+        {"status": "incomplete", "reason": "early_eos"},
+        {"status": "unsupported_order", "reason": "candidate_top_level_order"},
+    ]
+    score = score_profile_attempts(gold, attempts, enums)
+    assert score["fixed_denominator_count"] == 4
+    assert score["status_counts"] == {
+        "valid": 1, "invalid": 1, "incomplete": 1,
+        "unsupported_order": 1, "budget_exhausted": 0,
+    }
+    assert score["profile_metrics"]["overall_33_label_tp"] == 1
+    assert score["profile_metrics"]["overall_33_label_fn"] == 2
+    assert score["valid_only_diagnostic"]["denominator_count"] == 1
+    assert score["valid_only_diagnostic"]["profile_metrics"]["overall_33_label_micro_f1"] == 1.0
+    assert score["score_population"] == "all_selected_rows_failures_as_empty_profile"
+
+
+@pytest.mark.parametrize(
+    ("mode", "status", "default_exit", "strict_exit"),
+    [
+        ("parse-raw", "cpu_raw_parse_completed", 0, 1),
+        ("audit-source", "source_preflight_passed", 0, 1),
+        ("gpu-fast-only", "passed", 0, 0),
+        ("gpu-fast-only", "not_adopted", 0, 1),
+        ("gpu-fast-only", "budget_exhausted", 0, 1),
+        ("gpu-fast-only", "blocked_environment", 0, 1),
+        ("gpu-fast-only", "incomplete", 0, 1),
+        ("gpu-fast-only", "preflight_failed", 1, 1),
+        ("gpu-fast-only", "unknown", 1, 1),
+    ],
+)
+def test_cli_report_json_and_optional_strict_exit_status(
+    tmp_path, monkeypatch, capsys, mode, status, default_exit, strict_exit,
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("test config", encoding="utf-8")
+    base_config = {
+        "version": "E03-profile-fast-v1",
+        "experiment_version": "E03-profile-fast-test-v1",
+        "protocol": {"format_version": "F2", "truncation_version": "T1"},
+        "generation": {"do_sample": False},
+        "gpu_budget": {"max_seconds": 30},
+        "selection": {"mode": "mechanism_smoke", "count": 16, "seed": 42},
+        "output_root": str(tmp_path / "reports"),
+    }
+    monkeypatch.setattr(fast_eval_cli, "_load_config", lambda _path: base_config)
+    monkeypatch.setattr(
+        fast_eval_cli,
+        "run_gpu_fast_only",
+        lambda *_args: {"status": status, "sample_count": 16, "valid_count": 12},
+    )
+    monkeypatch.setattr(
+        fast_eval_cli,
+        "parse_existing_raw",
+        lambda *_args: {"status": status, "sample_count": 16, "valid_fast_count": 12},
+    )
+    monkeypatch.setattr(
+        fast_eval_cli,
+        "run_source_audit",
+        lambda *_args: {"status": status, "sample_count": 16, "valid_fast_count": 12},
+    )
+
+    def invoke(strict):
+        run_id = f"status-{status.replace('_', '-')}-{'strict' if strict else 'default'}"
+        args = ["--mode", mode, "--config", str(config_path), "--run-id", run_id]
+        if mode == "parse-raw":
+            args.extend(["--raw", str(tmp_path / "raw.jsonl")])
+        if strict:
+            args.append("--require-passed")
+        result = fast_eval_cli.main(args)
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == status
+        assert output["sample_count"] == 16
+        assert output["valid_fast_count"] == 12
+        assert output["output"].endswith(f"/{run_id}/profile_fast_metrics.json")
+        return result
+
+    assert invoke(False) == default_exit
+    assert invoke(True) == strict_exit

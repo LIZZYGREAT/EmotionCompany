@@ -1,4 +1,5 @@
 version: E03-profile-fast-v1
+experiment_version: E03-profile-fast-mechanism-v2
 sources:
   input_path: outputs/evaluation/e00_1/dev_adapter_v2/inference_input.jsonl
   id_map_path: outputs/evaluation/e00_1/dev_adapter_v2/id_map.jsonl
@@ -8,6 +9,7 @@ sources:
   raw_source_path: data/train/train_public.jsonl
   dataset_manifest_path: outputs/data_pipeline/v1/manifest.json
 selection:
+  mode: mechanism_smoke
   seed: 20261105
   count: 16
   method: seeded_hash_order_one_point_per_conversation_v1
@@ -23,6 +25,7 @@ gpu_budget:
   max_seconds: 900
 adoption_gates:
   minimum_valid_coverage: 0.8
+  require_fixed_denominator_metrics: true
   minimum_generation_saving: 0.1
   require_exact_token_prefix: true
   require_fast_peak_memory_not_higher: true

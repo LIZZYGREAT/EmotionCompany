@@ -312,10 +312,12 @@ class ProfilePrefixStopper:
         enums: Mapping[str, list[str]],
         *,
         deadline: float | None = None,
+        stop_on_rejection: bool = False,
     ) -> None:
         self.decode = decode
         self.enums = enums
         self.deadline = deadline
+        self.stop_on_rejection = stop_on_rejection
         self.result: PrefixResult | None = None
         self.generated_token_ids: tuple[int, ...] | None = None
         self.stop_reason: str | None = None
@@ -330,6 +332,11 @@ class ProfilePrefixStopper:
         if parsed.valid:
             self.generated_token_ids = current_ids
             self.stop_reason = "profile_prefix_closed"
+            self.result = parsed
+            return True
+        if self.stop_on_rejection and parsed.status in {"invalid", "unsupported_order"}:
+            self.generated_token_ids = current_ids
+            self.stop_reason = "profile_prefix_rejected"
             self.result = parsed
             return True
         self.result = parsed

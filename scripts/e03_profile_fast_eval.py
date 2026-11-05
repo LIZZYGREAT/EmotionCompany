@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import signal
 import sys
 import time
 from collections import Counter
@@ -24,6 +25,10 @@ from src.evaluation.metrics import profile_metrics
 from src.evaluation.profile_fast_eval import (
     compare_generated_prefix,
     profile_nonempty_recall,
+    run_profile_fast_only_attempts,
+    score_profile_attempts,
+    selected_id_sha256,
+    select_frozen_id_samples,
     select_unique_conversation_samples,
 )
 from src.evaluation.profile_prefix import ProfilePrefixStopper, parse_profile_prefix
@@ -102,6 +107,49 @@ def _load_config(path: Path) -> dict[str, Any]:
     budget = int(value.get("gpu_budget", {}).get("max_seconds", 0))
     if not 1 <= budget <= 900:
         raise ValueError("GPU budget must be between 1 and 900 seconds")
+    experiment_version = value.get("experiment_version")
+    if not isinstance(experiment_version, str) or not experiment_version.strip():
+        raise ValueError("profile fast config requires an explicit experiment_version")
+    selection = value.get("selection")
+    if not isinstance(selection, dict):
+        raise ValueError("profile fast config requires an explicit selection mode")
+    selection_mode = selection.get("mode", "mechanism_smoke")
+    if selection_mode == "mechanism_smoke":
+        count = selection.get("count")
+        if isinstance(count, bool) or not isinstance(count, int) or not 16 <= count <= 32:
+            raise ValueError("mechanism_smoke selection count must be between 16 and 32")
+    elif selection_mode == "frozen_ids":
+        expected_count = selection.get("expected_count")
+        expected_sha = selection.get("expected_ids_sha256")
+        if isinstance(expected_count, bool) or not isinstance(expected_count, int) or expected_count < 1:
+            raise ValueError("frozen_ids selection requires a positive expected_count")
+        if not isinstance(expected_sha, str) or len(expected_sha) != 64 or any(
+            character not in "0123456789abcdef" for character in expected_sha.lower()
+        ):
+            raise ValueError("frozen_ids selection requires a pinned expected_ids_sha256")
+        if not isinstance(selection.get("frozen_ids_path"), str) or not selection["frozen_ids_path"].strip():
+            raise ValueError("frozen_ids selection requires a frozen_ids_path")
+        expected_conversations = selection.get("expected_conversation_count")
+        if (
+            isinstance(expected_conversations, bool)
+            or not isinstance(expected_conversations, int)
+            or expected_conversations < 1
+        ):
+            raise ValueError("frozen_ids selection requires a positive expected_conversation_count")
+    else:
+        raise ValueError("selection.mode must be mechanism_smoke or frozen_ids")
+    adoption_gates = value.get("adoption_gates")
+    if not isinstance(adoption_gates, dict):
+        raise ValueError("profile fast config requires explicit adoption_gates")
+    minimum_coverage = adoption_gates.get("minimum_valid_coverage")
+    if (
+        isinstance(minimum_coverage, bool)
+        or not isinstance(minimum_coverage, (int, float))
+        or not 0 < minimum_coverage <= 1
+    ):
+        raise ValueError("adoption_gates.minimum_valid_coverage must be in (0, 1]")
+    if adoption_gates.get("require_fixed_denominator_metrics") is not True:
+        raise ValueError("profile fast config must require fixed-denominator scoring")
     return value
 
 
@@ -117,6 +165,57 @@ def _output_path(config: dict[str, Any], run_id: str, override: str | None) -> P
     output_root = _resolve(override or config["output_root"]) / run_id
     output_root.mkdir(parents=True, exist_ok=False)
     return output_root / "profile_fast_metrics.json"
+
+
+def _select_profile_samples(
+    config: dict[str, Any],
+    input_rows: list[dict[str, Any]],
+    id_map_rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    selection = config["selection"]
+    mode = selection.get("mode", "mechanism_smoke")
+    if mode == "mechanism_smoke":
+        selected = select_unique_conversation_samples(
+            input_rows,
+            id_map_rows,
+            count=int(selection["count"]),
+            seed=int(selection["seed"]),
+        )
+        id_sha256 = selected_id_sha256([row["id"] for row in selected])
+        method = selection.get("method", "seeded_hash_order_one_point_per_conversation_v1")
+        frozen_ids_path = None
+        frozen_ids_file_sha256 = None
+    else:
+        frozen_ids_path = _resolve(selection["frozen_ids_path"])
+        frozen_rows = _read_jsonl(frozen_ids_path)
+        selected = select_frozen_id_samples(
+            input_rows,
+            id_map_rows,
+            frozen_rows,
+            expected_ids_sha256=str(selection["expected_ids_sha256"]).lower(),
+            expected_count=int(selection["expected_count"]),
+            expected_conversation_count=int(selection["expected_conversation_count"]),
+            require_complete_conversations=True,
+        )
+        id_sha256 = selected_id_sha256([row["id"] for row in selected])
+        method = "pre_frozen_target_free_id_list_v1"
+        frozen_ids_file_sha256 = _sha256_file(frozen_ids_path)
+    map_index = unique_index(id_map_rows, "eval_id", "ID map")
+    conversation_ids = {
+        str(map_index[row["id"]]["conversation_id"])
+        for row in selected
+    }
+    return selected, {
+        "mode": mode,
+        "method": method,
+        "seed": selection.get("seed") if mode == "mechanism_smoke" else None,
+        "selected_count": len(selected),
+        "selected_conversation_count": len(conversation_ids),
+        "selected_ids_sha256": id_sha256,
+        "expected_ids_sha256": selection.get("expected_ids_sha256") if mode == "frozen_ids" else None,
+        "frozen_ids_path": str(frozen_ids_path) if frozen_ids_path is not None else None,
+        "frozen_ids_file_sha256": frozen_ids_file_sha256,
+    }
 
 
 def parse_existing_raw(
@@ -264,15 +363,11 @@ def run_source_audit(
     id_map_rows = _enrich_id_map_conversations(
         config, _read_jsonl(_resolve(config["sources"]["id_map_path"]))
     )
-    selected = select_unique_conversation_samples(
-        input_rows, id_map_rows,
-        count=int(config["selection"]["count"]),
-        seed=int(config["selection"]["seed"]),
-    )
-    input_index = validate_target_free_inputs(input_rows)
-    map_index = unique_index(id_map_rows, "eval_id", "ID map")
-    selected_maps = [dict(map_index[row["id"]]) for row in selected]
     try:
+        selected, selection_facts = _select_profile_samples(config, input_rows, id_map_rows)
+        input_index = validate_target_free_inputs(input_rows)
+        map_index = unique_index(id_map_rows, "eval_id", "ID map")
+        selected_maps = [dict(map_index[row["id"]]) for row in selected]
         history_audit = audit_selected_source_history(config, selected, selected_maps)
     except (KeyError, OSError, ValueError) as exc:
         report = {
@@ -295,9 +390,10 @@ def run_source_audit(
         format_version=config["protocol"]["format_version"],
         truncation_version=config["protocol"]["truncation_version"],
         exporter_source_sha256=_sha256_file(Path(__file__).resolve()),
-        selection_method=config["selection"]["method"],
-        selection_seed=int(config["selection"]["seed"]),
+        selection_method=selection_facts["method"],
+        selection_seed=selection_facts["seed"],
     )
+    source_manifest["selection"] = selection_facts
     source_manifest["history_audit"] = history_audit
     source_manifest["normalized_dev_path"] = history_audit["normalized_dev_path"]
     source_manifest["normalized_dev_sha256"] = history_audit["normalized_dev_sha256"]
@@ -311,7 +407,7 @@ def run_source_audit(
         "fast_eval_config_sha256": _sha256_file(config_path),
         "source_manifest": source_manifest,
         "selected_points": len(selected),
-        "selected_conversations": len(selected_maps),
+        "selected_conversations": selection_facts["selected_conversation_count"],
         "gpu_used": False,
         "generation_started": False,
     }
@@ -733,14 +829,453 @@ def run_gpu_comparison(
     return report
 
 
+def run_gpu_fast_only(
+    config: dict[str, Any],
+    output_path: Path,
+    run_config_path: Path | None = None,
+    fast_config_path: Path | None = None,
+) -> dict[str, Any]:
+    """Generate one profile prefix per selected sample without full-output runs."""
+    started = time.monotonic()
+    budget_seconds = int(config["gpu_budget"]["max_seconds"])
+    deadline = started + budget_seconds
+    input_path = _resolve(config["sources"]["input_path"])
+    id_map_path = _resolve(config["sources"]["id_map_path"])
+    inference_path = _resolve(run_config_path or config["sources"]["inference_config_path"])
+    report_identity = {
+        "experiment_version": config["experiment_version"],
+        "config_path": str(fast_config_path or _resolve("configs/evaluation/e03_profile_fast.yaml")),
+        "config_sha256": _sha256_file(fast_config_path or _resolve("configs/evaluation/e03_profile_fast.yaml")),
+        "source_code_hashes": {
+            "fast_eval_script": _sha256_file(Path(__file__).resolve()),
+            "fast_eval_helpers": _sha256_file(ROOT / "src/evaluation/profile_fast_eval.py"),
+            "profile_prefix_parser": _sha256_file(ROOT / "src/evaluation/profile_prefix.py"),
+            "source_integrity": _sha256_file(ROOT / "src/evaluation/source_integrity.py"),
+            "inference_runner": _sha256_file(ROOT / "participant/run_inference.py"),
+        },
+        "inference_config_path": str(inference_path),
+        "inference_config_sha256": _sha256_file(inference_path) if inference_path.is_file() else None,
+    }
+    progress: dict[str, Any] = {
+        "status": "incomplete",
+        "created_at_utc": _now(),
+        "evaluation_scope": "profile_prefix_candidate_screen_one_generation_per_sample",
+        "run_identity": report_identity,
+        "selection": None,
+        "sample_count": None,
+        "attempted_count": 0,
+        "completed_attempt_count": 0,
+        "accounted_count": 0,
+        "gpu_used": False,
+        "full_generation_performed": False,
+        "response_text_generated_or_saved": False,
+        "generation_started": False,
+    }
+    _write_json(output_path, progress)
+
+    try:
+        import torch
+        from transformers import StoppingCriteria, StoppingCriteriaList
+
+        from participant import run_inference as runner
+    except ImportError as exc:
+        report = {
+            **progress,
+            "status": "blocked_environment",
+            "reason": f"required_runtime_dependency_missing:{type(exc).__name__}:{exc}",
+            "elapsed_seconds": round(time.monotonic() - started, 6),
+        }
+        _write_json(output_path, report)
+        return report
+
+    try:
+        input_rows = _read_jsonl(input_path)
+        input_index = validate_target_free_inputs(input_rows)
+        id_map_rows = _enrich_id_map_conversations(config, _read_jsonl(id_map_path))
+        id_map_index = unique_index(id_map_rows, "eval_id", "ID map")
+        selected, selection_facts = _select_profile_samples(config, input_rows, id_map_rows)
+        selected_ids = [row["id"] for row in selected]
+        selected_maps = [dict(id_map_index[eval_id]) for eval_id in selected_ids]
+        history_audit = audit_selected_source_history(config, selected, selected_maps)
+        source_manifest = build_source_manifest(
+            source_path=history_audit["raw_source_path"],
+            source_sha256=history_audit["raw_source_sha256"],
+            input_rows=[dict(input_index[eval_id]) for eval_id in selected_ids],
+            id_map_rows=selected_maps,
+            prompt_version=config["protocol"]["prompt_version"],
+            prompt_sha256=config["protocol"]["prompt_sha256"],
+            format_version=config["protocol"]["format_version"],
+            truncation_version=config["protocol"]["truncation_version"],
+            exporter_source_sha256=report_identity["source_code_hashes"]["fast_eval_script"],
+            selection_method=selection_facts["method"],
+            selection_seed=selection_facts["seed"],
+        )
+        source_manifest.update({
+            "selection": selection_facts,
+            "history_audit": history_audit,
+            "normalized_dev_path": history_audit["normalized_dev_path"],
+            "normalized_dev_sha256": history_audit["normalized_dev_sha256"],
+            "generation_input_path": str(input_path),
+            "generation_input_sha256": _sha256_file(input_path),
+            "id_map_path": str(id_map_path),
+            "id_map_sha256": _sha256_file(id_map_path),
+        })
+        inference_config = _read_json(inference_path)
+        inference_config["generation"] = {
+            **inference_config["generation"],
+            **config["generation"],
+        }
+        if inference_config.get("backend") != "transformers":
+            raise ValueError("gpu-fast-only requires the frozen Transformers runner config")
+        if (
+            config["protocol"].get("prompt_version") != "P0"
+            or inference_config.get("prompt", {}).get("version") != "P0"
+            or inference_config.get("prompt", {}).get("sha256") != config["protocol"]["prompt_sha256"]
+        ):
+            raise ValueError("run config does not match the frozen P0 version and SHA")
+        if (
+            config["protocol"].get("format_version") != "F2"
+            or config["protocol"].get("truncation_version") != "T1"
+        ):
+            raise ValueError("gpu-fast-only requires the frozen F2/T1 protocol")
+        if (
+            inference_config["generation"].get("do_sample") is not False
+            or inference_config["generation"].get("num_beams", 1) != 1
+            or inference_config["generation"].get("num_beam_groups", 1) != 1
+            or inference_config["generation"].get("penalty_alpha") not in (None, 0, 0.0)
+            or inference_config["generation"].get("temperature", 1.0) != 1.0
+            or inference_config["generation"].get("top_p", 1.0) != 1.0
+            or inference_config["generation"].get("top_k") not in (None, 0)
+        ):
+            raise ValueError("gpu-fast-only requires single-beam Greedy decoding")
+        if int(inference_config["generation"].get("max_new_tokens", 0)) != int(config["generation"]["max_new_tokens"]):
+            raise ValueError("run config max_new_tokens differs from the frozen fast-eval budget")
+        prompt_text, _submission_schema, enums, prompt_facts = runner.load_runtime_protocol(inference_config)
+        if prompt_facts.get("sha256") != config["protocol"]["prompt_sha256"]:
+            raise ValueError("P0 prompt SHA differs from the fast-eval config")
+    except (KeyError, OSError, TypeError, ValueError, RuntimeError) as exc:
+        report = {
+            **progress,
+            "status": "preflight_failed",
+            "reason": f"{type(exc).__name__}: {exc}",
+            "elapsed_seconds": round(time.monotonic() - started, 6),
+            "gpu_used": False,
+        }
+        _write_json(output_path, report)
+        return report
+
+    progress.update({
+        "selection": selection_facts,
+        "source_manifest": source_manifest,
+        "sample_count": len(selected),
+        "run_identity": {
+            **report_identity,
+            "model_experiment_id": inference_config.get("experiment_id"),
+            "prompt_facts": prompt_facts,
+            "generation": dict(inference_config["generation"]),
+        },
+        "gpu_budget_seconds_including_model_load": budget_seconds,
+    })
+    _write_json(output_path, progress)
+    if not torch.cuda.is_available():
+        report = {
+            **progress,
+            "status": "blocked_environment",
+            "reason": "cuda_unavailable",
+            "elapsed_seconds": round(time.monotonic() - started, 6),
+        }
+        _write_json(output_path, report)
+        return report
+
+    try:
+        model, tokenizer, _model_config, model_facts = _load_model(inference_config, runner, torch)
+    except (OSError, RuntimeError, ValueError) as exc:
+        report = {
+            **progress,
+            "status": "blocked_environment",
+            "reason": f"model_load_failed:{type(exc).__name__}:{exc}",
+            "elapsed_seconds": round(time.monotonic() - started, 6),
+            "gpu_used": True,
+        }
+        _write_json(output_path, report)
+        return report
+    model_load_seconds = time.monotonic() - started
+    if time.monotonic() >= deadline:
+        attempts = [
+            {"id": sample["id"], "status": "budget_exhausted", "reason": "model_load_exhausted_budget"}
+            for sample in selected
+        ]
+    else:
+        generation = dict(inference_config["generation"])
+        generation_call_ids: list[str] = []
+        progress["gpu_used"] = True
+        progress["generation_started"] = True
+        _write_json(output_path, progress)
+
+        def generate_candidate_once(sample: dict[str, Any]) -> dict[str, Any]:
+            if time.monotonic() >= deadline:
+                return {"status": "budget_exhausted", "reason": "run_deadline_before_generation"}
+            prompt_selection, _messages = runner.prepare_sample_messages(
+                sample,
+                prompt_text,
+                tokenizer,
+                inference_config["context"]["max_prompt_tokens"],
+            )
+            if prompt_selection.get("floor_exceeds_cap"):
+                return {
+                    "status": "invalid", "reason": "prompt_floor_exceeds_cap",
+                    "generated_token_count": 0, "generation_call_count": 0,
+                }
+            prompt_ids = list(prompt_selection["prompt_ids"])
+            input_ids = torch.tensor(
+                [prompt_ids],
+                dtype=torch.long,
+                device=model.get_input_embeddings().weight.device,
+            )
+            attention_mask = torch.ones_like(input_ids)
+            prefix_stopper = ProfilePrefixStopper(
+                lambda ids: tokenizer.decode(list(ids), skip_special_tokens=True),
+                enums,
+                deadline=deadline,
+                stop_on_rejection=True,
+            )
+
+            class PrefixCriteria(StoppingCriteria):
+                def __call__(self, sequences: Any, scores: Any, **kwargs: Any) -> bool:
+                    generated = sequences[0, len(prompt_ids):].detach().cpu().tolist()
+                    return prefix_stopper.inspect(generated)
+
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+            before = time.monotonic()
+            generation_call_ids.append(str(sample["id"]))
+            try:
+                with torch.inference_mode():
+                    output = model.generate(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        stopping_criteria=StoppingCriteriaList([PrefixCriteria()]),
+                        **generation,
+                    )
+            except RuntimeError as exc:
+                return {
+                    "status": "incomplete",
+                    "reason": f"generation_error:{type(exc).__name__}:{exc}",
+                    "generation_call_count": 1,
+                }
+            runner.synchronize(torch)
+            elapsed = time.monotonic() - before
+            generated_ids = [
+                int(value)
+                for value in output[0, input_ids.shape[1]:].detach().cpu().tolist()
+            ]
+            eos_token_id = getattr(tokenizer, "eos_token_id", None)
+            stop_reason = (
+                prefix_stopper.stop_reason
+                if prefix_stopper.stop_reason is not None
+                else "eos"
+                if eos_token_id is not None and eos_token_id in generated_ids
+                else "token_limit"
+                if len(generated_ids) >= int(generation["max_new_tokens"])
+                else "generation_ended"
+            )
+            parsed = prefix_stopper.result or prefix_stopper.finish(stop_reason, generated_ids)
+            status = parsed.status
+            if parsed.reason == "budget_exhausted":
+                status = "budget_exhausted"
+            result: dict[str, Any] = {
+                "status": status,
+                "reason": parsed.reason,
+                "stop_reason": stop_reason,
+                "generated_token_count": len(generated_ids),
+                "generation_call_count": 1,
+                "generation_seconds": round(elapsed, 6),
+                "peak_memory_bytes": int(torch.cuda.max_memory_allocated()) if torch.cuda.is_available() else 0,
+            }
+            if parsed.valid:
+                result["emotion_label"] = parsed.emotion_label
+                result["user_profile"] = dict(parsed.user_profile or {})
+                result["prefix_token_ids_sha256"] = hashlib.sha256(
+                    json.dumps(generated_ids, separators=(",", ":")).encode("utf-8")
+                ).hexdigest()
+            return result
+
+        previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+        def _handle_sigterm(_signum: int, _frame: Any) -> None:
+            raise KeyboardInterrupt
+
+        try:
+            signal.signal(signal.SIGTERM, _handle_sigterm)
+            attempts = run_profile_fast_only_attempts(selected, generate_candidate_once)
+        finally:
+            signal.signal(signal.SIGTERM, previous_sigterm)
+    if "generation_call_ids" not in locals():
+        generation_call_ids = []
+
+    for completed in range(1, len(attempts) + 1):
+        current_attempts = attempts[:completed]
+        attempted_ids = {
+            str(item["id"])
+            for item in current_attempts
+            if item.get("generation_call_count") == 1
+            or str(item.get("id")) in generation_call_ids
+        }
+        progress["attempted_count"] = len(attempted_ids)
+        progress["completed_attempt_count"] = sum("generation_seconds" in item for item in current_attempts)
+        progress["accounted_count"] = completed
+        progress["case_status_counts"] = dict(sorted(Counter(
+            str(item["status"]) for item in current_attempts
+        ).items()))
+        _write_json(output_path, progress)
+
+    references_path = _resolve(config["sources"]["references_path"])
+    references = _read_jsonl(references_path)
+    reference_index = unique_index(references, "eval_id", "References")
+    if not set(selected_ids) <= set(reference_index):
+        report = {
+            **progress,
+            "status": "preflight_failed",
+            "reason": "References do not cover the complete frozen selection",
+            "elapsed_seconds": round(time.monotonic() - started, 6),
+            "gpu_used": True,
+        }
+        _write_json(output_path, report)
+        return report
+    ordered_attempts = {attempt["id"]: attempt for attempt in attempts}
+    ordered_attempts_list = [ordered_attempts[eval_id] for eval_id in selected_ids]
+    gold_profiles: list[dict[str, list[str]]] = []
+    emotion_correct = 0
+    valid_emotion_correct = 0
+    valid_emotion_count = 0
+    for eval_id, attempt in zip(selected_ids, ordered_attempts_list):
+        target = reference_index[eval_id].get("target")
+        if not isinstance(target, dict) or not isinstance(target.get("user_profile"), dict):
+            raise ValueError(f"invalid Reference target for {eval_id}")
+        gold_profiles.append(target["user_profile"])
+        if attempt["status"] == "valid":
+            is_correct = target.get("emotion_label") == attempt.get("emotion_label")
+            emotion_correct += int(is_correct)
+            valid_emotion_correct += int(is_correct)
+            valid_emotion_count += 1
+    score = score_profile_attempts(gold_profiles, ordered_attempts_list, enums)
+    source_manifest["references_path"] = str(references_path)
+    source_manifest["references_sha256"] = _sha256_file(references_path)
+    source_manifest["selected_reference_rows"] = len(selected_ids)
+    valid_count = score["status_counts"]["valid"]
+    valid_coverage = valid_count / len(selected_ids) if selected_ids else 0.0
+    gates = config["adoption_gates"]
+    status_counts = score["status_counts"]
+    if status_counts["budget_exhausted"]:
+        status = "budget_exhausted"
+    elif status_counts["incomplete"]:
+        status = "incomplete"
+    elif valid_coverage < float(gates["minimum_valid_coverage"]):
+        status = "not_adopted"
+    else:
+        status = "passed"
+    timed_samples = [attempt for attempt in ordered_attempts_list if "generation_seconds" in attempt]
+    sample_seconds = [float(attempt["generation_seconds"]) for attempt in timed_samples]
+    generation_called_ids = set(generation_call_ids)
+    report = {
+        **progress,
+        "status": status,
+        "ended_at_utc": _now(),
+        "source_manifest": source_manifest,
+        "run_identity": {
+            **report_identity,
+            "model_experiment_id": inference_config.get("experiment_id"),
+            "prompt_facts": prompt_facts,
+            "generation": dict(inference_config["generation"]),
+            "model_facts": model_facts,
+            "base_weight_sha256": model_facts.get("model_weight_identity_sha256"),
+            "adapter_weight_sha256": model_facts.get("adapter_weight_sha256"),
+            "adapter_config_sha256": model_facts.get("adapter_config_sha256"),
+            "tokenizer_facts": model_facts.get("tokenizer_facts"),
+        },
+        "attempted_count": len(generation_called_ids),
+        "completed_attempt_count": len(timed_samples),
+        "accounted_count": len(ordered_attempts_list),
+        "generation_attempted_sample_count": sum(
+            int(attempt["id"] in generation_called_ids) for attempt in ordered_attempts_list
+        ),
+        "valid_count": valid_count,
+        "valid_coverage": valid_coverage,
+        "fixed_denominator_profile_metrics": score["profile_metrics"],
+        "valid_only_profile_diagnostic": score["valid_only_diagnostic"],
+        "case_status_counts": score["status_counts"],
+        "failure_reason_counts": score["failure_reason_counts"],
+        "emotion_accuracy_fixed_denominator": emotion_correct / len(selected_ids) if selected_ids else 0.0,
+        "emotion_accuracy_valid_only": valid_emotion_correct / valid_emotion_count if valid_emotion_count else None,
+        "three_dimension_nonempty_recall_fixed_denominator": profile_nonempty_recall(
+            gold_profiles,
+            [
+                attempt.get("user_profile", {"personality_traits": [], "interests": [], "style": []})
+                if attempt["status"] == "valid"
+                else {"personality_traits": [], "interests": [], "style": []}
+                for attempt in ordered_attempts_list
+            ],
+        ),
+        "generation": {
+            "one_model_generate_call_per_attempted_sample": True,
+            "model_generate_call_count": len(generation_call_ids),
+            "full_generation_performed": False,
+            "response_text_generated_or_saved": False,
+            "max_new_tokens": int(config["generation"]["max_new_tokens"]),
+            "do_sample": False,
+            "num_beams": 1,
+            "generation_seconds": round(sum(sample_seconds), 6),
+            "generation_sample_seconds": sample_seconds,
+            "peak_memory_bytes": max((int(attempt.get("peak_memory_bytes", 0)) for attempt in timed_samples), default=0),
+        },
+        "timing": {
+            "budget_seconds_including_model_load": budget_seconds,
+            "elapsed_seconds_including_model_load": round(time.monotonic() - started, 6),
+            "model_load_seconds": round(model_load_seconds, 6),
+        },
+        "adoption_gates": {
+            "minimum_valid_coverage": float(gates["minimum_valid_coverage"]),
+            "valid_coverage_gate_passed": valid_coverage >= float(gates["minimum_valid_coverage"]),
+            "status_is_execution_coverage_only": True,
+            "full_dev_required_for_final_model_choice": True,
+        },
+        "gpu_used": True,
+        "references_read_by_generator": False,
+        "submission_written": False,
+        "per_sample_attempts": [
+            {
+                "id": attempt["id"],
+                "status": attempt["status"],
+                "reason": attempt.get("reason"),
+                "stop_reason": attempt.get("stop_reason"),
+                "generated_token_count": attempt.get("generated_token_count"),
+                "prefix_token_ids_sha256": attempt.get("prefix_token_ids_sha256"),
+                "generation_call_count": int(attempt["id"] in generation_called_ids),
+            }
+            for attempt in ordered_attempts_list
+        ],
+    }
+    _write_json(output_path, report)
+    return report
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("parse-raw", "audit-source", "gpu-compare"), required=True)
+    parser.add_argument(
+        "--mode",
+        choices=("parse-raw", "audit-source", "gpu-compare", "gpu-fast-only"),
+        required=True,
+    )
     parser.add_argument("--config", default="configs/evaluation/e03_profile_fast.yaml")
     parser.add_argument("--raw", help="completed Raw predictions JSONL for CPU-only prefix audit")
     parser.add_argument("--run-config", help="frozen Transformers inference_config.json")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--output-root")
+    parser.add_argument(
+        "--require-passed",
+        action="store_true",
+        help="return nonzero unless the report status is exactly passed",
+    )
     args = parser.parse_args(argv)
     config_path = _resolve(args.config)
     config = _load_config(config_path)
@@ -751,8 +1286,15 @@ def main(argv: list[str] | None = None) -> int:
         report = parse_existing_raw(config, _resolve(args.raw), output_path, config_path)
     elif args.mode == "audit-source":
         report = run_source_audit(config, output_path, config_path)
-    else:
+    elif args.mode == "gpu-compare":
         report = run_gpu_comparison(
+            config,
+            output_path,
+            _resolve(args.run_config) if args.run_config else None,
+            config_path,
+        )
+    else:
+        report = run_gpu_fast_only(
             config,
             output_path,
             _resolve(args.run_config) if args.run_config else None,
@@ -762,12 +1304,14 @@ def main(argv: list[str] | None = None) -> int:
         "status": report.get("status"),
         "output": str(output_path),
         "sample_count": report.get("sample_count"),
-        "valid_fast_count": report.get("valid_fast_count"),
-        "valid_parse_rate": report.get("valid_parse_rate"),
+        "valid_fast_count": report.get("valid_fast_count", report.get("valid_count")),
+        "valid_parse_rate": report.get("valid_parse_rate", report.get("valid_coverage")),
     }, ensure_ascii=False, sort_keys=True))
+    if args.require_passed:
+        return 0 if report.get("status") == "passed" else 1
     return 0 if report.get("status") in {
         "cpu_raw_parse_completed", "source_preflight_passed", "passed",
-        "not_adopted", "budget_exhausted", "blocked_environment",
+        "not_adopted", "budget_exhausted", "blocked_environment", "incomplete",
     } else 1
 
 
