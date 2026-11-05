@@ -27,6 +27,21 @@ def selected_ids_sha256(ids: Sequence[str]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def validate_reference_coverage(reference_ids: Sequence[str], selected_ids: Sequence[str]) -> None:
+    """Require every selected generation ID to have a scorer reference.
+
+    A Smoke cohort is a strict subset of the 160-row Pilot set, so unrelated
+    extra Reference rows are allowed while missing or duplicate IDs are not.
+    """
+    if len(reference_ids) != len(set(reference_ids)):
+        raise ValueError("reference IDs contain duplicates")
+    if len(selected_ids) != len(set(selected_ids)):
+        raise ValueError("selected IDs contain duplicates")
+    missing = set(selected_ids) - set(reference_ids)
+    if missing:
+        raise ValueError("References do not cover every selected generation ID")
+
+
 def conversation_id_from_sample_id(sample_id: str) -> str:
     """Recover D0.3 conversation identity from the frozen sample ID only."""
     parts = sample_id.split(":")

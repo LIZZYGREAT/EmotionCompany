@@ -27,6 +27,7 @@ from src.evaluation.f3_pilot import (
     score_fast_cases,
     score_smoke_cases,
     selected_ids_sha256,
+    validate_reference_coverage,
 )
 from src.evaluation.metrics import corpus_bleu4_char, profile_metrics, rouge_l_f1
 from src.evaluation.profile_prefix import parse_profile_prefix
@@ -434,8 +435,7 @@ def _read_references_after_generation(config: dict[str, Any], ids: list[str]) ->
         raise ValueError("Pilot References SHA differs from the frozen target-free cohort")
     rows = _read_jsonl(path)
     reference_index = unique_index(rows, "eval_id", "Pilot References")
-    if set(reference_index) != set(ids):
-        raise ValueError("Pilot References do not exactly match the generated cohort")
+    validate_reference_coverage(list(reference_index), ids)
     return reference_index
 
 
@@ -869,14 +869,91 @@ def run_preflight(config_path: Path, config: dict[str, Any]) -> dict[str, Any]:
     return source_report
 
 
+def score_existing_generation(config_path: Path, config: dict[str, Any], mode: str) -> dict[str, Any]:
+    """Score a fully generated journal without loading a model or repeating inference."""
+    import yaml
+    from src.training.e03_a6_contract import validate_pilot_config
+
+    if mode not in {"fast", "smoke"}:
+        raise ValueError("score mode must be fast or smoke")
+    assets = _load_assets(config)
+    training_config = yaml.safe_load((assets["run_root"] / "config_snapshot.yaml").read_text(encoding="utf-8"))
+    validate_pilot_config(training_config)
+    if training_config.get("pilot_quality_gates") != config.get("pilot_quality_gates"):
+        raise ValueError("Pilot evaluation quality gates changed after training")
+    mode_name = "fast-160" if mode == "fast" else "smoke-32"
+    output_dir = _resolve(config["output_root"]) / config["experiment_id"] / mode_name
+    manifest_path = output_dir / "run_manifest.json"
+    cases_path = output_dir / "cases.jsonl"
+    if not manifest_path.is_file() or not cases_path.is_file():
+        raise FileNotFoundError("existing Pilot generation journal or manifest is missing")
+    manifest = _read_json(manifest_path)
+    recorded_identity = manifest.get("run_identity")
+    expected_identity = _runtime_identity(config_path, config, assets, mode)
+    if not isinstance(recorded_identity, dict):
+        raise ValueError("existing Pilot generation has no frozen run identity")
+    # The generation code hash may differ because this recovery command uses a
+    # corrected scorer. All source/model/config identities must still match.
+    for key in expected_identity:
+        if key in {"script_sha256", "f3_eval_helpers_sha256"}:
+            continue
+        if recorded_identity.get(key) != expected_identity[key]:
+            raise ValueError(f"existing Pilot generation identity changed: {key}")
+    if not isinstance(recorded_identity.get("script_sha256"), str) or len(recorded_identity["script_sha256"]) != 64:
+        raise ValueError("existing Pilot generation code identity is missing")
+    ids = (
+        [row["id"] for row in assets["input_rows"]]
+        if mode == "fast" else list(assets["smoke_ids"])
+    )
+    cases = _read_jsonl(cases_path)
+    if len(cases) != len(ids) or [case.get("id") for case in cases] != ids:
+        raise ValueError("existing Pilot generation is not a complete frozen-cohort journal")
+    old_status = manifest.get("status")
+    old_error = manifest.get("error")
+    summary = _score_fast(config, assets, cases, output_dir) if mode == "fast" else _score_smoke(config, assets, cases, output_dir)
+    manifest.update(
+        status="complete",
+        gate_passed=(summary["f3"]["gate_passed"] if mode == "fast" else summary["smoke"]["gate_passed"]),
+        references_sha256=_sha256(_resolve(config["sources"]["references_path"])),
+        summary_sha256=_sha256(output_dir / "summary.json"),
+        cases_sha256=_sha256(cases_path),
+        references_read_by_generator=False,
+        rescored_at_utc=_now(),
+        scoring_identity={
+            "script_sha256": _sha256(Path(__file__).resolve()),
+            "f3_eval_helpers_sha256": _sha256(ROOT / "src/evaluation/f3_pilot.py"),
+            "scorer": "fixed-cohort-subset-reference-coverage-v1",
+        },
+        scoring_recovery=(
+            manifest.get("scoring_recovery")
+            if old_status == "complete" and manifest.get("scoring_recovery") is not None
+            else
+            {
+                "previous_status": old_status,
+                "previous_error": old_error,
+                "reason": "the original score check required all 160 Reference IDs for the 32-row Smoke subset",
+                "generation_repeated": False,
+            }
+            if old_status != "complete" else None
+        ),
+    )
+    _write_json_atomic(manifest_path, manifest)
+    return summary
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=ROOT / "configs/evaluation/e03_a6_f3_pilot.yaml")
-    parser.add_argument("--mode", choices=("preflight", "fast", "smoke"), required=True)
+    parser.add_argument("--mode", choices=("preflight", "fast", "smoke", "score-fast", "score-smoke"), required=True)
     args = parser.parse_args()
     config_path = args.config.resolve()
     config = _load_config(config_path)
-    result = run_preflight(config_path, config) if args.mode == "preflight" else run_evaluation(config_path, config, args.mode)
+    if args.mode == "preflight":
+        result = run_preflight(config_path, config)
+    elif args.mode.startswith("score-"):
+        result = score_existing_generation(config_path, config, args.mode.removeprefix("score-"))
+    else:
+        result = run_evaluation(config_path, config, args.mode)
     print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))
 
 

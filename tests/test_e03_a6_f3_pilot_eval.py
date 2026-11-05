@@ -6,6 +6,7 @@ from src.evaluation.f3_pilot import (
     score_fast_cases,
     score_smoke_cases,
     selected_ids_sha256,
+    validate_reference_coverage,
 )
 
 
@@ -69,6 +70,16 @@ def test_smoke_selection_is_stable_and_never_splits_conversations():
     assert len(selected) == len(set(selected)) == 6
     assert len({sample_ids[eval_id].split(":")[1] for eval_id in selected}) == 6
     assert selected_ids_sha256(selected) == selected_ids_sha256(list(reversed(selected)))
+
+
+def test_smoke_reference_coverage_allows_frozen_cohort_subset_and_rejects_missing_ids():
+    assert validate_reference_coverage(["a", "b", "c"], ["b", "c"]) is None
+    try:
+        validate_reference_coverage(["a", "b"], ["b", "missing"])
+    except ValueError as exc:
+        assert "do not cover" in str(exc)
+    else:
+        raise AssertionError("missing Smoke Reference ID must be rejected")
 
 
 def test_fast_scoring_keeps_failures_in_fixed_denominator_as_empty():
