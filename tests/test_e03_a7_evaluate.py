@@ -1,5 +1,9 @@
 import json
+from pathlib import Path
+import sys
+from types import ModuleType, SimpleNamespace
 
+from scripts import e03_a7_evaluate
 from scripts.e03_a7_evaluate import _pair_report, build_parser
 from src.data.e03_a5_labels import sha256_file
 from src.evaluation.e03_a7_classification_metrics import (
@@ -17,6 +21,117 @@ def _enums():
         "interests": [f"i{i}" for i in range(12)],
         "style": [f"s{i}" for i in range(11)],
     }
+
+
+def test_a7_evaluation_sources_use_frozen_a5_asset_keys(monkeypatch):
+    input_path = Path("frozen-input.jsonl")
+    id_map_path = Path("frozen-id-map.jsonl")
+    assets = {
+        "source_hashes": {"frozen_input": "input-sha", "references": "references-sha", "id_map": "id-map-sha"},
+        "frozen_ids": ["eval-1"],
+        "source_paths": {"frozen_input": input_path, "references": Path("references.jsonl"), "id_map": id_map_path},
+    }
+    config = {
+        "identity": {
+            "frozen_dev_input_sha256": "input-sha",
+            "frozen_dev_references_sha256": "references-sha",
+            "frozen_dev_id_map_sha256": "id-map-sha",
+            "frozen_dev_ids_sha256": "ids-sha",
+        },
+        "data": {"expected_dev_rows": 1},
+    }
+
+    monkeypatch.setattr(e03_a7_evaluate.e03_a5_evaluate, "_load_eval_assets", lambda _config: assets)
+    monkeypatch.setattr(e03_a7_evaluate, "selected_id_sha256", lambda _ids: "ids-sha")
+
+    def fake_iter_jsonl(path):
+        if path == input_path:
+            yield 1, {"id": "eval-1"}, "line-sha"
+        elif path == id_map_path:
+            yield 1, {"eval_id": "eval-1", "conversation_id": "conversation-1"}, "line-sha"
+        else:
+            raise AssertionError(f"unexpected frozen Dev asset path: {path}")
+
+    monkeypatch.setattr(e03_a7_evaluate, "iter_jsonl", fake_iter_jsonl)
+    monkeypatch.setattr(e03_a7_evaluate, "validate_target_free_inputs", lambda rows: {row["id"]: row for row in rows})
+
+    loaded = e03_a7_evaluate._load_evaluation_sources(config, {})
+
+    assert loaded["input_index"]["eval-1"] == {"id": "eval-1"}
+    assert loaded["id_map"]["eval-1"]["conversation_id"] == "conversation-1"
+
+
+def test_a7_eval_checkpoint_reload_restores_fp32_lora_dtype(monkeypatch, tmp_path):
+    calls = []
+    run_id = "pair-P"
+    run_root = tmp_path / "training" / run_id
+    checkpoint_dir = run_root / "trainer" / "checkpoint-512"
+    checkpoint_dir.mkdir(parents=True)
+    checkpoint_manifest_path = checkpoint_dir / "checkpoint_manifest.json"
+    checkpoint_manifest_path.write_text("{}\n", encoding="utf-8")
+    run_manifest = {
+        "run_id": run_id,
+        "arm": "P",
+        "config_sha256": "config-sha",
+        "code_sha256": "training-code-sha",
+        "optimizer_step": 512,
+        "checkpoint_identity": {},
+        "schedule_sha256": "schedule-sha",
+        "nodes": {"512": {"training_status": "passed", "checkpoint_manifest_sha256": "checkpoint-sha"}},
+    }
+    (run_root / "run_manifest.json").write_text(json.dumps(run_manifest), encoding="utf-8")
+
+    class FakePeftModel:
+        @staticmethod
+        def from_pretrained(base, adapter_path, **kwargs):
+            calls.append((base, adapter_path, kwargs))
+            return SimpleNamespace(config=SimpleNamespace(hidden_size=4), eval=lambda: None)
+
+    class FakeHead:
+        def load_state_dict(self, _state, strict):
+            assert strict is True
+
+    class FakeHeads:
+        profile_head = FakeHead()
+
+        def to(self, _device):
+            return self
+
+        def eval(self):
+            return None
+
+    peft = SimpleNamespace(PeftModel=FakePeftModel)
+    safetensors = ModuleType("safetensors")
+    safetensors.__path__ = []
+    safetensors_torch = ModuleType("safetensors.torch")
+    safetensors_torch.load_file = lambda *_args, **_kwargs: {}
+    monkeypatch.setitem(sys.modules, "peft", peft)
+    monkeypatch.setitem(sys.modules, "safetensors", safetensors)
+    monkeypatch.setitem(sys.modules, "safetensors.torch", safetensors_torch)
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(cuda=SimpleNamespace(current_device=lambda: 0), device=lambda *_args: "cuda:0"),
+    )
+    monkeypatch.setattr(e03_a7_evaluate.e03_a7_train, "_load_base", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(e03_a7_evaluate.e03_a7_train, "build_heads", lambda *_args, **_kwargs: FakeHeads())
+    monkeypatch.setattr(e03_a7_evaluate, "verify_checkpoint_manifest", lambda *_args, **_kwargs: {"status": "passed"})
+    monkeypatch.setattr(e03_a7_evaluate, "sha256_file", lambda _path: "checkpoint-sha")
+
+    loaded = e03_a7_evaluate._load_run_assets(
+        {
+            "training": {"pair_id": "pair"},
+            "outputs": {"training_root": str(tmp_path / "training")},
+            "model": {"heads": {"profile_seed": 1, "emotion_seed": 2}},
+        },
+        "config-sha",
+        "training-code-sha",
+        "P",
+        512,
+    )
+
+    assert loaded["run_id"] == run_id
+    assert calls[0][2]["autocast_adapter_dtype"] is True
 
 
 def test_a7_threshold_is_chosen_on_calibration_with_precision_constraint():

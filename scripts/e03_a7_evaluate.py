@@ -79,7 +79,7 @@ def _load_evaluation_sources(config: Mapping[str, Any], a5_config: Mapping[str, 
     input_index = validate_target_free_inputs(input_rows)
     if set(input_index) != set(assets["frozen_ids"]):
         raise ValueError("A7 frozen target-free input IDs differ from the fixed Dev cohort")
-    id_map_rows = [row for _line, row, _sha in iter_jsonl(assets["source_paths"]["frozen_dev_id_map"])]
+    id_map_rows = [row for _line, row, _sha in iter_jsonl(assets["source_paths"]["id_map"])]
     id_map = unique_index(id_map_rows, "eval_id", "A7 frozen Dev ID map")
     if set(id_map) != set(assets["frozen_ids"]):
         raise ValueError("A7 frozen Dev ID map IDs differ from the target-free input")
@@ -124,7 +124,9 @@ def _load_run_assets(config: Mapping[str, Any], config_sha: str, training_code_s
         str(checkpoint_dir / "inference_export/adapter"),
         is_trainable=False,
         local_files_only=True,
-        autocast_adapter_dtype=False,
+        # Classifier training stores LoRA weights in FP32; retain that dtype
+        # so Dev predictions use the same Adapter values as the reload gate.
+        autocast_adapter_dtype=True,
     )
     model.eval()
     heads = e03_a7_train.build_heads(
@@ -244,7 +246,7 @@ def _score_after_prediction_freeze(
     training_code_sha256: str,
 ) -> dict[str, Any]:
     # This is deliberately the first read of frozen Dev Gold in the A7 evaluation path.
-    references_path = evaluation_assets["source_paths"]["frozen_references"]
+    references_path = evaluation_assets["source_paths"]["references"]
     references = unique_index(
         [row for _line, row, _sha in iter_jsonl(references_path)],
         "eval_id",
