@@ -81,6 +81,7 @@ def test_a7_baseline_reconciliation_enum_includes_emotion_label():
 
     assert indexed["eval-1"] == prediction
     assert statuses["valid"] == 1
+    assert e03_a7_evaluate._baseline_profile_predictions(indexed, ["eval-1"]) == [prediction["user_profile"]]
 
 
 def test_a7_locked_score_recovery_accepts_only_the_bound_preceding_eval_code(monkeypatch, tmp_path):

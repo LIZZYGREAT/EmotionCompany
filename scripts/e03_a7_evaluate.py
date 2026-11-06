@@ -261,6 +261,12 @@ def _baseline_reconciliation_enums(
     return result
 
 
+def _baseline_profile_predictions(
+    indexed_rows: Mapping[str, Mapping[str, Any]], ids: Sequence[str],
+) -> list[dict[str, Any]]:
+    return [dict(indexed_rows[sample_id]["user_profile"]) for sample_id in ids]
+
+
 def _mark_scoring_interrupted(eval_manifest_path: Path, error: BaseException) -> None:
     manifest = _json(eval_manifest_path)
     if manifest.get("status") not in {"scoring_started_after_prediction_lock", "scoring_interrupted_after_gold_read"}:
@@ -387,7 +393,7 @@ def _score_after_prediction_freeze(
     )
     if baseline_statuses.get("valid") != 224:
         raise ValueError("A7 E01-B Fast-only baseline is not valid for all 224 frozen IDs")
-    baseline_profiles = [baseline_profile_index[sample_id] for sample_id in ids]
+    baseline_profiles = _baseline_profile_predictions(baseline_profile_index, ids)
     conversation_ids = [sources["id_map"][sample_id]["conversation_id"] for sample_id in ids]
     baseline_comparisons = {
         "threshold_0_5": summarize_profile_pair(
