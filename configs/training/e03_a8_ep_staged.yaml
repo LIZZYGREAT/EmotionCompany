@@ -1,0 +1,85 @@
+version: E03-A8-staged-training-v1
+experiment_id: E03-A8
+training_scope: generative_profile_specialist
+arm: EP
+status: ready_for_preflight
+
+base_model:
+  model_id: Qwen/Qwen3-1.7B
+  revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  local_path: participant/model
+  expected_weight_sha256: 005d20550c04f4e246e5b434448786b44a0196b47d758d0acc77aba279e5bbc5
+
+data:
+  split: train
+  dataset_root: outputs/data/e03_a8
+  dataset_manifest: outputs/data/e03_a8/manifest.json
+  train_path: outputs/data/e03_a8/ep_train.jsonl
+  sample_order_path: outputs/data/e03_a8/sample_order.jsonl
+  expected_train_rows: 16192
+  init_adapter: null
+  resume_from_checkpoint: null
+  output_root: outputs/training/E03-A8/EP
+
+protocol:
+  arm: EP
+  completion_version: A8-GENCLASS-v1
+  prompt_path: configs/prompts/p_a8_emotion_profile.txt
+  prompt_sha256: cdde50dd10f2ea0bdf8f316b85d9ca5c593c3aa305cf4152812c7c647333556b
+  selection_prompt_path: configs/prompts/p0.txt
+  p0_sha256: d427e4996d0075a3adfe03ae25881d093687a6565f5b037f605accecc84c70b2
+  runner_config: participant/configs/e03_a6_f4_inference_config.json
+  tokenizer_signature_sha256: 1662c9e99c6185441026a168b2dd6b09af103dc6dc3563b72f598411f14d1913
+  chat_template_sha256: a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8
+  eos_token_id: 151645
+  history_policy: P0_T1_then_common_A8_P_EP_history
+  max_train_seq_length: 2048
+  max_prompt_tokens: 1280
+  packing: false
+  padding_free: false
+
+quantization:
+  method: bitsandbytes_4bit
+  quant_type: nf4
+  compute_dtype: bfloat16
+  use_double_quant: true
+  device_map:
+    "": 0
+  max_cuda_memory_fraction: 0.92
+
+lora:
+  r: 8
+  alpha: 16
+  dropout: 0.0
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  bias: none
+  checkpoint_dtype: float32
+
+optimizer:
+  name: AdamW
+  learning_rate: 0.0001
+  lr_scheduler: constant
+  warmup_steps: 0
+  weight_decay: 0.0
+
+training:
+  seed: 42
+  per_device_micro_batch_size: 1
+  gradient_accumulation_steps: 4
+  max_optimizer_steps: 4048
+  save_interval_steps: 512
+  gradient_checkpointing: true
+  max_training_seconds: 43200
+  min_free_disk_gb: 10
+
+authorization:
+  authorized_max_step: 2048
+  conditional_until_step: 2048
+  no_tp_consecutive_nodes: 2
+  minimum_strict_parse_rate: 0.98
+  source: explicit_user_request_2026-11-07
+
+evaluation:
+  max_new_tokens: 256
+  do_sample: false
+  autocast_adapter_dtype: true
