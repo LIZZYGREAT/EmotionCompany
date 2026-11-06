@@ -330,8 +330,13 @@ def _load_source_data(config: Mapping[str, Any], a5_config: Mapping[str, Any]) -
     frozen_ids = list(eval_assets["frozen_ids"])
     if len(frozen_ids) != int(config["data"]["expected_dev_rows"]):
         raise ValueError("A7 frozen Dev cohort does not contain exactly 224 IDs")
-    if eval_assets["source_hashes"]["frozen_input"] != config["identity"]["frozen_dev_input_sha256"]:
-        raise ValueError("A7 frozen Dev target-free input hash changed")
+    for asset_key, identity_key in (
+        ("frozen_input", "frozen_dev_input_sha256"),
+        ("references", "frozen_dev_references_sha256"),
+        ("id_map", "frozen_dev_id_map_sha256"),
+    ):
+        if eval_assets["source_hashes"][asset_key] != config["identity"][identity_key]:
+            raise ValueError(f"A7 frozen Dev {asset_key} hash changed")
 
     base_identity = inference._weight_identity(
         _resolve(config["identity"]["base_model_path"]),
@@ -369,6 +374,24 @@ def _load_source_data(config: Mapping[str, Any], a5_config: Mapping[str, Any]) -
         "emotion_labels": emotion_label_order(train_schema, output_schema),
         "profile_labels": schema_label_order(train_schema, output_schema)[0],
     }
+
+
+def _frozen_dev_conversation_count(eval_assets: Mapping[str, Any]) -> int:
+    """Validate the A5 eval-ID map and count its frozen conversation clusters."""
+    expected_ids = list(eval_assets["frozen_ids"])
+    expected = set(expected_ids)
+    indexed: dict[str, str] = {}
+    for line_number, row, _sha in iter_jsonl(eval_assets["source_paths"]["id_map"]):
+        eval_id = row.get("eval_id")
+        conversation_id = row.get("conversation_id")
+        if not isinstance(eval_id, str) or not eval_id or eval_id in indexed:
+            raise ValueError(f"A7 frozen Dev ID map row {line_number} has a missing or duplicate eval_id")
+        if not isinstance(conversation_id, str) or not conversation_id:
+            raise ValueError(f"A7 frozen Dev ID map row {line_number} has no conversation_id")
+        indexed[eval_id] = conversation_id
+    if set(indexed) != expected or len(indexed) != len(expected_ids):
+        raise ValueError("A7 frozen Dev ID map IDs differ from the fixed 224-point cohort")
+    return len(set(indexed.values()))
 
 
 def _pair_root(config: Mapping[str, Any]) -> Path:
@@ -454,10 +477,7 @@ def _preflight(args: argparse.Namespace) -> int:
         "schedule": schedule_manifest,
         "frozen_dev": {
             "count": len(data["eval_assets"]["frozen_ids"]),
-            "conversation_count": len({
-                row["conversation_id"] for _line, row, _sha in iter_jsonl(data["eval_assets"]["source_paths"]["frozen_dev_id_map"])
-                if row.get("eval_id") in set(data["eval_assets"]["frozen_ids"])
-            }),
+            "conversation_count": _frozen_dev_conversation_count(data["eval_assets"]),
             "ids_sha256": config["identity"]["frozen_dev_ids_sha256"],
             "gold_read": False,
             "official_val_read": False,

@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from scripts.e03_a7_train import _frozen_dev_conversation_count
 from src.data.e03_a7_classification import (
     SFTPromptIndex,
     build_schedule,
@@ -10,6 +11,22 @@ from src.data.e03_a7_classification import (
     validate_conversation_splits,
     verify_schedule,
 )
+
+
+def test_a7_frozen_dev_conversation_count_uses_and_validates_a5_id_map(tmp_path):
+    id_map = tmp_path / "frozen_eval_id_map.jsonl"
+    id_map.write_text(
+        '{"eval_id":"eval-1","conversation_id":"conv-a"}\n'
+        '{"eval_id":"eval-2","conversation_id":"conv-a"}\n'
+        '{"eval_id":"eval-3","conversation_id":"conv-b"}\n',
+        encoding="utf-8",
+    )
+    assets = {"frozen_ids": ["eval-1", "eval-2", "eval-3"], "source_paths": {"id_map": id_map}}
+    assert _frozen_dev_conversation_count(assets) == 2
+
+    assets["frozen_ids"] = ["eval-1", "eval-2"]
+    with pytest.raises(ValueError, match="IDs differ"):
+        _frozen_dev_conversation_count(assets)
 
 
 def _schemas():
