@@ -1,0 +1,124 @@
+version: E03-A5-v1
+experiment_id: E03-A5-BCE-AUX
+status: cpu_implementation_and_audit_only
+authorization:
+  cpu_audit: authorized_by_task_plan
+  cpu_synthetic_tests: authorized_by_task_plan
+  gpu_feature_extraction: requires_separate_run_ticket
+  gpu_dry_step: requires_separate_run_ticket
+  gpu_training: requires_separate_run_ticket
+  gpu_candidate_generation: requires_separate_run_ticket
+  execution_enabled: false
+identity:
+  source_branch: feat/e03-a4-eval-stability
+  source_commit: ef06cfeb54ffc7145e31e6423f2ed57236167144
+  e01_b_manifest_sha256: 9204b7cb374765438fd23054078d28992b240d50c4df8763cae0817f0d7752d7
+  d03_manifest_sha256: 605867b5ab0162de05ea9e396bffd574cd4029c5adc3c29d851f41ff73a96b8d
+  d042_manifest_sha256: dd2ef98b33081a1606c431e34bede875cfb41217550ddcc6c27f01a5a5ee5210
+  d043_manifest_sha256: 26356695d527abb6f24c56f111fff92c8c0b51d0387a726491db6e477e6cfb97
+  normalized_train_sha256: 1f1030c146792b21c78d2cc2ced83d1e202670562e1b2344a44ed2d43892aaa2
+  sft_train_sha256: 072076d1a74fe1e29e89a598d2e6acee7188624de0738bfecfe3ea19267f1e79
+  excluded_ledger_sha256: db071514977dc4e5696f472540cc294a91dd9d493a99c1bfa33a23d9194326af
+  official_train_schema_sha256: a9467e520b06a96859acaa2ff022e395d08ff6ad5e8ae3532a22cc24c630cada
+  official_output_schema_sha256: 91c42d56ae433212aab7905eabdbb96cf8463c2f887dc46b3f31647ab3a5d591
+  p0_sha256: d427e4996d0075a3adfe03ae25881d093687a6565f5b037f605accecc84c70b2
+  tokenizer_signature_sha256: 1662c9e99c6185441026a168b2dd6b09af103dc6dc3563b72f598411f14d1913
+  chat_template_sha256: a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8
+  runtime_inference_config_sha256: 593bdd9c5f77268ca0574e3ff96e0cee8288101f98c8a5a1804eccd061eec864
+  base_weight_sha256: 005d20550c04f4e246e5b434448786b44a0196b47d758d0acc77aba279e5bbc5
+  initial_adapter_weight_identity_sha256: 77b61e8a4caf46f54a8c813e98def488c7a8493fe891966e47df1cdac6df7d67
+  initial_adapter_file_sha256: 83d1ccb041b8b1c0403e7bcb6cafbf03d571801f23060e5f4fa7862f176ebc3d
+  initial_adapter_config_sha256: 05d578eb242868385839b2bc779c5cb88911973db766e2a793cb361b42aafafd
+  frozen_dev_224_ids_sha256: d3c84beb6227e87c0fd09e425619635cd9fc6bac5b087e3f1010fb089f4ff8d2
+  max_train_sequence_length: 2048
+  max_prompt_tokens: 1280
+  max_new_tokens: 1200
+  eos_token_id: 151645
+  tokenizer_revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  pad_token_id: 151643
+  protocol:
+    format_version: F2
+    history_policy: T1_recent_contiguous_complete_message_suffix
+    thinking: false
+model_assets:
+  base_model_id: Qwen/Qwen3-1.7B
+  base_model_path: participant/model
+  base_model_revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  source_adapter_path: outputs/training/E01-B-FULL-20261028-133805/adapter
+  source_adapter_file: adapter_model.safetensors
+  source_adapter_parameter_dtype: bfloat16
+data:
+  normalized_train: data/processed/v1/train.jsonl
+  sft_train: data/processed/sft/v1/train.jsonl
+  d03_manifest: outputs/data_pipeline/v1/manifest.json
+  d042_manifest: outputs/token_audit/v1/manifest.json
+  d043_manifest: outputs/sft_data/v1/manifest.json
+  excluded_ledger: outputs/sft_data/v1/excluded_samples.jsonl
+  official_train_schema: data/train/train_public.schema.json
+  official_output_schema: participant/templates/submission_schema.json
+  prompt: configs/prompts/p0.txt
+  runtime_inference_config: participant/configs/inference_config.json
+  e01_b_manifest: outputs/training/E01-B-FULL-20261028-133805/manifest.json
+  expected_d03_train_rows: 16312
+  expected_sft_train_rows: 16192
+  expected_sft_excluded_train_rows: 120
+  max_sequence_length: 2048
+target:
+  label_order_version: official_train_schema_profile_order_v1
+  target_policy: closed_world_gold_v1
+  unknown_mask_policy: explicit_unknown_mask_v1_only_with_source_evidence
+  default_mask: all_ones_for_complete_three_dimension_gold
+  missing_label_policy: masked_unknown
+  allow_pos_weight: false
+  allow_replay: false
+split:
+  version: e03_a5_conversation_group_stratified_v1
+  seed: 42
+  fit_fraction: 0.70
+  calibration_fraction: 0.15
+  internal_holdout_fraction: 0.15
+probe:
+  feature_position: prompt_length_minus_one
+  feature_layer: final_hidden_state
+  feature_dtype: preserve_and_record_runtime_dtype
+  head_dtype: float32
+  fit_device: cpu
+  feature_batch_size: 2
+  optimizer: AdamW
+  learning_rate: 0.01
+  weight_decay: 0.0
+  epochs: 200
+  seed: 42
+  calibration_threshold_policy: global_threshold_train_calibration_only
+  report_thresholds: [0.5, train_calibration_global]
+  shuffled_label_seed: 314159
+training_proposal:
+  control_lambda: 0.0
+  candidate_lambda: 0.1
+  candidate_lambda_status: provisional_requires_2048_token_dry_step_then_freeze_before_candidate_comparison
+  optimizer: AdamW
+  learning_rate: 0.00002
+  scheduler: constant
+  weight_decay: 0.0
+  max_optimizer_steps: 128
+  per_device_micro_batch_size: 1
+  gradient_accumulation_steps: 4
+  sample_draw_count: 512
+  seed: 42
+  resume_optimizer_state: false
+  source_adapter_is_read_only: true
+  base_quantization: NF4
+  compute_dtype: bfloat16
+  autocast_adapter_dtype: false
+candidate_evaluation:
+  frozen_proxy_points: 224
+  frozen_proxy_conversations: 101
+  generation_protocol: P0_F2_T1_greedy_G1200
+  generation_authorization: requires_separate_run_ticket
+  full_dev_authorization: requires_separate_run_ticket
+  official_val_use: prohibited
+outputs:
+  audit_root: outputs/diagnostics/e03_a5
+  probe_root: outputs/diagnostics/e03_a5/probe
+  training_root: outputs/training/E03-A5
+  evaluation_root: outputs/evaluation/e03_a5
