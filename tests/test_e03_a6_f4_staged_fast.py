@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,27 @@ from scripts.e03_a6_f4_staged_eval import _prepare_eval_directory, _reported_sto
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = json.loads((ROOT / "participant/templates/submission_schema.json").read_text())
 ENUMS = submission_enums(SCHEMA)
+
+
+def test_f4_fast_evaluator_module_import_does_not_require_torch():
+    script = "\n".join([
+        "import builtins",
+        "original_import = builtins.__import__",
+        "def without_torch(name, *args, **kwargs):",
+        "    if name == 'torch' or name.startswith('torch.'):",
+        "        raise ModuleNotFoundError('blocked optional torch import')",
+        "    return original_import(name, *args, **kwargs)",
+        "builtins.__import__ = without_torch",
+        "import scripts.e03_a6_f4_staged_eval",
+    ])
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> str:

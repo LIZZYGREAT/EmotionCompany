@@ -20,7 +20,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from participant import run_inference as inference
 from src.evaluation.e03_a6_f4_staged_metrics import (
     canonical_sha256,
     compare_same_ids,
@@ -32,19 +31,47 @@ from src.evaluation.e03_a6_f4_staged_metrics import (
     sha256_file,
 )
 from src.evaluation.f4_pilot import F4FastPrefixStopper
-from src.training.e03_a6_f4_staged_contract import validate_eval_config
-from src.training.e03_a6_f4_staged_full import (
-    DEFAULT_CONFIG,
-    _load_config,
-    _read_json,
-    _resolve,
-    _write_json,
-    config_sha256,
-)
+from src.training.e03_a6_f4_staged_contract import validate_eval_config, validate_staged_full_config
 from src.shared.f4_protocol import parse_f4
 
 
 EVAL_CONFIG = ROOT / "configs/evaluation/e03_a6_f4_staged_fast.yaml"
+DEFAULT_CONFIG = ROOT / "configs/training/e03_a6_f4_staged_full.yaml"
+
+
+def _resolve(value: str | Path) -> Path:
+    path = Path(value).expanduser()
+    return (path if path.is_absolute() else ROOT / path).resolve()
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"expected JSON object: {path}")
+    return value
+
+
+def _write_json(path: Path, value: Any, *, exclusive: bool = False) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    payload = json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    if exclusive and path.exists():
+        raise FileExistsError(f"refusing to overwrite {path}")
+    temporary.write_text(payload, encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def config_sha256(config: dict[str, Any]) -> str:
+    return canonical_sha256(config)
+
+
+def _load_config(config_path: Path = DEFAULT_CONFIG) -> tuple[dict[str, Any], Path]:
+    path = _resolve(config_path)
+    config = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        raise ValueError("F4 staged-full config must be a YAML object")
+    validate_staged_full_config(config)
+    return config, path
 
 
 def _now() -> str:
@@ -86,6 +113,11 @@ def _load_eval_config(path: Path) -> tuple[dict[str, Any], Path]:
         raise ValueError("F4 staged evaluation config must be a YAML object")
     validate_eval_config(config)
     return config, resolved
+
+
+def _synchronize(torch: Any) -> None:
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
 
 
 def _prediction_identity(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -246,7 +278,7 @@ def _run_generate(
             generated = sequences[0, len(prompt_ids):].detach().cpu().tolist()
             return stopper.inspect(generated)
 
-    inference.synchronize(torch)
+    _synchronize(torch)
     started = time.monotonic()
     with torch.inference_mode():
         output = model.generate(
@@ -260,7 +292,7 @@ def _run_generate(
             eos_token_id=tokenizer.eos_token_id,
             stopping_criteria=StoppingCriteriaList([PrefixCriteria()]),
         )
-    inference.synchronize(torch)
+    _synchronize(torch)
     elapsed = time.monotonic() - started
     generated_ids = [int(value) for value in output[0, input_ids.shape[1]:].detach().cpu().tolist()]
     eos = tokenizer.eos_token_id is not None and int(tokenizer.eos_token_id) in generated_ids
@@ -297,6 +329,8 @@ def _generate_and_score(
     run_id: str,
     checkpoint_step: int,
 ) -> dict[str, Any]:
+    from participant import run_inference as inference
+
     training_root = _resolve(training_config["data"]["output_root"]) / run_id
     node_dir = training_root / f"step-{checkpoint_step:04d}"
     checkpoint = training_root / "trainer" / f"checkpoint-{checkpoint_step}"
