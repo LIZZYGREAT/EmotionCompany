@@ -38,6 +38,9 @@ from src.evaluation.source_integrity import unique_index, validate_target_free_i
 from src.training.e03_a7_staged import verify_checkpoint_manifest, write_manifest
 
 
+INFERENCE_BATCH_SIZE = 1
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -201,20 +204,42 @@ def _infer_probabilities(
     predictions: list[dict[str, Any]] = []
     model.eval()
     heads.eval()
+    started_at = time.monotonic()
+    next_progress_report = 256
     with torch.inference_mode():
-        for row in rows:
-            prompt = row["input_ids"]
-            ids = torch.tensor([prompt], dtype=torch.long, device=device)
-            mask = torch.ones_like(ids)
-            hidden = forward_prompt_end(model, ids, mask, torch.tensor([len(prompt)], device=device))
+        for start in range(0, len(rows), INFERENCE_BATCH_SIZE):
+            batch_rows = rows[start : start + INFERENCE_BATCH_SIZE]
+            lengths = [len(row["input_ids"]) for row in batch_rows]
+            max_length = max(lengths)
+            input_ids = [
+                list(row["input_ids"]) + [int(pad_token_id)] * (max_length - length)
+                for row, length in zip(batch_rows, lengths)
+            ]
+            attention_masks = [
+                [1] * length + [0] * (max_length - length)
+                for length in lengths
+            ]
+            ids = torch.tensor(input_ids, dtype=torch.long, device=device)
+            mask = torch.tensor(attention_masks, dtype=torch.long, device=device)
+            hidden = forward_prompt_end(model, ids, mask, torch.tensor(lengths, device=device))
             output = heads(hidden)
-            profile_probabilities = torch.sigmoid(output["profile_logits"].float()).cpu()[0].tolist()
-            result: dict[str, Any] = {"id": row["sample_id"], "profile_probabilities": profile_probabilities}
-            if arm == "EP":
-                emotion_logits = output["emotion_logits"].float().cpu()[0]
-                result["emotion_logits"] = emotion_logits.tolist()
-                result["emotion_probabilities"] = torch.softmax(emotion_logits, dim=-1).tolist()
-            predictions.append(result)
+            profile_probabilities = torch.sigmoid(output["profile_logits"].float()).cpu().tolist()
+            emotion_logits = output["emotion_logits"].float().cpu() if arm == "EP" else None
+            for index, row in enumerate(batch_rows):
+                result: dict[str, Any] = {
+                    "id": row["sample_id"],
+                    "profile_probabilities": profile_probabilities[index],
+                }
+                if arm == "EP":
+                    logits = emotion_logits[index]
+                    result["emotion_logits"] = logits.tolist()
+                    result["emotion_probabilities"] = torch.softmax(logits, dim=-1).tolist()
+                predictions.append(result)
+            processed = start + len(batch_rows)
+            if processed >= next_progress_report or processed == len(rows):
+                elapsed = time.monotonic() - started_at
+                print(f"A7 {arm} evaluation inference: {processed}/{len(rows)} samples ({elapsed:.1f}s)", flush=True)
+                next_progress_report = processed + 256
     return predictions
 
 

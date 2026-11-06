@@ -134,6 +134,51 @@ def test_a7_eval_checkpoint_reload_restores_fp32_lora_dtype(monkeypatch, tmp_pat
     assert calls[0][2]["autocast_adapter_dtype"] is True
 
 
+def test_a7_eval_inference_keeps_single_row_logits_and_row_order(monkeypatch):
+    import torch as real_torch
+
+    import src.training.e03_a7_classifier as classifier
+
+    calls = []
+
+    def fake_forward(_model, input_ids, attention_mask, prompt_lengths):
+        calls.append((input_ids.cpu().tolist(), attention_mask.cpu().tolist(), prompt_lengths.cpu().tolist()))
+        return prompt_lengths.float().unsqueeze(1)
+
+    class FakeHeads:
+        def eval(self):
+            return None
+
+        def __call__(self, hidden):
+            return {"profile_logits": hidden.expand(-1, 33)}
+
+    class FakeModel:
+        def eval(self):
+            return None
+
+    device_factory = real_torch.device
+    monkeypatch.setattr(real_torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(real_torch, "device", lambda *_args: device_factory("cpu"))
+    monkeypatch.setattr(classifier, "forward_prompt_end", fake_forward)
+
+    rows = [
+        {"sample_id": "a", "input_ids": [2, 3, 4]},
+        {"sample_id": "b", "input_ids": [5]},
+        {"sample_id": "c", "input_ids": [6, 7]},
+        {"sample_id": "d", "input_ids": [8, 9, 10, 11]},
+        {"sample_id": "e", "input_ids": [12, 13]},
+    ]
+    predictions = e03_a7_evaluate._infer_probabilities(
+        FakeModel(), FakeHeads(), "P", rows, pad_token_id=0,
+    )
+
+    assert [row["id"] for row in predictions] == [row["sample_id"] for row in rows]
+    assert [len(call[0]) for call in calls] == [1] * len(rows)
+    assert [call[1][0] for call in calls] == [[1, 1, 1], [1], [1, 1], [1, 1, 1, 1], [1, 1]]
+    assert [call[2] for call in calls] == [[3], [1], [2], [4], [2]]
+    assert predictions[1]["profile_probabilities"][0] == float(real_torch.sigmoid(real_torch.tensor(1.0)))
+
+
 def test_a7_threshold_is_chosen_on_calibration_with_precision_constraint():
     probabilities = [[0.9] + [0.01] * 32, [0.8] + [0.01] * 32, [0.2] + [0.01] * 32]
     targets = [[1] + [0] * 32, [1] + [0] * 32, [0] * 33]
