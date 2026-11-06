@@ -56,6 +56,17 @@ TRAIN_ROW_FIELDS = {
     "sample_id", "conversation_id", "source_split", "source", "prompt_length",
     "completion_length", "input_ids", "labels",
 }
+_A6_F3_ADAPTER_EXPERIMENT_IDS = frozenset({
+    "E03-A6-F3-PILOT",
+    "E03-A6-F3-PILOT-EXPANDED",
+})
+
+
+def _uses_a6_f3_adapter_dtype(config: dict[str, Any]) -> bool:
+    return (
+        config.get("experiment_id") in _A6_F3_ADAPTER_EXPERIMENT_IDS
+        and config.get("training_scope") in {"pilot", "supplemental_pilot"}
+    )
 
 
 def _resume_compatible_training_code_hashes(experiment_id: str) -> frozenset[str]:
@@ -1066,9 +1077,7 @@ def _build_sft_trainer(
                 # A6 LoRA weights are saved as FP32; PEFT must upcast a freshly
                 # injected BF16 adapter before restoring those Trainer checkpoints.
                 # Existing E01/A1 checkpoints retain their historical dtype path.
-                kwargs["autocast_adapter_dtype"] = (
-                    True if config.get("experiment_id") == "E03-A6-F3-PILOT" else False
-                )
+                kwargs["autocast_adapter_dtype"] = _uses_a6_f3_adapter_dtype(config)
                 return load_adapter(*args, **kwargs)
 
             target_model.load_adapter = MethodType(_load_adapter_without_autocast, target_model)
@@ -1117,7 +1126,7 @@ def _build_sft_trainer(
         processing_class=tokenizer,
         callbacks=[callback],
     )
-    if config.get("experiment_id") == "E03-A6-F3-PILOT":
+    if _uses_a6_f3_adapter_dtype(config):
         # TRL's SFTTrainer downcasts every trainable parameter to BF16 for
         # quantized models. A6 F3 saves FP32 LoRA adapters and reloads them
         # with PEFT's FP32 adapter autocast, so restore the frozen adapter

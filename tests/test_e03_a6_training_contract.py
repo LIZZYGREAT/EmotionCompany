@@ -121,6 +121,16 @@ def test_expanded_pilot_config_freezes_nested_1024_rows_and_256_steps():
     assert config["training"]["pause_after_step"] == 64
 
 
+def test_a6_f3_adapter_dtype_is_preserved_for_both_pilot_scopes_only():
+    from src.training.training_sft import _uses_a6_f3_adapter_dtype
+
+    baseline = yaml.safe_load((ROOT / "configs/training/e03_a6_f3_pilot.yaml").read_text())
+    expanded = yaml.safe_load((ROOT / "configs/training/e03_a6_f3_expanded_pilot.yaml").read_text())
+    assert _uses_a6_f3_adapter_dtype(baseline)
+    assert _uses_a6_f3_adapter_dtype(expanded)
+    assert not _uses_a6_f3_adapter_dtype({"experiment_id": "E01-B-PILOT", "training_scope": "pilot"})
+
+
 @pytest.mark.parametrize("mutation", [
     {"training.max_optimizer_steps": 4048},
     {"training.sample_selection.count": 2048},
