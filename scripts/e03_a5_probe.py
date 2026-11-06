@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -543,6 +544,73 @@ def _cpu_preflight(args: argparse.Namespace) -> int:
     return 0
 
 
+def _review_gate(args: argparse.Namespace) -> int:
+    """Freeze an explicit manual A5.1 decision bound to the saved evidence."""
+    config, config_sha = _load_config(_resolve(args.config))
+    if not args.approved_by.strip() or not args.rationale.strip():
+        raise ValueError("review-gate requires a non-empty reviewer and rationale")
+    audit = _verify_audit_run(config, config_sha, args.audit_run_id)
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", args.probe_run_id) is None:
+        raise ValueError("probe_run_id must be a simple filesystem-safe Run ID")
+    probe_root = _resolve(config["outputs"]["probe_root"]).resolve()
+    output_dir = (probe_root / args.probe_run_id).resolve()
+    if not output_dir.is_relative_to(probe_root):
+        raise ValueError("probe Run output escaped the configured A5 outputs directory")
+    report_path = output_dir / "probe_report.json"
+    manifest_path = output_dir / "run_manifest.json"
+    report, run_manifest = _json(report_path), _json(manifest_path)
+    if (
+        report.get("status") != "probe_metrics_ready_for_gate_review"
+        or run_manifest.get("status") != "probe_metrics_ready_for_gate_review"
+        or run_manifest.get("config_sha256") != config_sha
+        or run_manifest.get("a5_audit_manifest_sha256") != audit["manifest_sha256"]
+        or report.get("a5_audit_manifest_sha256") != audit["manifest_sha256"]
+        or run_manifest.get("outputs", {}).get("probe_report.json") != sha256_file(report_path)
+    ):
+        raise ValueError("A5.1 report is incomplete or is not bound to the requested config/audit")
+    gate_path = output_dir / "probe_gate.json"
+    gate_manifest_path = output_dir / "probe_gate_manifest.json"
+    if gate_path.exists() or gate_manifest_path.exists():
+        raise FileExistsError("A5.1 gate is immutable; choose a new probe Run for a revised decision")
+    now = _now()
+    gate = {
+        "status": "probe_gate_frozen",
+        "experiment_id": config["experiment_id"],
+        "probe_run_id": args.probe_run_id,
+        "decision": args.decision,
+        "approved": True,
+        "approved_by": args.approved_by.strip(),
+        "rationale": args.rationale.strip(),
+        "config_sha256": config_sha,
+        "audit_manifest_sha256": audit["manifest_sha256"],
+        "probe_report_sha256": sha256_file(report_path),
+        "probe_manifest_sha256": sha256_file(manifest_path),
+        "created_at_utc": now,
+    }
+    _write_json(gate_path, gate)
+    gate_manifest = {
+        "status": "probe_gate_frozen",
+        "probe_run_id": args.probe_run_id,
+        "decision": args.decision,
+        "config_sha256": config_sha,
+        "audit_manifest_sha256": audit["manifest_sha256"],
+        "probe_report_sha256": sha256_file(report_path),
+        "probe_run_manifest_sha256": sha256_file(manifest_path),
+        "outputs": {"probe_gate.json": sha256_file(gate_path)},
+        "created_at_utc": now,
+    }
+    _write_json(gate_manifest_path, gate_manifest)
+    print(json.dumps({
+        "status": gate_manifest["status"],
+        "decision": gate["decision"],
+        "probe_run_id": args.probe_run_id,
+        "approved_by": gate["approved_by"],
+        "training_allowed": gate["decision"] == "probe_supported",
+        "output": str(gate_path),
+    }, ensure_ascii=False))
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=ROOT / "configs/experiments/e03_a5.yaml")
@@ -557,6 +625,12 @@ def main() -> int:
     fit.add_argument("--audit-run-id", required=True)
     fit.add_argument("--feature-run-id", required=True)
     fit.add_argument("--run-id", required=True)
+    gate = subparsers.add_parser("review-gate")
+    gate.add_argument("--audit-run-id", required=True)
+    gate.add_argument("--probe-run-id", required=True)
+    gate.add_argument("--decision", required=True, choices=("probe_supported", "probe_unsupported", "probe_indeterminate"))
+    gate.add_argument("--approved-by", required=True)
+    gate.add_argument("--rationale", required=True)
     args = parser.parse_args()
     try:
         if args.command == "cpu-preflight":
@@ -565,6 +639,8 @@ def main() -> int:
             return _extract_train(args)
         if args.command == "fit-cpu":
             return _fit_cpu(args)
+        if args.command == "review-gate":
+            return _review_gate(args)
     except RunAuthorizationError as exc:
         print(json.dumps({"status": "blocked_run_authorization", "error": str(exc)}, ensure_ascii=False))
         return 3

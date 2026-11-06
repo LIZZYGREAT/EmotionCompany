@@ -177,3 +177,101 @@ def validate_paired_group_contract(control: Mapping[str, Any], candidate: Mappin
         "control_lambda": 0.0,
         "candidate_lambda": float(candidate_lambda),
     }
+
+
+def verify_probe_gate(
+    probe_report: Mapping[str, Any],
+    probe_manifest: Mapping[str, Any],
+    gate: Mapping[str, Any],
+    *,
+    config_sha256: str,
+    audit_manifest_sha256: str,
+    probe_report_sha256: str,
+    probe_manifest_sha256: str,
+) -> dict[str, Any]:
+    """Require an explicit, report-bound human decision before joint training."""
+    if probe_manifest.get("status") != "probe_metrics_ready_for_gate_review":
+        raise RunAuthorizationError("A5.1 probe Run is not complete and ready for gate review")
+    if probe_report.get("probe_decision") != "requires_predeclared_gate_and_manual_review":
+        raise RunAuthorizationError("A5.1 probe report has an unexpected decision state")
+    if probe_report.get("config_sha256") not in {None, config_sha256}:
+        raise RunAuthorizationError("A5.1 probe report uses a different config")
+    if probe_report.get("a5_audit_manifest_sha256") != audit_manifest_sha256:
+        raise RunAuthorizationError("A5.1 probe Run does not bind the passed A5.0 audit")
+    if (
+        gate.get("status") != "probe_gate_frozen"
+        or gate.get("decision") != "probe_supported"
+        or gate.get("approved") is not True
+        or not isinstance(gate.get("approved_by"), str)
+        or not gate["approved_by"].strip()
+        or not isinstance(gate.get("rationale"), str)
+        or not gate["rationale"].strip()
+    ):
+        raise RunAuthorizationError("A5.2 requires an explicitly reviewed probe_supported gate")
+    expected = {
+        "experiment_id": "E03-A5-BCE-AUX",
+        "probe_run_id": probe_manifest.get("run_id"),
+        "config_sha256": config_sha256,
+        "audit_manifest_sha256": audit_manifest_sha256,
+        "probe_report_sha256": probe_report_sha256,
+        "probe_manifest_sha256": probe_manifest_sha256,
+    }
+    mismatches = [name for name, value in expected.items() if gate.get(name) != value]
+    if mismatches:
+        raise RunAuthorizationError(f"A5.1 probe gate has mismatched evidence bindings: {mismatches}")
+    return {
+        "status": "probe_gate_passed",
+        "decision": "probe_supported",
+        "approved_by": gate["approved_by"],
+        "rationale": gate["rationale"],
+        "gate_sha256": canonical_sha256(gate),
+    }
+
+
+def verify_lambda_freeze(
+    config: Mapping[str, Any],
+    freeze: Mapping[str, Any],
+    *,
+    config_sha256: str,
+    audit_manifest_sha256: str,
+    pair_id: str,
+    pair_manifest_sha256: str,
+    probe_gate_manifest_sha256: str,
+    control_dry_step_manifest_sha256: str,
+    candidate_dry_step_manifest_sha256: str,
+) -> dict[str, Any]:
+    """Validate a reviewed lambda freeze without mutating the A5.0 config identity."""
+    expected_lambda = float(config["training_proposal"]["candidate_lambda"])
+    if (
+        freeze.get("status") != "candidate_lambda_frozen"
+        or freeze.get("approved") is not True
+        or not isinstance(freeze.get("approved_by"), str)
+        or not freeze["approved_by"].strip()
+        or not isinstance(freeze.get("rationale"), str)
+        or not freeze["rationale"].strip()
+        or freeze.get("both_dry_steps_passed_without_optimizer_updates") is not True
+    ):
+        raise RunAuthorizationError("A5.2 training requires an explicit reviewed Candidate lambda freeze")
+    expected = {
+        "experiment_id": "E03-A5-BCE-AUX",
+        "config_sha256": config_sha256,
+        "audit_manifest_sha256": audit_manifest_sha256,
+        "pair_id": pair_id,
+        "pair_manifest_sha256": pair_manifest_sha256,
+        "probe_gate_manifest_sha256": probe_gate_manifest_sha256,
+        "control_dry_step_manifest_sha256": control_dry_step_manifest_sha256,
+        "candidate_dry_step_manifest_sha256": candidate_dry_step_manifest_sha256,
+    }
+    mismatches = [name for name, value in expected.items() if freeze.get(name) != value]
+    if mismatches:
+        raise RunAuthorizationError(f"Candidate lambda freeze has mismatched evidence bindings: {mismatches}")
+    value = freeze.get("candidate_lambda")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != expected_lambda or value <= 0:
+        raise RunAuthorizationError("frozen Candidate lambda differs from the versioned A5 proposal")
+    return {
+        "status": "candidate_lambda_freeze_passed",
+        "candidate_lambda": float(value),
+        "approved_by": freeze["approved_by"],
+        "rationale": freeze["rationale"],
+        "freeze_sha256": canonical_sha256(freeze),
+    }
