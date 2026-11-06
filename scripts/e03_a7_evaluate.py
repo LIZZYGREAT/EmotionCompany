@@ -253,6 +253,30 @@ def _profile_metrics_subset(gold: Sequence[Mapping[str, Sequence[str]]], predict
     )
 
 
+def _baseline_reconciliation_enums(
+    profile_enums: Mapping[str, Sequence[str]], emotion_labels: Sequence[str],
+) -> dict[str, list[str]]:
+    result = {key: list(values) for key, values in profile_enums.items()}
+    result["emotion_label"] = list(emotion_labels)
+    return result
+
+
+def _mark_scoring_interrupted(eval_manifest_path: Path, error: BaseException) -> None:
+    manifest = _json(eval_manifest_path)
+    if manifest.get("status") not in {"scoring_started_after_prediction_lock", "scoring_interrupted_after_gold_read"}:
+        return
+    manifest.update(
+        status="scoring_interrupted_after_gold_read",
+        gold_read=True,
+        gold_read_after_predictions_locked=True,
+        scoring_failure={
+            "exception_type": type(error).__name__,
+            "failed_at_utc": _now(),
+        },
+    )
+    write_manifest(eval_manifest_path, manifest, overwrite=True)
+
+
 def _score_after_prediction_freeze(
     *,
     config: Mapping[str, Any],
@@ -270,6 +294,31 @@ def _score_after_prediction_freeze(
     start_time: float,
     training_code_sha256: str,
 ) -> dict[str, Any]:
+    locked_predictions_sha = sha256_file(eval_dir / "predictions.jsonl")
+    eval_manifest = _json(eval_manifest_path)
+    if eval_manifest.get("predictions_sha256") != locked_predictions_sha:
+        raise ValueError("A7 prediction lock Manifest changed before Gold scoring")
+    if eval_manifest.get("status") == "dev_predictions_frozen_gold_not_read":
+        if eval_manifest.get("gold_read") is not False:
+            raise ValueError("A7 fresh score must start from a target-free prediction lock")
+        eval_manifest.update(
+            status="scoring_started_after_prediction_lock",
+            gold_read=True,
+            gold_read_after_predictions_locked=True,
+            scoring_attempts=[{"started_at_utc": _now(), "prediction_sha256": locked_predictions_sha}],
+        )
+        write_manifest(eval_manifest_path, eval_manifest, overwrite=True)
+    elif eval_manifest.get("status") in {"scoring_started_after_prediction_lock", "scoring_interrupted_after_gold_read"}:
+        if eval_manifest.get("gold_read") is not True or eval_manifest.get("gold_read_after_predictions_locked") is not True:
+            raise ValueError("A7 scoring recovery lacks a target-read-after-lock record")
+        eval_manifest.setdefault("scoring_attempts", []).append(
+            {"started_at_utc": _now(), "prediction_sha256": locked_predictions_sha, "recovery": True}
+        )
+        eval_manifest["status"] = "scoring_started_after_prediction_lock"
+        write_manifest(eval_manifest_path, eval_manifest, overwrite=True)
+    else:
+        raise ValueError("A7 score requires a fresh prediction lock or an interrupted post-lock scoring record")
+
     # This is deliberately the first read of frozen Dev Gold in the A7 evaluation path.
     references_path = evaluation_assets["source_paths"]["references"]
     references = unique_index(
@@ -334,7 +383,7 @@ def _score_after_prediction_freeze(
     }
     baseline_rows = [row for _line, row, _sha in iter_jsonl(evaluation_assets["baseline_paths"]["predictions"])]
     baseline_profile_index, baseline_statuses = index_profile_prediction_rows(
-        baseline_rows, ids, enums, require_all_valid=True,
+        baseline_rows, ids, _baseline_reconciliation_enums(enums, emotion_labels), require_all_valid=True,
     )
     if baseline_statuses.get("valid") != 224:
         raise ValueError("A7 E01-B Fast-only baseline is not valid for all 224 frozen IDs")
@@ -405,9 +454,20 @@ def _score_after_prediction_freeze(
         "elapsed_seconds": time.monotonic() - start_time,
     }
     report_path = eval_dir / "evaluation_report.json"
-    _write_once(report_path, report)
+    if report_path.exists():
+        existing_report = _json(report_path)
+        if (
+            existing_report.get("status") != "scored"
+            or existing_report.get("locked_predictions_sha256") != report["locked_predictions_sha256"]
+            or existing_report.get("arm") != arm
+            or existing_report.get("checkpoint_step") != step
+        ):
+            raise ValueError("A7 existing score report does not match its immutable prediction lock")
+        report = existing_report
+    else:
+        _write_once(report_path, report)
     eval_manifest = _json(eval_manifest_path)
-    if eval_manifest.get("gold_read") is not False or eval_manifest.get("predictions_sha256") != report["locked_predictions_sha256"]:
+    if eval_manifest.get("gold_read") is not True or eval_manifest.get("predictions_sha256") != report["locked_predictions_sha256"]:
         raise ValueError("A7 prediction lock Manifest changed before Gold scoring")
     eval_manifest.update(
         status="scored",
@@ -547,22 +607,26 @@ def _evaluate_arm(config: Mapping[str, Any], config_sha: str, training_code_sha:
     del run_assets["model"], run_assets["heads"]
     gc.collect()
     torch.cuda.empty_cache()
-    report = _score_after_prediction_freeze(
-        config=config,
-        arm=arm,
-        step=step,
-        eval_dir=eval_root,
-        eval_manifest_path=eval_manifest_path,
-        prediction_rows=dev_predictions,
-        calibration=calibration_result,
-        sources=assets,
-        a5_config=a5_config,
-        supervision=supervision,
-        splits=splits,
-        evaluation_assets=assets,
-        start_time=start_time,
-        training_code_sha256=run_assets["run_manifest"]["code_sha256"],
-    )
+    try:
+        report = _score_after_prediction_freeze(
+            config=config,
+            arm=arm,
+            step=step,
+            eval_dir=eval_root,
+            eval_manifest_path=eval_manifest_path,
+            prediction_rows=dev_predictions,
+            calibration=calibration_result,
+            sources=assets,
+            a5_config=a5_config,
+            supervision=supervision,
+            splits=splits,
+            evaluation_assets=assets,
+            start_time=start_time,
+            training_code_sha256=run_assets["run_manifest"]["code_sha256"],
+        )
+    except BaseException as error:
+        _mark_scoring_interrupted(eval_manifest_path, error)
+        raise
     return report
 
 
@@ -751,6 +815,100 @@ def _load_training_data(config: Mapping[str, Any]) -> tuple[dict[str, Any], dict
     return supervision, splits, prompt_index
 
 
+def _resume_locked_scoring(
+    config: Mapping[str, Any],
+    config_sha: str,
+    training_code_sha: str,
+    pair_id: str,
+    arm: str,
+    step: int,
+    eval_root: Path,
+    a5_config: Mapping[str, Any],
+    assets: Mapping[str, Any],
+    supervision: Mapping[str, Mapping[str, Any]],
+    splits: Mapping[str, Sequence[str]],
+) -> dict[str, Any]:
+    """Resume scoring only from immutable Dev predictions and Calibration artifacts."""
+    manifest_path = eval_root / "evaluation_manifest.json"
+    manifest = _json(manifest_path)
+    predictions_path = eval_root / "predictions.jsonl"
+    calibration_predictions_path = eval_root / "calibration_probabilities.jsonl"
+    calibration_manifest_path = eval_root / "calibration.json"
+    expected_run_id = f"{pair_id}-{arm}"
+    prediction_sha = sha256_file(predictions_path)
+    calibration_sha = sha256_file(calibration_predictions_path)
+    if (
+        manifest.get("status") not in {"scoring_started_after_prediction_lock", "scoring_interrupted_after_gold_read"}
+        or manifest.get("gold_read") is not True
+        or manifest.get("gold_read_after_predictions_locked") is not True
+        or manifest.get("run_id") != expected_run_id
+        or manifest.get("arm") != arm
+        or manifest.get("checkpoint_step") != step
+        or manifest.get("config_sha256") != config_sha
+        or manifest.get("training_code_sha256") != training_code_sha
+        or manifest.get("evaluation_code_sha256") != e03_a7_train._code_sha256()
+        or manifest.get("predictions_sha256") != prediction_sha
+        or manifest.get("calibration_predictions_sha256") != calibration_sha
+        or manifest.get("prediction_count") != int(config["data"]["expected_dev_rows"])
+        or manifest.get("prediction_ids_sha256") != config["identity"]["frozen_dev_ids_sha256"]
+    ):
+        raise ValueError("A7 locked-scoring recovery is not bound to the current Arm, node, code, and prediction hashes")
+
+    run_root = _resolve(config["outputs"]["training_root"]) / expected_run_id
+    run_manifest_path = run_root / "run_manifest.json"
+    run_manifest = _json(run_manifest_path)
+    node = run_manifest.get("nodes", {}).get(str(step), {})
+    checkpoint_manifest_path = run_root / "trainer" / f"checkpoint-{step}" / "checkpoint_manifest.json"
+    if (
+        run_manifest.get("code_sha256") != training_code_sha
+        or run_manifest.get("optimizer_step") != step
+        or node.get("training_status") != "passed"
+        or sha256_file(checkpoint_manifest_path) != manifest.get("checkpoint_manifest_sha256")
+    ):
+        raise ValueError("A7 locked-scoring recovery checkpoint differs from its completed training node")
+
+    calibration_manifest = _json(calibration_manifest_path)
+    calibration_ids = list(splits["calibration"])
+    if (
+        calibration_manifest.get("run_id") != expected_run_id
+        or calibration_manifest.get("arm") != arm
+        or calibration_manifest.get("checkpoint_step") != step
+        or calibration_manifest.get("sample_count") != len(calibration_ids)
+        or calibration_manifest.get("sample_ids_sha256") != canonical_sha256(calibration_ids)
+        or calibration_manifest.get("predictions_sha256") != calibration_sha
+    ):
+        raise ValueError("A7 locked-scoring recovery Calibration artifacts are incomplete or changed")
+
+    prediction_rows = [row for _line, row, _sha in iter_jsonl(predictions_path)]
+    if (
+        [row.get("id") for row in prediction_rows] != list(assets["frozen_ids"])
+        or len(prediction_rows) != int(config["data"]["expected_dev_rows"])
+        or selected_id_sha256([row["id"] for row in prediction_rows]) != config["identity"]["frozen_dev_ids_sha256"]
+    ):
+        raise ValueError("A7 locked-scoring recovery prediction IDs differ from the frozen Dev cohort")
+
+    try:
+        return _score_after_prediction_freeze(
+            config=config,
+            arm=arm,
+            step=step,
+            eval_dir=eval_root,
+            eval_manifest_path=manifest_path,
+            prediction_rows=prediction_rows,
+            calibration=calibration_manifest["threshold_policy"],
+            sources=assets,
+            a5_config=a5_config,
+            supervision=supervision,
+            splits=splits,
+            evaluation_assets=assets,
+            start_time=time.monotonic(),
+            training_code_sha256=training_code_sha,
+        )
+    except BaseException as error:
+        _mark_scoring_interrupted(manifest_path, error)
+        raise
+
+
 def _evaluate_pair(args: argparse.Namespace) -> int:
     import torch
 
@@ -771,18 +929,33 @@ def _evaluate_pair(args: argparse.Namespace) -> int:
         if eval_root.exists():
             report_path = eval_root / "evaluation_report.json"
             manifest_path = eval_root / "evaluation_manifest.json"
-            if not report_path.is_file() or not manifest_path.is_file():
-                raise FileExistsError(f"A7 {arm} evaluation output is incomplete and immutable: {eval_root}")
-            report = _json(report_path)
-            manifest = _json(manifest_path)
-            if (
-                report.get("status") != "scored"
-                or report.get("arm") != arm
-                or report.get("checkpoint_step") != step
-                or manifest.get("status") != "scored"
-                or manifest.get("predictions_sha256") != report.get("locked_predictions_sha256")
-            ):
-                raise ValueError(f"A7 {arm} existing evaluation output does not match this node")
+            if report_path.is_file() and manifest_path.is_file():
+                report = _json(report_path)
+                manifest = _json(manifest_path)
+                if (
+                    report.get("status") != "scored"
+                    or report.get("arm") != arm
+                    or report.get("checkpoint_step") != step
+                    or manifest.get("status") != "scored"
+                    or manifest.get("predictions_sha256") != report.get("locked_predictions_sha256")
+                ):
+                    raise ValueError(f"A7 {arm} existing evaluation output does not match this node")
+            elif manifest_path.is_file() and (eval_root / "predictions.jsonl").is_file() and (eval_root / "calibration.json").is_file():
+                _resume_locked_scoring(
+                    config,
+                    config_sha,
+                    preflight["code_sha256"],
+                    pair_id,
+                    arm,
+                    step,
+                    eval_root,
+                    a5_config,
+                    evaluation_assets,
+                    supervision,
+                    splits,
+                )
+            else:
+                raise FileExistsError(f"A7 {arm} evaluation output is incomplete and cannot resume from a prediction lock: {eval_root}")
         else:
             _evaluate_arm(
                 config, config_sha, preflight["code_sha256"], a5_config, arm, step,

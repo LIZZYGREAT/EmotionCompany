@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 from types import ModuleType, SimpleNamespace
 
+import pytest
 from scripts import e03_a7_evaluate
 from scripts.e03_a7_evaluate import _pair_report, build_parser
 from src.data.e03_a5_labels import sha256_file
@@ -13,6 +14,7 @@ from src.evaluation.e03_a7_classification_metrics import (
     profile_from_probabilities,
     summarize_profile_pair,
 )
+from src.evaluation.profile_reconcile import index_profile_prediction_rows
 
 
 def _enums():
@@ -59,6 +61,57 @@ def test_a7_evaluation_sources_use_frozen_a5_asset_keys(monkeypatch):
 
     assert loaded["input_index"]["eval-1"] == {"id": "eval-1"}
     assert loaded["id_map"]["eval-1"]["conversation_id"] == "conversation-1"
+
+
+def test_a7_baseline_reconciliation_enum_includes_emotion_label():
+    enums = _enums()
+    prediction = {
+        "id": "eval-1",
+        "status": "valid",
+        "emotion_label": "neutral",
+        "user_profile": {"personality_traits": ["p0"], "interests": [], "style": []},
+        "reason": "valid",
+    }
+
+    indexed, statuses = index_profile_prediction_rows(
+        [prediction], ["eval-1"],
+        e03_a7_evaluate._baseline_reconciliation_enums(enums, ["neutral", "sad"]),
+        require_all_valid=True,
+    )
+
+    assert indexed["eval-1"] == prediction
+    assert statuses["valid"] == 1
+
+
+def test_a7_scoring_records_gold_access_before_reading_references(monkeypatch, tmp_path):
+    eval_dir = tmp_path / "step-0512"
+    eval_dir.mkdir()
+    predictions_path = eval_dir / "predictions.jsonl"
+    predictions_path.write_text('{"id":"eval-1"}\n', encoding="utf-8")
+    manifest_path = eval_dir / "evaluation_manifest.json"
+    manifest_path.write_text(json.dumps({
+        "status": "dev_predictions_frozen_gold_not_read",
+        "gold_read": False,
+        "predictions_sha256": sha256_file(predictions_path),
+    }), encoding="utf-8")
+    references_path = Path("frozen-references.jsonl")
+
+    def assert_lock_then_fail(path):
+        assert path == references_path
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["status"] == "scoring_started_after_prediction_lock"
+        assert manifest["gold_read"] is True
+        assert manifest["gold_read_after_predictions_locked"] is True
+        raise RuntimeError("stop after verifying scoring audit ordering")
+
+    monkeypatch.setattr(e03_a7_evaluate, "iter_jsonl", assert_lock_then_fail)
+    with pytest.raises(RuntimeError, match="audit ordering"):
+        e03_a7_evaluate._score_after_prediction_freeze(
+            config={}, arm="P", step=512, eval_dir=eval_dir, eval_manifest_path=manifest_path,
+            prediction_rows=[], calibration={}, sources={}, a5_config={}, supervision={}, splits={},
+            evaluation_assets={"source_paths": {"references": references_path}},
+            start_time=0.0, training_code_sha256="training-code",
+        )
 
 
 def test_a7_eval_checkpoint_reload_restores_fp32_lora_dtype(monkeypatch, tmp_path):
