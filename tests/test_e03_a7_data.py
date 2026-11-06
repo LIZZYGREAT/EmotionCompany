@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from scripts.e03_a7_train import _frozen_dev_conversation_count
+from scripts.e03_a7_train import _frozen_dev_conversation_count, _validate_pair_id
 from src.data.e03_a7_classification import (
     SFTPromptIndex,
     build_schedule,
@@ -28,6 +28,14 @@ def test_a7_frozen_dev_conversation_count_uses_and_validates_a5_id_map(tmp_path)
     assets["frozen_ids"] = ["eval-1", "eval-2"]
     with pytest.raises(ValueError, match="IDs differ"):
         _frozen_dev_conversation_count(assets)
+
+
+def test_a7_requested_pair_id_must_match_the_frozen_config():
+    config = {"training": {"pair_id": "E03-A7-PAIR-001"}}
+    assert _validate_pair_id(config, None) == "E03-A7-PAIR-001"
+    assert _validate_pair_id(config, "E03-A7-PAIR-001") == "E03-A7-PAIR-001"
+    with pytest.raises(ValueError, match="immutable config identity"):
+        _validate_pair_id(config, "E03-A7-PAIR-002")
 
 
 def _schemas():

@@ -149,6 +149,10 @@ def _validate_config(config: Mapping[str, Any]) -> None:
         or training.get("max_optimizer_steps") != 4048
         or training.get("micro_batch_size") != 1
         or training.get("gradient_accumulation_steps") != 4
+        or training.get("lambda_emotion") != 0.08
+        or training.get("lambda_status") != "calibrated_before_training_by_long_prompt_gradient_norm"
+        or training.get("lambda_target_lora_gradient_norm_ratio") != 1.0
+        or training.get("lambda_gradient_norm_ratio_bounds") != [0.9, 1.1]
         or training.get("source_adapter") is not None
         or training.get("response_loss") is not False
         or training.get("emotion_only_arm") is not False
@@ -181,6 +185,13 @@ def _load_config(path: Path) -> tuple[dict[str, Any], str]:
         raise ValueError("A7 config must be a YAML object")
     _validate_config(config)
     return config, sha256_file(path)
+
+
+def _validate_pair_id(config: Mapping[str, Any], requested_pair_id: str | None) -> str:
+    expected = str(config["training"]["pair_id"])
+    if requested_pair_id is not None and requested_pair_id != expected:
+        raise ValueError("A7 pair ID must match the immutable config identity")
+    return expected
 
 
 def _git_facts(*, require_clean: bool = True) -> dict[str, Any]:
@@ -424,6 +435,7 @@ def _write_schedule(path: Path, schedule: Mapping[str, Any]) -> str:
 def _preflight(args: argparse.Namespace) -> int:
     config_path = _resolve(args.config)
     config, config_sha = _load_config(config_path)
+    _validate_pair_id(config, args.pair_id)
     git = _git_facts()
     code = _code_facts()
     a5_config, a5_config_sha, audit = _a5_assets(config)
@@ -710,6 +722,7 @@ def _gpu_preflight(args: argparse.Namespace) -> int:
     import torch
 
     config, config_sha = _load_config(_resolve(args.config))
+    _validate_pair_id(config, args.pair_id)
     arm = validate_arm(args.arm)
     preflight, root = _load_preflight(config, config_sha)
     git = _git_facts()
@@ -795,7 +808,7 @@ def _gpu_preflight(args: argparse.Namespace) -> int:
         "losses": {key: float(value.detach().float().item()) if value is not None else None for key, value in losses.items()},
         "gradients": {"lora_combined": combined_grad, "profile_head": profile_grad, "emotion_head": emotion_grad},
         "lambda_dry_run": {
-            "provisional_value": float(config["training"]["lambda_emotion"]),
+            "fixed_value": float(config["training"]["lambda_emotion"]),
             "profile_only_lora_gradient_norm": profile_only_lora_norm,
             "emotion_only_lora_gradient_norm": emotion_only_lora_norm,
             "weighted_emotion_to_profile_lora_gradient_norm_ratio": lambda_effective_ratio,
@@ -824,6 +837,7 @@ def _gpu_preflight(args: argparse.Namespace) -> int:
 
 def _freeze_preflights(args: argparse.Namespace) -> int:
     config, config_sha = _load_config(_resolve(args.config))
+    _validate_pair_id(config, args.pair_id)
     preflight, root = _load_preflight(config, config_sha)
     reports = {arm: _json(root / "gpu_preflight" / f"{arm}.json") for arm in ("P", "EP")}
     for arm, report in reports.items():
@@ -844,7 +858,13 @@ def _freeze_preflights(args: argparse.Namespace) -> int:
     lambda_value = float(config["training"]["lambda_emotion"])
     effective_ratio = reports["EP"]["lambda_dry_run"]["weighted_emotion_to_profile_lora_gradient_norm_ratio"]
     if effective_ratio is None or not math.isfinite(effective_ratio) or not 0 < effective_ratio:
-        raise ValueError(f"A7 provisional lambda has no finite positive measured gradient ratio: {effective_ratio}")
+        raise ValueError(f"A7 fixed lambda has no finite positive measured gradient ratio: {effective_ratio}")
+    ratio_bounds = [float(value) for value in config["training"]["lambda_gradient_norm_ratio_bounds"]]
+    if not ratio_bounds[0] <= effective_ratio <= ratio_bounds[1]:
+        raise ValueError(
+            f"A7 lambda gradient ratio {effective_ratio:.6f} is outside frozen bounds {ratio_bounds}; "
+            "do not start training until the loss weight is recalibrated"
+        )
     freeze = {
         "version": "E03-A7-gpu-preflight-freeze-v1",
         "status": "G1_passed_lambda_frozen",
@@ -860,8 +880,10 @@ def _freeze_preflights(args: argparse.Namespace) -> int:
         "p_initial_identity_sha256": reports["P"]["initial_identity"]["initial_sha256"],
         "ep_initial_identity_sha256": reports["EP"]["initial_identity"]["initial_sha256"],
         "lambda_emotion": lambda_value,
-        "lambda_status": "provisional_0.3_retained_after_prompt_only_loss_and_gradient_review",
+        "lambda_status": str(config["training"]["lambda_status"]),
         "effective_emotion_to_profile_lora_gradient_norm_ratio": effective_ratio,
+        "target_emotion_to_profile_lora_gradient_norm_ratio": float(config["training"]["lambda_target_lora_gradient_norm_ratio"]),
+        "accepted_emotion_to_profile_lora_gradient_norm_ratio": ratio_bounds,
         "lambda_review_facts": {
             "profile_bce": reports["EP"]["losses"]["profile_bce"],
             "emotion_cross_entropy": reports["EP"]["losses"]["emotion_ce"],
@@ -1346,6 +1368,7 @@ def _start(args: argparse.Namespace) -> int:
     import torch
 
     config, config_sha = _load_config(_resolve(args.config))
+    _validate_pair_id(config, args.pair_id)
     arm = validate_arm(args.arm)
     if args.stop_at_step != 512 or not args.allow_staged_training:
         raise ValueError("Initial A7 start only allows the explicitly authorized 0→512 stage and requires --allow-staged-training")
@@ -1396,6 +1419,7 @@ def _start(args: argparse.Namespace) -> int:
 
 def _resume(args: argparse.Namespace) -> int:
     config, config_sha = _load_config(_resolve(args.config))
+    _validate_pair_id(config, args.pair_id)
     arm = validate_arm(args.arm)
     validate_stage_transition(args.from_step, args.stop_at_step)
     if not args.allow_staged_training:
@@ -1446,7 +1470,7 @@ def _resume(args: argparse.Namespace) -> int:
 
 def _status(args: argparse.Namespace) -> int:
     config, _config_sha = _load_config(_resolve(args.config))
-    pair_id = args.pair_id or config["training"]["pair_id"]
+    pair_id = _validate_pair_id(config, args.pair_id)
     result = {"pair_id": pair_id, "preflight": None, "arms": {}}
     root = _resolve(config["outputs"]["training_root"]) / "pairs" / pair_id
     if (root / "preflight.json").is_file():

@@ -103,8 +103,10 @@ training:
   weight_decay: 0.0
   gradient_clip_norm: 1.0
   gradient_checkpointing: true
-  lambda_emotion: 0.3
-  lambda_status: provisional_until_both_gpu_dry_steps_pass
+  lambda_emotion: 0.08
+  lambda_status: calibrated_before_training_by_long_prompt_gradient_norm
+  lambda_target_lora_gradient_norm_ratio: 1.0
+  lambda_gradient_norm_ratio_bounds: [0.9, 1.1]
   source_adapter: null
   response_loss: false
   emotion_only_arm: false
