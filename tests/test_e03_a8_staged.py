@@ -9,7 +9,9 @@ import yaml
 from src.training.e03_a8_contract import (
     conditional_quality_decision,
     validate_a8_training_config,
+    validate_conditional_authorization,
     validate_stage_transition,
+    write_conditional_authorization,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,3 +71,55 @@ def test_incomplete_eval_and_parse_failure_stop() -> None:
     decision = conditional_quality_decision(_summary(512, 1, 1, parse=0.97), None)
     assert decision["decision"] == "awaiting_manual_review"
     assert decision["reason"] == "strict_parse_rate_below_98_percent"
+
+
+def test_conditional_receipt_binds_only_the_pre_authorized_next_stage(tmp_path: Path) -> None:
+    path = tmp_path / "approvals" / "step-0512_to_1024.json"
+    decision = conditional_quality_decision(_summary(512, 0, 0), None)
+    receipt_sha = write_conditional_authorization(
+        path,
+        run_id="E03-A8-test-run",
+        arm="P",
+        from_step=512,
+        to_step=1024,
+        checkpoint_manifest_sha256="a" * 64,
+        evaluation_summary_sha256="b" * 64,
+        previous_evaluation_summary_sha256=None,
+        config_sha256="c" * 64,
+        data_manifest_sha256="d" * 64,
+        code_sha256="e" * 64,
+        quality_decision=decision,
+    )
+    assert len(receipt_sha) == 64
+    validated = validate_conditional_authorization(
+        path,
+        run_id="E03-A8-test-run",
+        arm="P",
+        from_step=512,
+        to_step=1024,
+        checkpoint_manifest_sha256="a" * 64,
+        evaluation_summary_sha256="b" * 64,
+        previous_evaluation_summary_sha256=None,
+        config_sha256="c" * 64,
+        data_manifest_sha256="d" * 64,
+        code_sha256="e" * 64,
+    )
+    assert validated["quality_decision"] == decision
+
+
+def test_conditional_receipt_cannot_authorize_training_after_2048(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="exceeds the frozen staged path"):
+        write_conditional_authorization(
+            tmp_path / "after-2048.json",
+            run_id="E03-A8-test-run",
+            arm="EP",
+            from_step=2048,
+            to_step=4048,
+            checkpoint_manifest_sha256="a" * 64,
+            evaluation_summary_sha256="b" * 64,
+            previous_evaluation_summary_sha256="c" * 64,
+            config_sha256="d" * 64,
+            data_manifest_sha256="e" * 64,
+            code_sha256="f" * 64,
+            quality_decision={"decision": "conditionally_authorized"},
+        )
