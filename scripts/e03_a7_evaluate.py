@@ -86,7 +86,7 @@ def _load_evaluation_sources(config: Mapping[str, Any], a5_config: Mapping[str, 
     return {**assets, "input_index": input_index, "id_map": id_map}
 
 
-def _load_run_assets(config: Mapping[str, Any], config_sha: str, arm: str, step: int) -> dict[str, Any]:
+def _load_run_assets(config: Mapping[str, Any], config_sha: str, training_code_sha: str, arm: str, step: int) -> dict[str, Any]:
     import torch
     from peft import PeftModel
     from safetensors.torch import load_file
@@ -100,7 +100,7 @@ def _load_run_assets(config: Mapping[str, Any], config_sha: str, arm: str, step:
         run_manifest.get("run_id") != run_id
         or run_manifest.get("arm") != arm
         or run_manifest.get("config_sha256") != config_sha
-        or run_manifest.get("code_sha256") != e03_a7_train._code_sha256()
+        or run_manifest.get("code_sha256") != training_code_sha
         or run_manifest.get("optimizer_step") != step
         or not isinstance(node, Mapping)
         or node.get("training_status") != "passed"
@@ -241,6 +241,7 @@ def _score_after_prediction_freeze(
     splits: Mapping[str, Sequence[str]],
     evaluation_assets: Mapping[str, Any],
     start_time: float,
+    training_code_sha256: str,
 ) -> dict[str, Any]:
     # This is deliberately the first read of frozen Dev Gold in the A7 evaluation path.
     references_path = evaluation_assets["source_paths"]["frozen_references"]
@@ -343,6 +344,8 @@ def _score_after_prediction_freeze(
         "run_id": f"{config['training']['pair_id']}-{arm}",
         "arm": arm,
         "checkpoint_step": step,
+        "training_code_sha256": training_code_sha256,
+        "evaluation_code_sha256": e03_a7_train._code_sha256(),
         "engineering_gate": "passed",
         "model_quality_status": "inconclusive",
         "progression_authorization_status": "awaiting_manual_review",
@@ -430,10 +433,10 @@ def _render_report(report: Mapping[str, Any], path: Path) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def _evaluate_arm(config: Mapping[str, Any], config_sha: str, a5_config: Mapping[str, Any], arm: str, step: int, *, assets: Mapping[str, Any], supervision: Mapping[str, Mapping[str, Any]], splits: Mapping[str, Sequence[str]], prompt_index: SFTPromptIndex) -> dict[str, Any]:
+def _evaluate_arm(config: Mapping[str, Any], config_sha: str, training_code_sha: str, a5_config: Mapping[str, Any], arm: str, step: int, *, assets: Mapping[str, Any], supervision: Mapping[str, Mapping[str, Any]], splits: Mapping[str, Sequence[str]], prompt_index: SFTPromptIndex) -> dict[str, Any]:
     import torch
 
-    run_assets = _load_run_assets(config, config_sha, arm, step)
+    run_assets = _load_run_assets(config, config_sha, training_code_sha, arm, step)
     eval_root = _resolve(config["outputs"]["evaluation_root"]) / run_assets["run_id"] / f"step-{step:04d}"
     if eval_root.exists():
         raise FileExistsError(f"A7 evaluation output already exists and is immutable: {eval_root}")
@@ -487,7 +490,9 @@ def _evaluate_arm(config: Mapping[str, Any], config_sha: str, a5_config: Mapping
         "arm": arm,
         "checkpoint_step": step,
         "config_sha256": config_sha,
-        "code_sha256": run_assets["run_manifest"]["code_sha256"],
+        "code_sha256": e03_a7_train._code_sha256(),
+        "training_code_sha256": run_assets["run_manifest"]["code_sha256"],
+        "evaluation_code_sha256": e03_a7_train._code_sha256(),
         "run_manifest_sha256_before_scoring": sha256_file(run_assets["run_manifest_path"]),
         "checkpoint_manifest_sha256": sha256_file(run_assets["checkpoint_manifest_path"]),
         "profile_head_sha256": run_assets["checkpoint_manifest"]["profile_head_sha256"],
@@ -529,6 +534,7 @@ def _evaluate_arm(config: Mapping[str, Any], config_sha: str, a5_config: Mapping
         splits=splits,
         evaluation_assets=assets,
         start_time=start_time,
+        training_code_sha256=run_assets["run_manifest"]["code_sha256"],
     )
     return report
 
@@ -728,7 +734,7 @@ def _evaluate_pair(args: argparse.Namespace) -> int:
     step = int(args.checkpoint_step)
     if step not in (512, 1024, 2048, 4048):
         raise ValueError("A7 evaluation node must be 512, 1024, 2048, or 4048")
-    e03_a7_train._load_preflight(config, config_sha)
+    preflight, _preflight_root = e03_a7_train._load_preflight_for_training(config, config_sha)
     a5_config, _a5_sha, _audit = e03_a7_train._a5_assets(config)
     evaluation_assets = _load_evaluation_sources(config, a5_config)
     supervision, splits, prompt_index = _load_training_data(config)
@@ -752,7 +758,7 @@ def _evaluate_pair(args: argparse.Namespace) -> int:
                 raise ValueError(f"A7 {arm} existing evaluation output does not match this node")
         else:
             _evaluate_arm(
-                config, config_sha, a5_config, arm, step,
+                config, config_sha, preflight["code_sha256"], a5_config, arm, step,
                 assets=evaluation_assets,
                 supervision=supervision,
                 splits=splits,

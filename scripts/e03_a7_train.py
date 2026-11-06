@@ -527,6 +527,53 @@ def _load_preflight(config: Mapping[str, Any], config_sha: str, *, require_code_
     return value, root
 
 
+def _load_preflight_for_training(config: Mapping[str, Any], config_sha: str) -> tuple[dict[str, Any], Path]:
+    """Accept only the original code or the narrowly recorded reload-only repair."""
+    preflight, root = _load_preflight(config, config_sha, require_code_match=False)
+    current_code_sha = _code_sha256()
+    if preflight.get("code_sha256") == current_code_sha:
+        return preflight, root
+    receipt_path = root / "reload_compatibility.json"
+    if not receipt_path.is_file():
+        raise ValueError("A7 code changed after preflight without a verified reload-compatibility receipt")
+    receipt = _json(receipt_path)
+    _validate_reload_compatibility_receipt(
+        preflight, receipt, current_code_sha=current_code_sha, config_sha=config_sha,
+    )
+    repaired_run = _json(_resolve(config["outputs"]["training_root"]) / receipt["run_id"] / "run_manifest.json")
+    repaired_node = repaired_run.get("nodes", {}).get("512", {})
+    if (
+        receipt.get("pair_id") != config["training"]["pair_id"]
+        or receipt.get("arm") not in {"P", "EP"}
+        or repaired_run.get("run_id") != receipt.get("run_id")
+        or repaired_run.get("arm") != receipt.get("arm")
+        or repaired_run.get("status") not in {"awaiting_evaluation", "awaiting_manual_review"}
+        or repaired_run.get("optimizer_step") != 512
+        or repaired_node.get("training_status") != "passed"
+        or repaired_node.get("reload_check_sha256") != receipt.get("reload_check_sha256")
+    ):
+        raise ValueError("A7 reload-compatibility receipt is not backed by a finalized Step 512 Run")
+    return preflight, root
+
+
+def _validate_reload_compatibility_receipt(
+    preflight: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    *,
+    current_code_sha: str,
+    config_sha: str,
+) -> None:
+    if (
+        receipt.get("status") != "reload_compatibility_repaired"
+        or receipt.get("scope") != "inference_base_dtype_reload_only"
+        or receipt.get("training_code_sha256") != preflight.get("code_sha256")
+        or receipt.get("compatible_code_sha256") != current_code_sha
+        or receipt.get("config_sha256") != config_sha
+        or receipt.get("optimizer_steps_added") != 0
+    ):
+        raise ValueError("A7 reload-compatibility receipt does not authorize the current code identity")
+
+
 def _load_schedule(config: Mapping[str, Any], root: Path) -> dict[str, Any]:
     manifest = _json(root / "schedule_manifest.json")
     schedule_path = root / "schedule.jsonl"
@@ -598,14 +645,18 @@ def _load_base(config: Mapping[str, Any], torch: Any, *, trainable: bool) -> Any
         low_cpu_mem_usage=True,
     )
     model.config.use_cache = False
-    if trainable:
-        from peft import prepare_model_for_kbit_training
+    from peft import prepare_model_for_kbit_training
 
+    if trainable:
         model = prepare_model_for_kbit_training(
             model,
             use_gradient_checkpointing=True,
             gradient_checkpointing_kwargs={"use_reentrant": False},
         )
+    else:
+        # Keep frozen LayerNorms in the same FP32 compute dtype used during
+        # training so Adapter+Head reload logits are directly comparable.
+        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=False)
     return model
 
 
@@ -1364,6 +1415,191 @@ def _prepare_training_inputs(config: Mapping[str, Any], root: Path) -> tuple[dic
     return supervision, {"schedule": _load_schedule(config, root)}, splits, prompt_index
 
 
+def _verify_training_ledger_prefix(
+    schedule: Mapping[str, Any],
+    train_rows: Sequence[Mapping[str, Any]],
+    order_rows: Sequence[Mapping[str, Any]],
+    *,
+    expected_step: int,
+) -> list[str]:
+    """Require both append-only ledgers to equal the immutable schedule prefix."""
+    if (
+        len(train_rows) != expected_step
+        or len(order_rows) != expected_step
+        or expected_step > len(schedule["steps"])
+    ):
+        raise ValueError("A7 training ledgers do not cover the requested optimizer-step prefix")
+    consumed: list[str] = []
+    for step, (train_row, order_row, schedule_row) in enumerate(
+        zip(train_rows, order_rows, schedule["steps"][:expected_step]), 1
+    ):
+        expected_ids = list(schedule_row["sample_ids"])
+        if (
+            train_row.get("optimizer_step") != step
+            or order_row.get("optimizer_step") != step
+            or train_row.get("sample_ids") != expected_ids
+            or order_row.get("sample_ids") != expected_ids
+            or train_row.get("epoch") != schedule_row["epoch"]
+            or order_row.get("epoch") != schedule_row["epoch"]
+        ):
+            raise ValueError(f"A7 training ledger row {step} differs from the frozen schedule")
+        consumed.extend(expected_ids)
+    return consumed
+
+
+def _repair_reload(args: argparse.Namespace) -> int:
+    """Revalidate a saved node's Adapter reload after the frozen-base dtype fix."""
+    import torch
+    from peft import set_peft_model_state_dict
+
+    config, config_sha = _load_config(_resolve(args.config))
+    pair_id = _validate_pair_id(config, args.pair_id)
+    arm = validate_arm(args.arm)
+    step = int(args.from_step or 512)
+    if step != 512:
+        raise ValueError("A7 reload recovery is limited to the incomplete Step 512 node")
+    preflight, pair_root = _load_preflight(config, config_sha, require_code_match=False)
+    run_id = args.run_id or f"{pair_id}-{arm}"
+    if run_id != f"{pair_id}-{arm}":
+        raise ValueError("A7 reload recovery Run ID must bind the frozen pair and Arm")
+    run_root = _resolve(config["outputs"]["training_root"]) / run_id
+    run_manifest_path = run_root / "run_manifest.json"
+    run_manifest = _json(run_manifest_path)
+    if (
+        run_manifest.get("status") != "training"
+        or run_manifest.get("run_id") != run_id
+        or run_manifest.get("arm") != arm
+        or run_manifest.get("config_sha256") != config_sha
+        or run_manifest.get("code_sha256") != preflight.get("code_sha256")
+        or run_manifest.get("data_sha256") != preflight.get("data_sha256")
+        or run_manifest.get("schedule_sha256") != preflight.get("schedule", {}).get("schedule_sha256")
+        or run_manifest.get("optimizer_step") is not None
+    ):
+        raise StageAuthorizationError("A7 reload recovery requires the failed, unfinalized same-Run Step 512 state")
+    reload_check_path = run_root / "trainer" / f"checkpoint-{step}" / "reload_check.json"
+    if reload_check_path.exists():
+        raise FileExistsError("A7 Step 512 reload recovery has already been recorded")
+
+    schedule = _load_schedule(config, pair_root)
+    train_rows = [row for _line, row, _sha in iter_jsonl(run_root / "train_steps.jsonl")]
+    order_rows = [row for _line, row, _sha in iter_jsonl(run_root / "sample_order.jsonl")]
+    consumed_ids = _verify_training_ledger_prefix(
+        schedule, train_rows, order_rows, expected_step=step,
+    )
+    checkpoint_dir = run_root / "trainer" / f"checkpoint-{step}"
+    checkpoint_manifest_path = checkpoint_dir / "checkpoint_manifest.json"
+    checkpoint_manifest_value = verify_checkpoint_manifest(
+        checkpoint_manifest_path,
+        expected_run_id=run_id,
+        expected_arm=arm,
+        expected_step=step,
+        expected_identity=run_manifest["checkpoint_identity"],
+        expected_schedule_sha256=schedule["schedule_sha256"],
+    )
+    training_state = load_training_state(
+        checkpoint_dir / "training_state.pt",
+        expected_identity=run_manifest["checkpoint_identity"],
+        expected_arm=arm,
+        expected_run_id=run_id,
+        expected_step=step,
+        expected_schedule_sha256=schedule["schedule_sha256"],
+        expected_consumed_ids=consumed_ids,
+    )
+    supervision, _wrapper, _splits, prompt_index = _prepare_training_inputs(config, pair_root)
+    model, heads, _device, _hidden = _new_model_and_heads(config, arm, torch, trainable=True)
+    set_peft_model_state_dict(model, training_state["model_state"], adapter_name="default")
+    heads.load_state_dict(training_state["head_state"], strict=True)
+    model.eval()
+    heads.eval()
+    reload_ids = list(dict.fromkeys(schedule["steps"][0]["sample_ids"]))[:2]
+    reload_rows = [(sample_id, prompt_index.prompt_ids(sample_id)) for sample_id in reload_ids]
+    expected_logits = _expected_reload_logits(
+        model, heads, arm, torch, reload_rows, int(config["identity"]["pad_token_id"]),
+    )
+    del model, heads, training_state
+    gc.collect()
+    torch.cuda.empty_cache()
+    reload_check = _verify_export_reload(
+        config, arm, torch, checkpoint_dir, reload_rows, expected_logits,
+    )
+    reload_check["recovery"] = {
+        "status": "revalidated_after_frozen_base_dtype_fix",
+        "scope": "inference_base_dtype_reload_only",
+        "training_code_sha256": preflight["code_sha256"],
+        "compatible_code_sha256": _code_sha256(),
+        "checkpoint_manifest_sha256": sha256_file(checkpoint_manifest_path),
+        "optimizer_steps_added": 0,
+        "saved_optimizer_and_rng_state_preserved": True,
+    }
+    write_manifest(reload_check_path, reload_check)
+    compatibility = {
+        "version": "E03-A7-reload-compatibility-v1",
+        "status": "reload_compatibility_repaired",
+        "scope": "inference_base_dtype_reload_only",
+        "pair_id": pair_id,
+        "run_id": run_id,
+        "arm": arm,
+        "checkpoint_step": step,
+        "config_sha256": config_sha,
+        "training_code_sha256": preflight["code_sha256"],
+        "compatible_code_sha256": _code_sha256(),
+        "checkpoint_manifest_sha256": sha256_file(checkpoint_manifest_path),
+        "reload_check_sha256": sha256_file(reload_check_path),
+        "optimizer_steps_added": 0,
+        "training_semantics_unchanged": True,
+        "created_at_utc": _now(),
+    }
+    compatibility_path = pair_root / "reload_compatibility.json"
+    if compatibility_path.exists():
+        raise FileExistsError("A7 reload compatibility has already been recorded")
+    write_manifest(compatibility_path, compatibility)
+
+    training_node = {
+        "training_status": "passed",
+        "optimizer_step": step,
+        "consumed_sample_exposures": step * 4,
+        "consumed_ids_sha256": canonical_sha256(consumed_ids),
+        "consumed_ids_set_sha256": canonical_sha256(sorted(set(consumed_ids))),
+        "schedule_sha256": schedule["schedule_sha256"],
+        "checkpoint_manifest_sha256": sha256_file(checkpoint_manifest_path),
+        "checkpoint_manifest_path": str(checkpoint_manifest_path),
+        "training_state_sha256": checkpoint_manifest_value["training_state_sha256"],
+        "reload_check_sha256": sha256_file(reload_check_path),
+        "independent_reload_status": reload_check["status"],
+        "reload_recovery": str(reload_check_path),
+        "evaluation_status": "not_run",
+    }
+    run_manifest.setdefault("nodes", {})[str(step)] = training_node
+    checkpoint_record = {
+        "step": step,
+        "checkpoint_manifest_path": str(checkpoint_manifest_path),
+        "checkpoint_manifest_sha256": training_node["checkpoint_manifest_sha256"],
+        "training_state_sha256": training_node["training_state_sha256"],
+        "sample_count": step * 4,
+        "reload_recovery": True,
+    }
+    run_manifest.update({
+        "status": "awaiting_evaluation",
+        "optimizer_step": step,
+        "sample_count": step * 4,
+        "last_checkpoint_manifest_sha256": training_node["checkpoint_manifest_sha256"],
+        "last_updated_at_utc": _now(),
+        "checkpoint_records": (run_manifest.get("checkpoint_records") or []) + [checkpoint_record],
+        "reload_compatibility_path": str(compatibility_path),
+        "reload_compatibility_sha256": sha256_file(compatibility_path),
+        "optimizer_steps_added_by_repair": 0,
+    })
+    write_manifest(run_manifest_path, run_manifest, overwrite=True)
+    print(json.dumps({
+        "status": run_manifest["status"], "arm": arm, "run_id": run_id,
+        "optimizer_steps": step, "sample_exposures": step * 4,
+        "reload_check": reload_check["status"],
+        "training_code_sha256": preflight["code_sha256"],
+        "compatible_code_sha256": _code_sha256(),
+    }, ensure_ascii=False))
+    return 0
+
+
 def _start(args: argparse.Namespace) -> int:
     import torch
 
@@ -1372,7 +1608,7 @@ def _start(args: argparse.Namespace) -> int:
     arm = validate_arm(args.arm)
     if args.stop_at_step != 512 or not args.allow_staged_training:
         raise ValueError("Initial A7 start only allows the explicitly authorized 0→512 stage and requires --allow-staged-training")
-    preflight, root = _load_preflight(config, config_sha)
+    preflight, root = _load_preflight_for_training(config, config_sha)
     freeze = _json(root / "lambda_freeze.json")
     if freeze.get("status") != "G1_passed_lambda_frozen" or freeze.get("lambda_emotion") != config["training"]["lambda_emotion"]:
         raise StageAuthorizationError("A7 cannot start before both Arm GPU preflights and lambda freeze pass")
@@ -1424,7 +1660,7 @@ def _resume(args: argparse.Namespace) -> int:
     validate_stage_transition(args.from_step, args.stop_at_step)
     if not args.allow_staged_training:
         raise ValueError("A7 resume requires --allow-staged-training after user node approval")
-    preflight, pair_root = _load_preflight(config, config_sha)
+    preflight, pair_root = _load_preflight_for_training(config, config_sha)
     run_id = args.run_id or f"{config['training']['pair_id']}-{arm}"
     run_root = _resolve(config["outputs"]["training_root"]) / run_id
     run_manifest = _json(run_root / "run_manifest.json")
@@ -1496,7 +1732,7 @@ def _status(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--mode", required=True, choices=("preflight", "gpu-preflight", "freeze-preflights", "start", "resume", "status"))
+    parser.add_argument("--mode", required=True, choices=("preflight", "gpu-preflight", "freeze-preflights", "start", "repair-reload", "resume", "status"))
     parser.add_argument("--arm", choices=("P", "EP"))
     parser.add_argument("--pair-id")
     parser.add_argument("--run-id")
@@ -1510,7 +1746,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.mode in {"gpu-preflight", "start", "resume"} and args.arm is None:
+    if args.mode in {"gpu-preflight", "start", "repair-reload", "resume"} and args.arm is None:
         raise SystemExit(f"--mode {args.mode} requires --arm P|EP")
     if args.mode == "resume" and (args.from_step is None or args.stop_at_step is None):
         raise SystemExit("--mode resume requires --from-step and --stop-at-step")
@@ -1524,6 +1760,8 @@ def main(argv: list[str] | None = None) -> int:
         return _freeze_preflights(args)
     if args.mode == "start":
         return _start(args)
+    if args.mode == "repair-reload":
+        return _repair_reload(args)
     if args.mode == "resume":
         return _resume(args)
     return _status(args)

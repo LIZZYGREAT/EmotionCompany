@@ -44,7 +44,7 @@ def record_continuation(
     if arm not in {"P", "EP"}:
         raise ValueError("A7 approval Arm must be P or EP")
     config, config_sha = e03_a7_train._load_config(config_path.resolve())
-    preflight, pair_root = e03_a7_train._load_preflight(config, config_sha)
+    preflight, pair_root = e03_a7_train._load_preflight_for_training(config, config_sha)
     expected_run_id = f"{config['training']['pair_id']}-{arm}"
     if run_id != expected_run_id:
         raise ValueError("A7 approval Run ID does not bind the requested pair and Arm")
