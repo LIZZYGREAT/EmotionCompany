@@ -461,7 +461,6 @@ python scripts/e03_experiment_ctl.py audit \
   --run-root outputs/training/E01-B-PILOT-20261028-092248 \
   --run-root outputs/training/E01-B-FULL-20261028-133805 \
   --run-root outputs/training/E03-A1-short-token_mean \
-  --run-root outputs/training/E03-A1-short-profile_x2 \
   --run-root outputs/training/E03-A1-short-label_value_x2 \
   --run-root outputs/training/E03-A1-full-label_value_x2 \
   --runner-report outputs/evaluation/e01_b/full/E01-B-EVAL-20261028-223105/runner/performance_report.json \
