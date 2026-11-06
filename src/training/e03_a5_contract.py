@@ -182,14 +182,19 @@ def validate_paired_group_contract(control: Mapping[str, Any], candidate: Mappin
 def verify_probe_gate(
     probe_report: Mapping[str, Any],
     probe_manifest: Mapping[str, Any],
+    dev_probe_report: Mapping[str, Any],
+    dev_probe_manifest: Mapping[str, Any],
     gate: Mapping[str, Any],
     *,
     config_sha256: str,
     audit_manifest_sha256: str,
     probe_report_sha256: str,
     probe_manifest_sha256: str,
+    dev_probe_report_sha256: str,
+    dev_probe_manifest_sha256: str,
+    frozen_ids_sha256: str,
 ) -> dict[str, Any]:
-    """Require an explicit, report-bound human decision before joint training."""
+    """Require Train probe and one frozen, target-free Dev diagnostic before joint training."""
     if probe_manifest.get("status") != "probe_metrics_ready_for_gate_review":
         raise RunAuthorizationError("A5.1 probe Run is not complete and ready for gate review")
     if probe_report.get("probe_decision") != "requires_predeclared_gate_and_manual_review":
@@ -198,6 +203,42 @@ def verify_probe_gate(
         raise RunAuthorizationError("A5.1 probe report uses a different config")
     if probe_report.get("a5_audit_manifest_sha256") != audit_manifest_sha256:
         raise RunAuthorizationError("A5.1 probe Run does not bind the passed A5.0 audit")
+    if (
+        dev_probe_manifest.get("status") != "dev_224_probe_scored"
+        or dev_probe_report.get("status") != "dev_224_probe_scored"
+        or not isinstance(dev_probe_manifest.get("run_id"), str)
+        or dev_probe_report.get("run_id") != dev_probe_manifest.get("run_id")
+        or dev_probe_manifest.get("probe_run_id") != probe_manifest.get("run_id")
+        or dev_probe_report.get("probe_run_id") != probe_manifest.get("run_id")
+        or dev_probe_manifest.get("probe_run_manifest_sha256") != probe_manifest_sha256
+        or dev_probe_manifest.get("probe_report_sha256") != probe_report_sha256
+        or dev_probe_report.get("probe_run_manifest_sha256") != probe_manifest_sha256
+        or dev_probe_report.get("probe_report_sha256") != probe_report_sha256
+        or dev_probe_report.get("config_sha256") != config_sha256
+        or dev_probe_report.get("a5_audit_manifest_sha256") != audit_manifest_sha256
+        or dev_probe_manifest.get("config_sha256") != config_sha256
+        or dev_probe_manifest.get("a5_audit_manifest_sha256") != audit_manifest_sha256
+        or dev_probe_report.get("frozen_ids_sha256") != frozen_ids_sha256
+        or dev_probe_manifest.get("frozen_ids_sha256") != frozen_ids_sha256
+        or dev_probe_report.get("sample_count") != 224
+        or dev_probe_report.get("frozen_point_count") != 224
+        or dev_probe_report.get("frozen_conversation_count") != 101
+        or dev_probe_report.get("gold_targets_read_after_feature_extraction") is not True
+        or dev_probe_report.get("thresholds_selected_on_dev") is not False
+        or dev_probe_report.get("threshold_source") != "frozen Train-Calibration values from the bound CPU probe Run"
+        or dev_probe_report.get("gold_targets_passed_to_model") is not False
+        or dev_probe_report.get("response_text_generated_or_saved") is not False
+        or dev_probe_report.get("full_generation_performed") is not False
+        or dev_probe_manifest.get("feature_contract", {}).get("input_source") != "frozen target-free id/history via prepare_sample_messages"
+        or dev_probe_manifest.get("feature_contract", {}).get("position") != "prompt_length_minus_one"
+        or dev_probe_manifest.get("feature_contract", {}).get("row_count") != 224
+        or dev_probe_manifest.get("feature_contract", {}).get("gold_targets_passed_to_model") is not False
+        or dev_probe_manifest.get("feature_contract", {}).get("full_generation_performed") is not False
+        or not isinstance(dev_probe_manifest.get("run_identity_sha256"), str)
+        or dev_probe_manifest.get("model_identity", {}).get("base_weights_unchanged") is not True
+        or dev_probe_manifest.get("model_identity", {}).get("source_adapter_unchanged") is not True
+    ):
+        raise RunAuthorizationError("A5.1 frozen Dev 224 diagnostic is incomplete or violates its no-leakage contract")
     if (
         gate.get("status") != "probe_gate_frozen"
         or gate.get("decision") != "probe_supported"
@@ -215,6 +256,9 @@ def verify_probe_gate(
         "audit_manifest_sha256": audit_manifest_sha256,
         "probe_report_sha256": probe_report_sha256,
         "probe_manifest_sha256": probe_manifest_sha256,
+        "dev_run_id": dev_probe_manifest.get("run_id"),
+        "dev_probe_report_sha256": dev_probe_report_sha256,
+        "dev_probe_manifest_sha256": dev_probe_manifest_sha256,
     }
     mismatches = [name for name, value in expected.items() if gate.get(name) != value]
     if mismatches:
@@ -224,6 +268,9 @@ def verify_probe_gate(
         "decision": "probe_supported",
         "approved_by": gate["approved_by"],
         "rationale": gate["rationale"],
+        "dev_run_id": dev_probe_manifest.get("run_id"),
+        "dev_probe_report_sha256": dev_probe_report_sha256,
+        "dev_probe_manifest_sha256": dev_probe_manifest_sha256,
         "gate_sha256": canonical_sha256(gate),
     }
 

@@ -18,6 +18,7 @@ def extract_prompt_features(
     pad_token_id: int,
     batch_size: int = 1,
     max_prompt_tokens: int = 1280,
+    allow_prompt_only: bool = False,
 ) -> tuple[list[str], Any, str]:
     """Run prompt-only inputs and gather the last Prompt token, without Gold suffixes."""
     import torch
@@ -27,7 +28,7 @@ def extract_prompt_features(
     observed_dtypes: set[str] = set()
     for batch_ids, batch_features, dtype in iter_prompt_features(
         model, rows, pad_token_id=pad_token_id, batch_size=batch_size,
-        max_prompt_tokens=max_prompt_tokens,
+        max_prompt_tokens=max_prompt_tokens, allow_prompt_only=allow_prompt_only,
     ):
         sample_ids.extend(batch_ids)
         collected.append(batch_features)
@@ -47,8 +48,9 @@ def iter_prompt_features(
     pad_token_id: int,
     batch_size: int = 1,
     max_prompt_tokens: int = 1280,
+    allow_prompt_only: bool = False,
 ) -> Iterable[tuple[list[str], Any, str]]:
-    """Stream Prompt-only feature batches to keep tokenized Train rows out of memory."""
+    """Stream Prompt-only features from SFT rows or explicitly target-free Prompts."""
     import torch
 
     if batch_size < 1 or max_prompt_tokens < 1:
@@ -86,8 +88,12 @@ def iter_prompt_features(
                 raise ValueError(f"duplicate feature sample_id: {sample_id}")
             if isinstance(prompt_length, bool) or not isinstance(prompt_length, int) or not 0 < prompt_length <= max_prompt_tokens:
                 raise ValueError(f"{sample_id}: invalid or over-budget prompt_length")
-            if not isinstance(input_ids, list) or prompt_length >= len(input_ids):
-                raise ValueError(f"{sample_id}: SFT input_ids do not contain a completion suffix")
+            if (
+                not isinstance(input_ids, list)
+                or prompt_length > len(input_ids)
+                or (not allow_prompt_only and prompt_length >= len(input_ids))
+            ):
+                raise ValueError(f"{sample_id}: input_ids do not satisfy the configured Prompt-only source shape")
             tokens = input_ids[:prompt_length]
             if any(isinstance(token, bool) or not isinstance(token, int) or token < 0 for token in tokens):
                 raise ValueError(f"{sample_id}: Prompt IDs must be non-negative integers")
@@ -424,3 +430,61 @@ def fit_and_evaluate_probe(
         "probe_decision": "requires_predeclared_gate_and_manual_review",
     }
     return head, report
+
+
+def score_external_dev_probe(
+    features_by_id: Mapping[str, Any],
+    supervision_by_id: Mapping[str, Mapping[str, Sequence[int]]],
+    head: Any,
+    train_fit_frequency_prior: Any,
+    thresholds: Mapping[str, Mapping[str, Any]],
+    enums: Mapping[str, Sequence[str]],
+) -> dict[str, Any]:
+    """Score frozen Dev features with Train-only heads and thresholds, without calibration."""
+    import torch
+
+    if not features_by_id or set(features_by_id) != set(supervision_by_id):
+        raise ValueError("external Dev feature and Gold ID sets must match exactly")
+    ids = list(features_by_id)
+    if len(ids) != len(set(ids)):
+        raise ValueError("external Dev IDs must be unique")
+    x = torch.stack([torch.as_tensor(features_by_id[sample_id], dtype=torch.float32) for sample_id in ids])
+    y = [list(supervision_by_id[sample_id]["y"]) for sample_id in ids]
+    masks = [list(supervision_by_id[sample_id]["mask"]) for sample_id in ids]
+    x, y_tensor, mask_tensor = validate_probe_arrays(x, y, masks)
+    prior = torch.as_tensor(train_fit_frequency_prior, dtype=torch.float32, device="cpu")
+    if prior.ndim != 1 or prior.shape[0] != 33 or not torch.isfinite(prior).all():
+        raise ValueError("Train-Fit frequency prior must be a finite length-33 vector")
+    if torch.any((prior < 0) | (prior > 1)):
+        raise ValueError("Train-Fit frequency prior must contain probabilities in [0, 1]")
+    linear_threshold = thresholds.get("linear_head", {}).get("threshold")
+    prior_threshold = thresholds.get("frequency_prior", {}).get("threshold")
+    for name, value in (("linear_head", linear_threshold), ("frequency_prior", prior_threshold)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)) or not 0 <= value <= 1:
+            raise ValueError(f"frozen Train-Calibration {name} threshold is invalid")
+    head.eval()
+    with torch.no_grad():
+        linear_probabilities = head(x).sigmoid()
+    prior_probabilities = prior.unsqueeze(0).expand(x.shape[0], -1)
+    return {
+        "status": "dev_224_probe_scored",
+        "sample_count": len(ids),
+        "thresholds_selected_on_dev": False,
+        "threshold_source": "frozen Train-Calibration values from the bound CPU probe Run",
+        "thresholds": {
+            "linear_head_train_calibration": float(linear_threshold),
+            "frequency_prior_train_calibration": float(prior_threshold),
+        },
+        "linear_head": {
+            "threshold_0_5": evaluate_probabilities(linear_probabilities, y_tensor, mask_tensor, enums, threshold=0.5),
+            "train_calibration_threshold": evaluate_probabilities(
+                linear_probabilities, y_tensor, mask_tensor, enums, threshold=float(linear_threshold),
+            ),
+        },
+        "frequency_prior": {
+            "threshold_0_5": evaluate_probabilities(prior_probabilities, y_tensor, mask_tensor, enums, threshold=0.5),
+            "train_calibration_threshold": evaluate_probabilities(
+                prior_probabilities, y_tensor, mask_tensor, enums, threshold=float(prior_threshold),
+            ),
+        },
+    }

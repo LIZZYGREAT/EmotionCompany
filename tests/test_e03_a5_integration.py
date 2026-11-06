@@ -140,6 +140,44 @@ def test_probe_gate_requires_a_reviewed_report_bound_supported_decision():
         "a5_audit_manifest_sha256": "b" * 64,
     }
     probe_manifest = {"status": "probe_metrics_ready_for_gate_review", "run_id": "A5-PROBE-01"}
+    dev_report = {
+        "status": "dev_224_probe_scored",
+        "run_id": "A5-DEV-01",
+        "probe_run_id": "A5-PROBE-01",
+        "probe_run_manifest_sha256": "d" * 64,
+        "probe_report_sha256": "c" * 64,
+        "config_sha256": "a" * 64,
+        "a5_audit_manifest_sha256": "b" * 64,
+        "frozen_ids_sha256": "e" * 64,
+        "sample_count": 224,
+        "frozen_point_count": 224,
+        "frozen_conversation_count": 101,
+        "gold_targets_read_after_feature_extraction": True,
+        "thresholds_selected_on_dev": False,
+        "threshold_source": "frozen Train-Calibration values from the bound CPU probe Run",
+        "gold_targets_passed_to_model": False,
+        "response_text_generated_or_saved": False,
+        "full_generation_performed": False,
+    }
+    dev_manifest = {
+        "status": "dev_224_probe_scored",
+        "run_id": "A5-DEV-01",
+        "probe_run_id": "A5-PROBE-01",
+        "probe_run_manifest_sha256": "d" * 64,
+        "probe_report_sha256": "c" * 64,
+        "config_sha256": "a" * 64,
+        "a5_audit_manifest_sha256": "b" * 64,
+        "frozen_ids_sha256": "e" * 64,
+        "run_identity_sha256": "9" * 64,
+        "feature_contract": {
+            "input_source": "frozen target-free id/history via prepare_sample_messages",
+            "position": "prompt_length_minus_one",
+            "row_count": 224,
+            "gold_targets_passed_to_model": False,
+            "full_generation_performed": False,
+        },
+        "model_identity": {"base_weights_unchanged": True, "source_adapter_unchanged": True},
+    }
     gate = {
         "status": "probe_gate_frozen",
         "decision": "probe_supported",
@@ -152,22 +190,53 @@ def test_probe_gate_requires_a_reviewed_report_bound_supported_decision():
         "audit_manifest_sha256": "b" * 64,
         "probe_report_sha256": "c" * 64,
         "probe_manifest_sha256": "d" * 64,
+        "dev_run_id": "A5-DEV-01",
+        "dev_probe_report_sha256": "f" * 64,
+        "dev_probe_manifest_sha256": "0" * 64,
     }
     facts = verify_probe_gate(
-        report, probe_manifest, gate,
+        report, probe_manifest, dev_report, dev_manifest, gate,
         config_sha256="a" * 64,
         audit_manifest_sha256="b" * 64,
         probe_report_sha256="c" * 64,
         probe_manifest_sha256="d" * 64,
+        dev_probe_report_sha256="f" * 64,
+        dev_probe_manifest_sha256="0" * 64,
+        frozen_ids_sha256="e" * 64,
     )
     assert facts["decision"] == "probe_supported"
-    with pytest.raises(RunAuthorizationError, match="probe_supported"):
+    with pytest.raises(RunAuthorizationError, match="Dev 224"):
         verify_probe_gate(
-            report, probe_manifest, {**gate, "decision": "probe_indeterminate"},
+            report, probe_manifest, {**dev_report, "thresholds_selected_on_dev": True}, dev_manifest, gate,
             config_sha256="a" * 64,
             audit_manifest_sha256="b" * 64,
             probe_report_sha256="c" * 64,
             probe_manifest_sha256="d" * 64,
+            dev_probe_report_sha256="f" * 64,
+            dev_probe_manifest_sha256="0" * 64,
+            frozen_ids_sha256="e" * 64,
+        )
+    with pytest.raises(RunAuthorizationError, match="Dev 224"):
+        verify_probe_gate(
+            report, probe_manifest, {**dev_report, "run_id": "A5-DEV-OTHER"}, dev_manifest, gate,
+            config_sha256="a" * 64,
+            audit_manifest_sha256="b" * 64,
+            probe_report_sha256="c" * 64,
+            probe_manifest_sha256="d" * 64,
+            dev_probe_report_sha256="f" * 64,
+            dev_probe_manifest_sha256="0" * 64,
+            frozen_ids_sha256="e" * 64,
+        )
+    with pytest.raises(RunAuthorizationError, match="probe_supported"):
+        verify_probe_gate(
+            report, probe_manifest, dev_report, dev_manifest, {**gate, "decision": "probe_indeterminate"},
+            config_sha256="a" * 64,
+            audit_manifest_sha256="b" * 64,
+            probe_report_sha256="c" * 64,
+            probe_manifest_sha256="d" * 64,
+            dev_probe_report_sha256="f" * 64,
+            dev_probe_manifest_sha256="0" * 64,
+            frozen_ids_sha256="e" * 64,
         )
 
 

@@ -14,7 +14,12 @@ from src.training.e03_a5_multitask import (
     gather_prompt_end_hidden,
     masked_bce_with_logits,
 )
-from src.training.e03_a5_probe import choose_global_threshold, extract_prompt_features
+from src.training.e03_a5_probe import (
+    choose_global_threshold,
+    extract_prompt_features,
+    iter_prompt_features,
+    score_external_dev_probe,
+)
 
 
 class _Backbone(nn.Module):
@@ -95,6 +100,63 @@ def test_feature_extraction_uses_prompt_prefix_only_and_records_dtype():
     assert ids == ["a", "b"]
     assert dtype == "float32"
     assert torch.allclose(features[0], features[1], atol=1e-6, rtol=1e-6)
+
+
+def test_target_free_dev_prompt_rows_can_be_extracted_without_completion_suffix():
+    model = _TinyCausalLM().eval()
+    rows = [{"sample_id": "dev-a", "input_ids": [1, 2, 3], "prompt_length": 3}]
+    with pytest.raises(ValueError, match="source shape"):
+        list(iter_prompt_features(model, rows, pad_token_id=0, allow_prompt_only=False))
+    ids, features, dtype = extract_prompt_features(
+        model, rows, pad_token_id=0, batch_size=1, allow_prompt_only=True,
+    )
+    assert ids == ["dev-a"]
+    assert features.shape == (1, 8)
+    assert dtype == "float32"
+
+
+def test_external_probe_score_applies_train_calibration_threshold_without_dev_search():
+    enums = {
+        "personality_traits": [f"trait_{index}" for index in range(10)],
+        "interests": [f"interest_{index}" for index in range(12)],
+        "style": [f"style_{index}" for index in range(11)],
+    }
+    targets = torch.zeros((2, 33), dtype=torch.float32)
+    targets[:, 0] = 1
+    masks = torch.ones_like(targets)
+    supervision = {
+        sample_id: {"y": targets[index].tolist(), "mask": masks[index].tolist()}
+        for index, sample_id in enumerate(("dev-a", "dev-b"))
+    }
+    head = nn.Linear(4, 33, dtype=torch.float32)
+    with torch.no_grad():
+        head.weight.zero_()
+        head.bias.fill_(-5)
+        head.bias[0] = 5
+    features = {"dev-a": torch.zeros(4), "dev-b": torch.ones(4)}
+    thresholds = {
+        "linear_head": {"threshold": 0.7},
+        "frequency_prior": {"threshold": 0.6},
+    }
+    report = score_external_dev_probe(
+        features,
+        supervision,
+        head,
+        torch.tensor([0.8] + [0.1] * 32),
+        thresholds,
+        enums,
+    )
+    assert report["status"] == "dev_224_probe_scored"
+    assert report["thresholds_selected_on_dev"] is False
+    assert report["threshold_source"].startswith("frozen Train-Calibration")
+    assert report["linear_head"]["train_calibration_threshold"]["threshold"] == 0.7
+    assert report["linear_head"]["train_calibration_threshold"]["metrics"]["overall_33_label_micro_f1"] == 1.0
+    assert report["frequency_prior"]["train_calibration_threshold"]["threshold"] == 0.6
+    with pytest.raises(ValueError, match="ID sets"):
+        score_external_dev_probe(
+            {"dev-a": torch.zeros(4)}, supervision, head,
+            torch.tensor([0.8] + [0.1] * 32), thresholds, enums,
+        )
 
 
 def test_final_hidden_hook_preserves_bce_gradient_path():

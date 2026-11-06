@@ -276,11 +276,25 @@ def _load_gate(
     probe_manifest = probe_runner._json(manifest_path)
     gate = probe_runner._json(gate_path)
     gate_manifest = probe_runner._json(gate_manifest_path)
+    dev_run_id = gate.get("dev_run_id")
+    _validate_id(dev_run_id, "dev_run_id")
+    probe_root = probe_runner._resolve(config["outputs"]["probe_root"]).resolve()
+    dev_root = (probe_root / dev_run_id).resolve()
+    if not dev_root.is_relative_to(probe_root):
+        raise RunAuthorizationError("A5.1 frozen Dev Run output escaped the configured A5 outputs directory")
+    dev_report_path = dev_root / "dev_224_probe_report.json"
+    dev_manifest_path = dev_root / "run_manifest.json"
+    dev_report, dev_manifest = probe_runner._json(dev_report_path), probe_runner._json(dev_manifest_path)
     if (
         gate_manifest.get("status") != "probe_gate_frozen"
         or gate_manifest.get("probe_run_id") != probe_run_id
         or gate_manifest.get("decision") != gate.get("decision")
         or gate.get("probe_run_id") != probe_run_id
+        or gate_manifest.get("dev_run_id") != dev_run_id
+        or dev_report.get("run_id") != dev_run_id
+        or dev_manifest.get("run_id") != dev_run_id
+        or dev_report.get("probe_run_id") != probe_run_id
+        or dev_manifest.get("probe_run_id") != probe_run_id
         or gate_manifest.get("config_sha256") != config_sha256
         or gate_manifest.get("audit_manifest_sha256") != audit["manifest_sha256"]
     ):
@@ -293,19 +307,36 @@ def _load_gate(
         or expected_outputs.get("probe_gate.json") != sha256_file(gate_path)
         or gate_manifest.get("probe_report_sha256") != sha256_file(report_path)
         or gate_manifest.get("probe_run_manifest_sha256") != sha256_file(manifest_path)
+        or gate.get("dev_probe_report_sha256") != sha256_file(dev_report_path)
+        or gate.get("dev_probe_manifest_sha256") != sha256_file(dev_manifest_path)
+        or gate_manifest.get("dev_probe_report_sha256") != sha256_file(dev_report_path)
+        or gate_manifest.get("dev_probe_manifest_sha256") != sha256_file(dev_manifest_path)
+        or dev_manifest.get("outputs", {}).get("dev_224_probe_report.json") != sha256_file(dev_report_path)
+        or dev_manifest.get("probe_run_manifest_sha256") != sha256_file(manifest_path)
+        or dev_manifest.get("probe_report_sha256") != sha256_file(report_path)
+        or dev_manifest.get("run_identity_sha256") != sha256_file(dev_root / "run_identity.json")
+        or dev_manifest.get("run_identity_sha256") != sha256_file(dev_root / "run_identity.json")
+        or dev_report.get("frozen_ids_sha256") != config["identity"]["frozen_dev_224_ids_sha256"]
+        or gate.get("frozen_ids_sha256") != config["identity"]["frozen_dev_224_ids_sha256"]
     ):
         raise RunAuthorizationError("A5.1 gate or evidence report changed after review")
     gate_facts = verify_probe_gate(
-        report, probe_manifest, gate,
+        report, probe_manifest, dev_report, dev_manifest, gate,
         config_sha256=config_sha256,
         audit_manifest_sha256=audit["manifest_sha256"],
         probe_report_sha256=sha256_file(report_path),
         probe_manifest_sha256=sha256_file(manifest_path),
+        dev_probe_report_sha256=sha256_file(dev_report_path),
+        dev_probe_manifest_sha256=sha256_file(dev_manifest_path),
+        frozen_ids_sha256=config["identity"]["frozen_dev_224_ids_sha256"],
     )
     gate_facts.update({
         "probe_run_id": probe_run_id,
         "probe_run_manifest_sha256": sha256_file(manifest_path),
         "probe_report_sha256": sha256_file(report_path),
+        "dev_run_id": dev_run_id,
+        "dev_probe_report_sha256": sha256_file(dev_report_path),
+        "dev_probe_manifest_sha256": sha256_file(dev_manifest_path),
         "gate_manifest_sha256": sha256_file(gate_manifest_path),
     })
     return gate, gate_manifest, gate_facts
