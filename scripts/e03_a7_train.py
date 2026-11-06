@@ -32,6 +32,7 @@ from src.data.e03_a7_classification import (
     build_supervision,
     emotion_label_order,
     read_splits,
+    sft_prompt_train_ids,
     validate_conversation_splits,
     verify_prompt_equivalence,
     verify_schedule,
@@ -715,7 +716,8 @@ def _gpu_preflight(args: argparse.Namespace) -> int:
     gpu = _gpu_facts(torch)
     _a5, _a5_sha, _audit = _a5_assets(config)
     splits = read_splits(_resolve(config["data"]["a5_splits"]))
-    index = SFTPromptIndex(_resolve(config["data"]["sft_train"]), splits["fit"])
+    prompt_train_ids = sft_prompt_train_ids(splits)
+    index = SFTPromptIndex(_resolve(config["data"]["sft_train"]), prompt_train_ids)
     sample_id = max(splits["fit"], key=lambda value: (index.prompt_lengths[value], value))
     prompt = index.prompt_ids(sample_id)
     prompt_length = len(prompt)
@@ -728,6 +730,9 @@ def _gpu_preflight(args: argparse.Namespace) -> int:
         _json(_resolve(config["data"]["output_schema"])),
         expected_rows=int(config["data"]["expected_d03_train_rows"]),
     )
+    validate_conversation_splits(splits, supervision)
+    if set(prompt_train_ids) != set(supervision):
+        raise ValueError("A7 GPU preflight Prompt IDs differ from the complete supervised Train set")
     torch.cuda.reset_peak_memory_stats()
     seed = int(config["model"]["lora"]["init_seed"])
     _seed_all(torch, seed)

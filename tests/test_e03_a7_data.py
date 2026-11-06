@@ -8,6 +8,7 @@ from src.data.e03_a7_classification import (
     build_schedule,
     build_supervision,
     emotion_label_order,
+    sft_prompt_train_ids,
     validate_conversation_splits,
     verify_schedule,
 )
@@ -59,6 +60,18 @@ def test_a7_emotion_order_cross_checks_both_official_schemas():
     )
     with pytest.raises(ValueError, match="order differs"):
         emotion_label_order(train, output)
+
+
+def test_a7_prompt_index_train_ids_cover_all_three_supervised_partitions():
+    splits = {
+        "fit": ["fit-1", "fit-2"],
+        "calibration": ["cal-1"],
+        "internal_holdout": ["holdout-1"],
+    }
+    assert sft_prompt_train_ids(splits) == ["fit-1", "fit-2", "cal-1", "holdout-1"]
+    splits["internal_holdout"] = ["fit-1"]
+    with pytest.raises(ValueError, match="unique"):
+        sft_prompt_train_ids(splits)
 
 
 def test_a7_supervision_joins_profile_and_emotion_by_sample_id(tmp_path):

@@ -77,6 +77,17 @@ def read_splits(path: Path, expected_fit_ids_sha256: str | None = None) -> dict[
     return result
 
 
+def sft_prompt_train_ids(split_ids: Mapping[str, Sequence[str]]) -> list[str]:
+    """Return every supervised Train ID required to build the seekable SFT Prompt index."""
+    names = ("fit", "calibration", "internal_holdout")
+    if any(name not in split_ids for name in names):
+        raise ValueError("A7 Prompt index requires Fit, Calibration, and Internal Holdout IDs")
+    ids = [sample_id for name in names for sample_id in split_ids[name]]
+    if not ids or len(ids) != len(set(ids)) or any(not isinstance(sample_id, str) or not sample_id for sample_id in ids):
+        raise ValueError("A7 Prompt index Train IDs must be non-empty, unique sample IDs")
+    return ids
+
+
 def build_supervision(
     normalized_train_path: Path,
     a5_supervision_path: Path,
