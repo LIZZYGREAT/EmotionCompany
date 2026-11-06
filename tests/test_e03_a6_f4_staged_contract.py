@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 from src.training.e03_a6_f4_staged_contract import (
+    sha256_file,
     validate_eval_config,
     validate_stage_authorization,
     validate_stage_transition,
@@ -91,7 +92,6 @@ def test_stage_authorization_is_bound_to_run_node_and_checkpoint_hash(tmp_path: 
 
 def test_continuation_authorization_reads_the_registered_eval_output_root(tmp_path: Path, monkeypatch):
     from scripts import e03_a6_f4_staged_authorize as authorize_script
-    from src.training.e03_a6_f4_staged_full import sha256_file
 
     run_id = "E03-A6-F4-STAGED-FULL-TEST"
     train_root = tmp_path / "training"

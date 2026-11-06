@@ -36,6 +36,7 @@ def test_f4_fast_evaluator_module_import_does_not_require_torch():
         "    return original_import(name, *args, **kwargs)",
         "builtins.__import__ = without_torch",
         "import scripts.e03_a6_f4_staged_eval",
+        "import scripts.e03_a6_f4_staged_authorize",
     ])
     result = subprocess.run(
         [sys.executable, "-c", script],
