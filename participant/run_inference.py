@@ -61,6 +61,7 @@ from src.shared.prompting import (  # noqa: E402
     validate_prompt_enum_order,
 )
 from src.shared.f3_protocol import F3ParseError, parse_f3, validate_f3_prompt_enum_order  # noqa: E402
+from src.shared.f4_protocol import F4ParseError, parse_f4, validate_f4_prompt_enum_order  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -112,10 +113,10 @@ def load_config(config_path: Path | None = None) -> dict[str, Any]:
     if not isinstance(config, dict):
         raise ValueError("推理配置 JSON 根节点必须为 object")
     format_version = config.get("format_version", "F2")
-    if not isinstance(format_version, str) or format_version not in {"F2", "F3"}:
-        raise ValueError("format_version must be F2 or F3")
-    if format_version == "F3" and not isinstance(config.get("selection_prompt"), dict):
-        raise ValueError("F3 inference requires a locked P0 selection_prompt")
+    if not isinstance(format_version, str) or format_version not in {"F2", "F3", "F4"}:
+        raise ValueError("format_version must be F2, F3, or F4")
+    if format_version in {"F3", "F4"} and not isinstance(config.get("selection_prompt"), dict):
+        raise ValueError(f"{format_version} inference requires a locked P0 selection_prompt")
     environment_overrides = {
         "EVALUATION_BACKEND": "backend",
         "EVALUATION_BASE_URL": "base_url",
@@ -701,8 +702,8 @@ def load_peft_adapter(
 
 
 def adapter_autocast_dtype_for_format(format_version: str) -> bool | None:
-    """Keep F2 loading unchanged; F3 QLoRA saves its trainable adapters in FP32."""
-    if format_version == "F3":
+    """Keep F2 loading unchanged; A6 F3/F4 QLoRA adapters are saved in FP32."""
+    if format_version in {"F3", "F4"}:
         return True
     return None
 
@@ -916,12 +917,18 @@ def load_runtime_protocol(config: dict[str, Any]) -> tuple[str, dict[str, Any], 
             }
         }
         validate_prompt_enum_order(prompt_text, official_prompt_schema)
-    else:
-        if prompt_cfg.get("version") != "P_A6_F3":
-            raise ValueError("F3 inference requires prompt.version=P_A6_F3")
-        validate_f3_prompt_enum_order(prompt_text, enums)
+    elif format_version in {"F3", "F4"}:
+        expected_prompt_version = "P_A6_F3" if format_version == "F3" else "P_A6_F4"
+        if prompt_cfg.get("version") != expected_prompt_version:
+            raise ValueError(f"{format_version} inference requires prompt.version={expected_prompt_version}")
+        if format_version == "F3":
+            validate_f3_prompt_enum_order(prompt_text, enums)
+        else:
+            validate_f4_prompt_enum_order(prompt_text, enums)
         selection_prompt, selection_facts = load_f3_selection_prompt(config)
         del selection_prompt
+    else:
+        raise ValueError(f"unsupported inference format_version: {format_version}")
     facts = {
         "path": str(prompt_path),
         "version": prompt_cfg["version"],
@@ -929,8 +936,8 @@ def load_runtime_protocol(config: dict[str, Any]) -> tuple[str, dict[str, Any], 
         "tokenizer_id": config["tokenizer"]["model_id"],
         "tokenizer_revision": config["tokenizer"]["revision"],
     }
-    if format_version == "F3":
-        facts["format_version"] = "F3"
+    if format_version in {"F3", "F4"}:
+        facts["format_version"] = format_version
         facts["selection_prompt"] = selection_facts
     return prompt_text, schema, enums, facts
 
@@ -1379,6 +1386,31 @@ def parse_f3_prediction(
     return prediction, "success", True, None
 
 
+def parse_f4_prediction(
+    sample_id: str,
+    decoded: str,
+    enums: dict[str, list[str]],
+) -> tuple[dict[str, Any], str, bool, str | None]:
+    """Parse a complete Raw F4 response and map failures to stable runner statuses."""
+    try:
+        parsed = parse_f4(decoded, enums)
+    except F4ParseError as exc:
+        if exc.code == "invalid_emotion":
+            status = "invalid_emotion"
+        elif exc.code in {"invalid_profile_label", "duplicate_label", "noncanonical_label_order"}:
+            status = "invalid_profile_label"
+        elif exc.code == "incomplete" and "\nResponse=" not in decoded:
+            status = "truncated_before_response"
+        else:
+            status = "format_parse_failure"
+        return f3_failure_prediction(sample_id, enums, decoded), status, False, exc.code
+
+    prediction = normalize_prediction(sample_id, parsed, enums)
+    if not prediction["response_text"]:
+        return f3_failure_prediction(sample_id, enums, decoded), "response_truncated", True, "empty_response"
+    return prediction, "success", True, None
+
+
 def synchronize(torch_module: Any) -> None:
     if torch_module.cuda.is_available():
         torch_module.cuda.synchronize()
@@ -1504,8 +1536,10 @@ def main() -> None:
         )
     prompt_text, submission_schema, enums, prompt_facts = load_runtime_protocol(config)
     format_version = config.get("format_version", "F2")
+    field_format = format_version in {"F3", "F4"}
+    field_parse_status_key = f"{format_version.lower()}_parse_status"
     selection_prompt_text = prompt_text
-    if format_version == "F3":
+    if field_format:
         selection_prompt_text, _ = load_f3_selection_prompt(config)
     for row in previous_submission_rows:
         validate_submission_prediction(row, submission_schema)
@@ -1612,7 +1646,8 @@ def main() -> None:
         backend_report = {
             "version": (
                 "transformers_p0_f2_t1_v3" if format_version == "F2"
-                else "transformers_p_a6_f3_t1_v1"
+                else "transformers_p_a6_f3_t1_v1" if format_version == "F3"
+                else "transformers_p_a6_f4_t1_v1"
             ),
             "timing_scope": (
                 "per-sample tokenize+generate+decode+parse+schema validation; CUDA synchronized "
@@ -1746,7 +1781,8 @@ def main() -> None:
         backend_report = {
             "version": (
                 "openai_compatible_p0_f2_t1_v3" if format_version == "F2"
-                else "openai_compatible_p_a6_f3_t1_v1"
+                else "openai_compatible_p_a6_f3_t1_v1" if format_version == "F3"
+                else "openai_compatible_p_a6_f4_t1_v1"
             ),
             "timing_scope": "client prompt tokenization+HTTP request/server inference+response decode+parse+schema validation; server startup excluded",
             "api_model": config["api_model"],
@@ -1794,15 +1830,15 @@ def main() -> None:
         "server_prompt_tokens": None,
         "server_completion_tokens": None,
     } for index, row in enumerate(previous_raw_rows)]
-    if format_version == "F3":
+    if field_format:
         for diagnostic, row in zip(sample_diagnostics, previous_raw_rows):
             diagnostic["selection_prompt_tokens"] = row.get("selection_prompt_tokens")
-            diagnostic["raw_f3_parse_status"] = row.get("f3_parse_status")
+            diagnostic[f"raw_{format_version.lower()}_parse_status"] = row.get(field_parse_status_key)
     statuses: list[str] = [str(row.get("status", "unknown")) for row in previous_raw_rows]
     f3_parse_statuses: list[str] = [
-        str(row["f3_parse_status"])
+        str(row[field_parse_status_key])
         for row in previous_raw_rows
-        if isinstance(row.get("f3_parse_status"), str)
+        if isinstance(row.get(field_parse_status_key), str)
     ]
     f3_parse_successes: list[bool] = [
         row.get("strict_format_parse_success") is True for row in previous_raw_rows
@@ -1818,7 +1854,7 @@ def main() -> None:
             if backend == "transformers":
                 synchronize(torch)
             started = time.perf_counter()
-            if format_version == "F3":
+            if field_format:
                 selection, messages = prepare_sample_messages(
                     sample,
                     prompt_text,
@@ -1851,7 +1887,7 @@ def main() -> None:
             if selection["floor_exceeds_cap"]:
                 prediction = (
                     f3_failure_prediction(sample["id"], enums)
-                    if format_version == "F3" else empty_prediction(sample["id"], enums)
+                    if field_format else empty_prediction(sample["id"], enums)
                 )
                 status = "prompt_floor_exceeds_cap"
                 prompt_overflow_ids.append(sample["id"])
@@ -1885,7 +1921,7 @@ def main() -> None:
                         if isinstance(server_prompt_tokens, int) and server_prompt_tokens != prompt_tokens:
                             prediction = (
                                 f3_failure_prediction(sample["id"], enums)
-                                if format_version == "F3" else empty_prediction(sample["id"], enums)
+                                if field_format else empty_prediction(sample["id"], enums)
                             )
                             status = "server_prompt_token_mismatch"
                             server_prompt_token_mismatch_ids.append(sample["id"])
@@ -1896,7 +1932,7 @@ def main() -> None:
                         raise
                     prediction = (
                         f3_failure_prediction(sample["id"], enums)
-                        if format_version == "F3" else empty_prediction(sample["id"], enums)
+                        if field_format else empty_prediction(sample["id"], enums)
                     )
                     status = "template_equivalence_failure"
                     template_equivalence_failure_ids.append(sample["id"])
@@ -1906,7 +1942,7 @@ def main() -> None:
                         raise
                     prediction = (
                         f3_failure_prediction(sample["id"], enums)
-                        if format_version == "F3" else empty_prediction(sample["id"], enums)
+                        if field_format else empty_prediction(sample["id"], enums)
                     )
                     status = "generation_failure"
                     error_type = type(exc).__name__
@@ -1919,11 +1955,22 @@ def main() -> None:
                         prediction, f3_parse_status, strict_format_parse_success, format_failure_code = (
                             parse_f3_prediction(sample["id"], decoded, enums)
                         )
+                        parser_status = f3_parse_status
                         verified_end = stop_reason in {"eos", "server_finish_reason:stop"}
                         truncated = not verified_end
                         if strict_format_parse_success and truncated:
-                            f3_parse_status = "response_truncated"
-                        status = f3_parse_status
+                            parser_status = "response_truncated"
+                        status = parser_status
+                    elif format_version == "F4":
+                        prediction, f3_parse_status, strict_format_parse_success, format_failure_code = (
+                            parse_f4_prediction(sample["id"], decoded, enums)
+                        )
+                        parser_status = f3_parse_status
+                        verified_end = stop_reason in {"eos", "server_finish_reason:stop"}
+                        truncated = not verified_end
+                        if strict_format_parse_success and truncated:
+                            parser_status = "response_truncated"
+                        status = parser_status
                     else:
                         prediction, parse_failed, invalid_label = parse_prediction(sample["id"], decoded, enums)
                         if parse_failed:
@@ -1932,7 +1979,7 @@ def main() -> None:
                             invalid_label_ids.append(sample["id"])
                         status = "parse_failure" if parse_failed else ("invalid_label" if invalid_label else "success")
 
-            if format_version == "F3":
+            if field_format:
                 f3_parse_successes.append(strict_format_parse_success)
                 if f3_parse_status is not None:
                     f3_parse_statuses.append(f3_parse_status)
@@ -1961,9 +2008,9 @@ def main() -> None:
                 "server_prompt_tokens": server_details.get("server_prompt_tokens"),
                 "server_completion_tokens": server_details.get("server_completion_tokens"),
             }
-            if format_version == "F3":
+            if field_format:
                 sample_diagnostic["selection_prompt_tokens"] = selection.get("selection_prompt_tokens")
-                sample_diagnostic["raw_f3_parse_status"] = f3_parse_status
+                sample_diagnostic[f"raw_{format_version.lower()}_parse_status"] = f3_parse_status
             sample_diagnostics.append(sample_diagnostic)
             raw_record = None
             if raw_output_path is not None:
@@ -1980,11 +2027,11 @@ def main() -> None:
                     "error_type": error_type,
                     "failure_category": failure_category,
                 }
-                if format_version == "F3":
+                if field_format:
                     raw_record.update({
-                        "format_version": "F3",
+                        "format_version": format_version,
                         "selection_prompt_tokens": selection.get("selection_prompt_tokens"),
-                        "f3_parse_status": f3_parse_status,
+                        field_parse_status_key: f3_parse_status,
                         "strict_format_parse_success": strict_format_parse_success,
                         "format_failure_code": format_failure_code,
                     })
@@ -2068,6 +2115,8 @@ def main() -> None:
             "completion_field_order": (
                 ["E", "P", "I", "S", "R"]
                 if format_version == "F3"
+                else ["Emotion", "Personality", "Interests", "Style", "Response"]
+                if format_version == "F4"
                 else ["emotion_label", "user_profile", "response_text", "memory_refs"]
             ),
             "submission_key_order_is_scoring_semantics": False,
@@ -2117,8 +2166,8 @@ def main() -> None:
         },
         "sample_diagnostics": sample_diagnostics,
     }
-    if format_version == "F3":
-        report["raw_f3_protocol"] = {
+    if field_format:
+        report[f"raw_{format_version.lower()}_protocol"] = {
             "strict_parse_success_count": sum(f3_parse_successes),
             "strict_parse_success_rate_over_all_inputs": (
                 sum(f3_parse_successes) / len(samples) if samples else 0.0

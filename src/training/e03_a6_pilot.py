@@ -18,8 +18,11 @@ import yaml
 
 from participant import run_inference as inference
 from src.shared.f3_protocol import parse_f3
+from src.shared.f4_protocol import parse_f4
 from src.training.e03_a6_contract import (
     canonical_sha256,
+    validate_expanded_f4_pilot_config,
+    validate_expanded_f4_pilot_resume_manifest,
     validate_historical_pilot_selection,
     validate_expanded_pilot_config,
     validate_expanded_pilot_resume_manifest,
@@ -81,7 +84,9 @@ def _load_config(config_path: Path) -> dict[str, Any]:
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     if not isinstance(config, dict):
         raise ValueError("Pilot config must be a YAML object")
-    if config.get("training_scope") == "supplemental_pilot":
+    if config.get("experiment_id") == "E03-A6-F4-PILOT-EXPANDED":
+        validate_expanded_f4_pilot_config(config)
+    elif config.get("training_scope") == "supplemental_pilot":
         validate_expanded_pilot_config(config)
     else:
         validate_pilot_config(config)
@@ -96,6 +101,8 @@ def _training_code_facts() -> dict[str, Any]:
         "src/training/training_sft.py",
         "src/data/e03_a6_sft.py",
         "src/shared/f3_protocol.py",
+        "src/shared/f4_protocol.py",
+        "src/data/e03_a6_f4_sft.py",
         "src/shared/prompting.py",
         "participant/run_inference.py",
     )
@@ -153,6 +160,7 @@ def _load_pilot_assets(config: dict[str, Any]) -> dict[str, Any]:
     from src.training.training_sft import _select_sft_dev_rows, validate_train_row
 
     data_config = config["data"]
+    format_version = config["protocol"].get("format_version", "F3")
     dataset_dir = _project_path(data_config["dataset_dir"])
     manifest_path = _project_path(data_config["manifest"])
     data_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -260,6 +268,90 @@ def _load_pilot_assets(config: dict[str, Any]) -> dict[str, Any]:
 
     dev_path = dataset_dir / "dev.jsonl"
     dev_rows, dev_facts = _select_sft_dev_rows(config, dev_path)
+
+    f4_train_audits: list[dict[str, Any]] = []
+    f4_dev_audits: list[dict[str, Any]] = []
+    f4_prompt_path: Path | None = None
+    if format_version == "F4":
+        from src.data.e03_a6_f4_sft import build_f4_training_item
+
+        runner_config_path = _project_path(config["protocol"]["inference_config"])
+        runner_config = json.loads(runner_config_path.read_text(encoding="utf-8"))
+        f4_prompt_path = _project_path(runner_config["prompt"]["path"])
+        f4_prompt = f4_prompt_path.read_text(encoding="utf-8")
+        p0_prompt_path = _project_path("configs/prompts/p0.txt")
+        p0_prompt = p0_prompt_path.read_text(encoding="utf-8")
+        official_schema_path = _project_path("data/train/train_public.schema.json")
+        official_schema = json.loads(official_schema_path.read_text(encoding="utf-8"))
+        tokenizer, _ = _tokenizer(config)
+
+        def retokenize_f4(
+            chosen_rows: list[dict[str, Any]],
+            *,
+            normalized_path: Path,
+            f2_path: Path,
+            audit_path: Path,
+        ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+            chosen_ids = {row["sample_id"] for row in chosen_rows}
+            normalized_source = {
+                row["sample_id"]: row for row in _read_jsonl(normalized_path)
+                if row.get("sample_id") in chosen_ids
+            }
+            f2_source = {
+                row["sample_id"]: row for row in _read_jsonl(f2_path)
+                if row.get("sample_id") in chosen_ids
+            }
+            audit_source = {
+                row["sample_id"]: row for row in _read_jsonl(audit_path)
+                if row.get("sample_id") in chosen_ids
+            }
+            if any(set(source) != chosen_ids for source in (normalized_source, f2_source, audit_source)):
+                raise ValueError("F4 retokenization source rows do not cover the exact frozen cohort")
+            items: list[dict[str, Any]] = []
+            audits: list[dict[str, Any]] = []
+            for chosen in chosen_rows:
+                sample_id = chosen["sample_id"]
+                item, audit = build_f4_training_item(
+                    normalized_source[sample_id],
+                    f2_source[sample_id],
+                    p0_prompt=p0_prompt,
+                    f4_prompt=f4_prompt,
+                    prompt_cap=int(config["protocol"]["max_prompt_tokens"]),
+                    sequence_cap=int(config["protocol"]["max_train_seq_length"]),
+                    tokenizer=tokenizer,
+                    official_schema=official_schema,
+                    selected_start_index=int(audit_source[sample_id]["selected_start_index"]),
+                )
+                items.append(item)
+                audits.append(audit)
+            return items, audits
+
+        ordered_rows, f4_train_audits = retokenize_f4(
+            selection_rows,
+            normalized_path=normalized_path,
+            f2_path=_project_path(data_config["historical_f2_train"]),
+            audit_path=dataset_dir / "audit_train.jsonl",
+        )
+        f2_dev_path = _project_path(data_config["historical_f2_dev"])
+        dev_rows, f4_dev_audits = retokenize_f4(
+            dev_rows,
+            normalized_path=_project_path(data_config["normalized_dev"]),
+            f2_path=f2_dev_path,
+            audit_path=dataset_dir / "audit_dev.jsonl",
+        )
+        f4_audit_by_id = {row["sample_id"]: row for row in f4_train_audits}
+        for metadata in selected_metadata:
+            source = f4_audit_by_id[metadata["sample_id"]]
+            metadata.update({
+                "f4_prompt_length": source["f4_prompt_tokens"],
+                "f4_completion_length": source["f4_completion_tokens"],
+                "f4_sequence_length": source["f4_sequence_tokens"],
+                "f4_completion_round_trip_lossless": source["completion_round_trip_lossless"],
+                "f4_prompt_labels_masked": source["prompt_labels_masked"],
+            })
+    elif format_version != "F3":
+        raise ValueError(f"unsupported A6 Pilot format version: {format_version}")
+
     dev_id_order = [row["sample_id"] for row in dev_rows]
     dev_selection = {
         **dev_facts,
@@ -277,6 +369,14 @@ def _load_pilot_assets(config: dict[str, Any]) -> dict[str, Any]:
     }
     if expanded:
         source_paths["historical_f2_train"] = _project_path(data_config["historical_f2_train"])
+    if format_version == "F4":
+        source_paths.update({
+            "historical_f2_dev": _project_path(data_config["historical_f2_dev"]),
+            "f4_prompt": f4_prompt_path,
+            "f4_training_item_builder": _project_path("src/data/e03_a6_f4_sft.py"),
+            "f4_protocol": _project_path("src/shared/f4_protocol.py"),
+            "p0_prompt": _project_path("configs/prompts/p0.txt"),
+        })
     facts = {f"{name}_sha256": _sha256(path) for name, path in source_paths.items()}
     facts.update({
         "historical_selection_rows_sha256": selection_sha,
@@ -305,6 +405,16 @@ def _load_pilot_assets(config: dict[str, Any]) -> dict[str, Any]:
             "base_sample_ids_sha256": canonical_sha256(pilot_ids),
             "added_sample_count": len(added_ids),
             "added_sample_ids_sha256": canonical_sha256(added_ids),
+        })
+    if format_version == "F4":
+        facts.update({
+            "format_version": "F4",
+            "f4_train_count": len(ordered_rows),
+            "f4_train_rows_sha256": canonical_sha256(ordered_rows),
+            "f4_train_audits_sha256": canonical_sha256(f4_train_audits),
+            "f4_dev_count": len(dev_rows),
+            "f4_dev_rows_sha256": canonical_sha256(dev_rows),
+            "f4_dev_audits_sha256": canonical_sha256(f4_dev_audits),
         })
     return {
         "train_rows": ordered_rows,
@@ -387,14 +497,19 @@ def _source_identity(
     tokenizer_facts: dict[str, Any],
 ) -> dict[str, Any]:
     code_facts = _training_code_facts()
-    f3_prompt_path = _project_path("configs/prompts/p_a6_f3.txt")
+    format_version = config["protocol"].get("format_version", "F3")
+    prompt_path = _project_path(
+        "configs/prompts/p_a6_f3.txt" if format_version == "F3" else "configs/prompts/p_a6_f4.txt"
+    )
     p0_prompt_path = _project_path("configs/prompts/p0.txt")
     runner_config_path = _project_path(config["protocol"]["inference_config"])
     runner_config = json.loads(runner_config_path.read_text(encoding="utf-8"))
-    if runner_config.get("format_version") != "F3":
-        raise ValueError("Pilot inference configuration must explicitly select F3")
-    if runner_config.get("prompt", {}).get("sha256") != _sha256(f3_prompt_path):
-        raise ValueError("Pilot Runner F3 prompt identity differs from the prepared data")
+    if runner_config.get("format_version") != format_version:
+        raise ValueError(f"Pilot inference configuration must explicitly select {format_version}")
+    if runner_config.get("prompt", {}).get("sha256") != _sha256(prompt_path):
+        raise ValueError(f"Pilot Runner {format_version} prompt identity differs from the prepared data")
+    if format_version == "F4":
+        inference.load_runtime_protocol(runner_config)
     if runner_config.get("selection_prompt", {}).get("version") != "P0" or runner_config.get("selection_prompt", {}).get("sha256") != _sha256(p0_prompt_path):
         raise ValueError("Pilot Runner history selector differs from the frozen P0/T1 identity")
     identity = {
@@ -402,14 +517,14 @@ def _source_identity(
         "training_code_files": code_facts["files"],
         "training_code_sha256": code_facts["sha256"],
         "data": assets["data_facts"],
-        "prompt_f3_sha256": _sha256(f3_prompt_path),
+        f"prompt_{format_version.lower()}_sha256": _sha256(prompt_path),
         "prompt_p0_sha256": _sha256(p0_prompt_path),
         "runner_config_sha256": _sha256(runner_config_path),
         "tokenizer_signature_sha256": tokenizer_facts["signature_sha256"],
         "tokenizer_template_sha256": tokenizer_facts["template_sha256"],
         "base_weight_sha256": _base_identity(config)["observed_weight_hash"],
         "training_scope": config["training_scope"],
-        "format_version": "F3",
+        "format_version": format_version,
         "init_adapter": None,
         "resume_from_checkpoint": None,
     }
@@ -419,16 +534,19 @@ def _source_identity(
         raise ValueError("Pilot Tokenizer signature differs from the frozen D0.4.2 identity")
     if tokenizer_facts["template_sha256"] != "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8":
         raise ValueError("Pilot Chat Template differs from the frozen D0.4.2 identity")
-    if identity["prompt_f3_sha256"] != "5779cc2ede7d1d14991b6760b7975680381293df2947b3eb6ca3a0f33d14e8a4":
+    if format_version == "F3" and identity["prompt_f3_sha256"] != "5779cc2ede7d1d14991b6760b7975680381293df2947b3eb6ca3a0f33d14e8a4":
         raise ValueError("Pilot F3 prompt differs from the prepared dataset identity")
+    if format_version == "F4" and identity["prompt_f4_sha256"] != runner_config["prompt"]["sha256"]:
+        raise ValueError("Pilot F4 prompt differs from its versioned inference config")
     if identity["prompt_p0_sha256"] != "d427e4996d0075a3adfe03ae25881d093687a6565f5b037f605accecc84c70b2":
         raise ValueError("Pilot P0 history-selection prompt differs from the frozen baseline")
     return identity
 
 
 def _run_root(run_id: str) -> Path:
-    if not run_id.startswith("E03-A6-F3-PILOT-") or len(run_id) > 96:
-        raise ValueError("Pilot Run ID must start with E03-A6-F3-PILOT- and remain under 96 characters")
+    allowed_prefixes = ("E03-A6-F3-PILOT-", "E03-A6-F4-PILOT-")
+    if not run_id.startswith(allowed_prefixes) or len(run_id) > 96:
+        raise ValueError("Pilot Run ID must use an isolated A6 F3/F4 prefix and remain under 96 characters")
     root = _project_path("outputs/training") / run_id
     if not root.is_relative_to(_project_path("outputs/training")):
         raise ValueError("Pilot Run path escaped outputs/training")
@@ -567,7 +685,8 @@ def _write_selected_files(run_root: Path, assets: dict[str, Any]) -> None:
         "selection_rule": assets["historical_selection"]["selection_rule"],
         "rows": rows,
         "historical_f2_rows_sha256": assets["historical_selection"]["sha256"],
-        "f3_enriched_rows_sha256": canonical_sha256(rows),
+        f"{assets['data_facts'].get('format_version', 'F3').lower()}_enriched_rows_sha256": canonical_sha256(rows),
+        "format_version": assets["data_facts"].get("format_version", "F3"),
         "sample_ids_sha256": assets["data_facts"]["selected_sample_ids_sha256"],
     }
     if assets.get("supplemental_selection"):
@@ -585,24 +704,26 @@ def _write_selected_files(run_root: Path, assets: dict[str, Any]) -> None:
 
 
 def _checkpoint_identity(source_identity: dict[str, Any], run_id: str) -> dict[str, Any]:
+    format_version = source_identity["format_version"]
+    data = source_identity["data"]
     return {
         "run_id": run_id,
         "training_code_sha256": source_identity["training_code_sha256"],
         "config_sha256": source_identity["run_config_sha256"],
         "dataset_manifest_sha256": source_identity["data"]["f3_manifest_sha256"],
-        "train_data_sha256": source_identity["data"]["f3_train_sha256"],
-        "dev_data_sha256": source_identity["data"]["f3_dev_sha256"],
-        "selected_samples_sha256": source_identity["data"].get(
+        "train_data_sha256": data.get("f4_train_rows_sha256", data["f3_train_sha256"]),
+        "dev_data_sha256": data.get("f4_dev_rows_sha256", data["f3_dev_sha256"]),
+        "selected_samples_sha256": data.get(
             "selected_selection_rows_sha256",
-            source_identity["data"]["historical_selection_rows_sha256"],
+            data["historical_selection_rows_sha256"],
         ),
-        "selected_ids_sha256": source_identity["data"]["selected_sample_ids_sha256"],
-        "sft_dev_ids_sha256": source_identity["data"]["sft_dev_ids_sha256"],
+        "selected_ids_sha256": data["selected_sample_ids_sha256"],
+        "sft_dev_ids_sha256": data["sft_dev_ids_sha256"],
         "base_weight_sha256": source_identity["base_weight_sha256"],
         "tokenizer_signature_sha256": source_identity["tokenizer_signature_sha256"],
         "tokenizer_template_sha256": source_identity["tokenizer_template_sha256"],
-        "prompt_f3_sha256": source_identity["prompt_f3_sha256"],
-        "format_version": "F3",
+        f"prompt_{format_version.lower()}_sha256": source_identity[f"prompt_{format_version.lower()}_sha256"],
+        "format_version": format_version,
         "init_adapter": None,
     }
 
@@ -619,7 +740,7 @@ def _new_run_manifest(
         "run_id": run_id,
         "experiment_id": config["experiment_id"],
         "training_scope": config["training_scope"],
-        "format_version": "F3",
+        "format_version": config["protocol"]["format_version"],
         "status": "running",
         "stage": "preflight_passed",
         "created_at_utc": _now(),
@@ -646,7 +767,14 @@ def _new_run_manifest(
     }
 
 
-def _probe_samples(model: Any, tokenizer: Any, samples: list[dict[str, Any]], max_new_tokens: int) -> list[dict[str, Any]]:
+def _probe_samples(
+    model: Any,
+    tokenizer: Any,
+    samples: list[dict[str, Any]],
+    max_new_tokens: int,
+    *,
+    format_version: str = "F3",
+) -> list[dict[str, Any]]:
     from src.training.training_sft import _capture_probe
 
     rows = []
@@ -658,7 +786,8 @@ def _probe_samples(model: Any, tokenizer: Any, samples: list[dict[str, Any]], ma
         try:
             from src.shared.f3_protocol import submission_enums
 
-            parsed = parse_f3(result["raw_text"], submission_enums(inference.load_submission_schema()))
+            parser = parse_f3 if format_version == "F3" else parse_f4
+            parsed = parser(result["raw_text"], submission_enums(inference.load_submission_schema()))
         except Exception as exc:
             status = getattr(exc, "code", "format_parse_failure")
         rows.append({
@@ -670,7 +799,7 @@ def _probe_samples(model: Any, tokenizer: Any, samples: list[dict[str, Any]], ma
             "raw_text": result["raw_text"],
             "eos_generated": int(tokenizer.eos_token_id) in result["generated_token_ids"],
             "parse_status": status,
-            "parsed_f3": parsed,
+            f"parsed_{format_version.lower()}": parsed,
         })
     return rows
 
@@ -717,8 +846,10 @@ def _verify_microfit_gate(config: dict[str, Any], assets: dict[str, Any]) -> dic
 def execute_pilot_dry_step(config_path: Path, dry_step_run_id: str) -> Path:
     config_path = config_path.resolve()
     config = _load_config(config_path)
-    if not dry_step_run_id.startswith("E03-A6-F3-PILOT-DRYSTEP-") or len(dry_step_run_id) > 96:
-        raise ValueError("dry-step Run ID must start with E03-A6-F3-PILOT-DRYSTEP-")
+    format_version = config["protocol"].get("format_version", "F3")
+    dry_step_prefix = f"E03-A6-{format_version}-PILOT-DRYSTEP-"
+    if not dry_step_run_id.startswith(dry_step_prefix) or len(dry_step_run_id) > 96:
+        raise ValueError(f"dry-step Run ID must start with {dry_step_prefix}")
     root = _project_path("outputs/e03_a6/pilot_preflight") / dry_step_run_id
     if root.exists():
         raise FileExistsError(f"dry-step Run ID already exists; refusing overwrite: {root}")
@@ -881,7 +1012,12 @@ def _verify_dry_step_gate(
     *,
     expected_training_code_sha256: str | None = None,
 ) -> dict[str, Any]:
-    if not isinstance(dry_step_run_id, str) or not dry_step_run_id.startswith("E03-A6-F3-PILOT-DRYSTEP-"):
+    dry_step_prefix = (
+        "E03-A6-F3-PILOT-DRYSTEP-"
+        if config["protocol"].get("format_version") == "F3"
+        else "E03-A6-F4-PILOT-DRYSTEP-"
+    )
+    if not isinstance(dry_step_run_id, str) or not dry_step_run_id.startswith(dry_step_prefix):
         raise ValueError("Pilot Train requires a passing A6 Trainer dry-step Run")
     result_path = _project_path("outputs/e03_a6/pilot_preflight") / dry_step_run_id / "dry_step_result.json"
     if not result_path.is_file():
@@ -957,12 +1093,14 @@ def _execute_pilot_training(
         manifest = _load_manifest(run_root)
         dry_step_run_id = manifest.get("dry_step_prerequisite", {}).get("run_id")
         if expanded:
-            validate_expanded_pilot_resume_manifest(
-                manifest,
-                run_id=run_id,
-                checkpoint_name=f"checkpoint-{pause_step}",
-                pause_step=pause_step,
-                max_steps=max_steps,
+            resume_validator = (
+                validate_expanded_f4_pilot_resume_manifest
+                if config["protocol"].get("format_version") == "F4"
+                else validate_expanded_pilot_resume_manifest
+            )
+            resume_validator(
+                manifest, run_id=run_id, checkpoint_name=f"checkpoint-{pause_step}",
+                pause_step=pause_step, max_steps=max_steps,
             )
         else:
             _recover_pretrain_resume_failure(run_root, manifest)
@@ -1163,6 +1301,7 @@ def _execute_pilot_training(
             tokenizer,
             assets["train_rows"][:4],
             int(config["evaluation"]["probe_max_new_tokens"]),
+            format_version=config["protocol"].get("format_version", "F3"),
         )
         _write_json(run_root / "generation_probe.json", {
             "run_id": run_id,
@@ -1323,7 +1462,10 @@ def execute_pilot_reload_check(config_path: Path, run_id: str) -> Path:
             canonical_sha256(prompt_ids) == old_probe["prompt_token_ids_sha256"]
             and prompt_ids == old_probe["prompt_token_ids"]
         )
-        actual = _probe_samples(loaded, tokenizer, [row], int(previous_probe["max_new_tokens"]))[0]
+        actual = _probe_samples(
+            loaded, tokenizer, [row], int(previous_probe["max_new_tokens"]),
+            format_version=config["protocol"].get("format_version", "F3"),
+        )[0]
         actual_probes.append(actual)
     token_match = [
         old["generated_token_ids"] == actual["generated_token_ids"]

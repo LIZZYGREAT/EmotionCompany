@@ -1,0 +1,107 @@
+version: E03-A6-F4-full-field-pilot-v1
+experiment_id: E03-A6-F4-PILOT-EXPANDED
+training_scope: supplemental_pilot
+status: ready_for_manual_supplemental_pilot_preflight
+
+base_model:
+  model_id: Qwen/Qwen3-1.7B
+  revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  local_path: participant/model
+  expected_weight_sha256: 005d20550c04f4e246e5b434448786b44a0196b47d758d0acc77aba279e5bbc5
+
+data:
+  dataset_dir: data/processed/sft/e03_a6_f3
+  manifest: data/processed/sft/e03_a6_f3/manifest.json
+  normalized_train: data/processed/v1/train.jsonl
+  normalized_dev: data/processed/v1/dev.jsonl
+  historical_f2_train: data/processed/sft/v1/train.jsonl
+  historical_f2_dev: data/processed/sft/v1/dev.jsonl
+  historical_pilot_selection: outputs/training/E01-B-PILOT-20261028-092248/selected_samples.json
+  expected_historical_selection_sha256: b53336224071914500aa91a4ad82c6f9e6334b11eb5a69231a6b4e20ba09314e
+  microfit_run_id: E03-A6-F3-MICROFIT-20261105-03
+  output_root: outputs/training
+
+protocol:
+  format_version: F4
+  inference_config: participant/configs/e03_a6_f4_inference_config.json
+  max_prompt_tokens: 1280
+  max_train_seq_length: 2048
+  eos_token_id: 151645
+  packing: false
+  padding_free: false
+
+quantization:
+  method: bitsandbytes_4bit
+  quant_type: nf4
+  compute_dtype: bfloat16
+  use_double_quant: true
+  device_map:
+    "": 0
+  max_cuda_memory_fraction: 0.92
+
+lora:
+  r: 8
+  alpha: 16
+  dropout: 0.0
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  bias: none
+  checkpoint_dtype: float32
+
+optimizer:
+  name: AdamW
+  learning_rate: 0.0001
+  lr_scheduler: constant
+  warmup_steps: 0
+  weight_decay: 0.0
+
+training:
+  seed: 42
+  per_device_micro_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 4
+  max_optimizer_steps: 256
+  epochs: 1
+  save_interval_steps: 32
+  save_total_limit: 2
+  gradient_checkpointing: true
+  evaluation_interval_steps: 32
+  parameter_check_interval_steps: 16
+  max_training_seconds: 7200
+  min_free_disk_gb: 2
+  checkpointing: true
+  train_sampling_strategy: random
+  pause_after_step: 64
+  sample_selection:
+    method: seeded_length_deciles_v1
+    count: 1024
+    seed: 42
+    length_bins: 10
+    base_count: 512
+    base_rows_sha256: b53336224071914500aa91a4ad82c6f9e6334b11eb5a69231a6b4e20ba09314e
+    expected_rows_sha256: 37cf91d4ced6d7a286cf4b74faf8a65294fa63e3a3ca6b7ef1663095ec1848a4
+
+evaluation:
+  max_new_tokens: 1200
+  probe_max_new_tokens: 64
+  do_sample: false
+  sft_dev_loss_rows: 256
+  sft_dev_loss_seed: 43
+  pilot_dev_generation_rows: 160
+  full_generation_smoke_rows: 32
+  autocast_adapter_dtype: true
+
+pilot_quality_gates:
+  fast:
+    min_strict_f3_parse_rate: 0.90
+    min_cases_with_nonempty_profile_prediction: 16
+    min_profile_true_positives: 5
+    max_profile_false_positives: 30
+    min_profile_micro_precision: 0.20
+    min_emotion_accuracy: 0.30
+    max_single_emotion_prediction_share: 0.80
+  full_generation_smoke:
+    min_strict_f3_parse_rate: 0.95
+    min_official_schema_valid_rate: 1.0
+    min_prefix_full_equivalence_rate: 1.0
+    min_nonempty_response_rate: 0.95
+    min_eos_rate: 0.90

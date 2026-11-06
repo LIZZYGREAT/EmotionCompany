@@ -126,8 +126,10 @@ def test_a6_f3_adapter_dtype_is_preserved_for_both_pilot_scopes_only():
 
     baseline = yaml.safe_load((ROOT / "configs/training/e03_a6_f3_pilot.yaml").read_text())
     expanded = yaml.safe_load((ROOT / "configs/training/e03_a6_f3_expanded_pilot.yaml").read_text())
+    full_field = yaml.safe_load((ROOT / "configs/training/e03_a6_f4_full_field_pilot.yaml").read_text())
     assert _uses_a6_f3_adapter_dtype(baseline)
     assert _uses_a6_f3_adapter_dtype(expanded)
+    assert _uses_a6_f3_adapter_dtype(full_field)
     assert not _uses_a6_f3_adapter_dtype({"experiment_id": "E01-B-PILOT", "training_scope": "pilot"})
 
 

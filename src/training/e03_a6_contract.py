@@ -12,6 +12,7 @@ from typing import Any
 MICROFIT_EXPERIMENT_ID = "E03-A6-F3-MICROFIT"
 PILOT_EXPERIMENT_ID = "E03-A6-F3-PILOT"
 EXPANDED_PILOT_EXPERIMENT_ID = "E03-A6-F3-PILOT-EXPANDED"
+EXPANDED_F4_PILOT_EXPERIMENT_ID = "E03-A6-F4-PILOT-EXPANDED"
 HISTORICAL_SELECTION_ROWS_SHA256 = "b53336224071914500aa91a4ad82c6f9e6334b11eb5a69231a6b4e20ba09314e"
 EXPANDED_SELECTION_ROWS_SHA256 = "37cf91d4ced6d7a286cf4b74faf8a65294fa63e3a3ca6b7ef1663095ec1848a4"
 
@@ -202,6 +203,31 @@ def validate_expanded_pilot_config(config: Mapping[str, Any]) -> None:
         "expected_rows_sha256": HISTORICAL_SELECTION_ROWS_SHA256,
     }
     validate_pilot_config(baseline)
+
+
+def validate_expanded_f4_pilot_config(config: Mapping[str, Any]) -> None:
+    """Validate a full-field F4 follow-up with the same 1,024-row Pilot budget."""
+    if config.get("version") != "E03-A6-F4-full-field-pilot-v1":
+        raise ValueError("unsupported F4 full-field Pilot config version")
+    if config.get("experiment_id") != EXPANDED_F4_PILOT_EXPERIMENT_ID:
+        raise ValueError("F4 full-field Pilot must use its isolated experiment ID")
+    if config.get("training_scope") != "supplemental_pilot":
+        raise ValueError("F4 full-field Pilot must declare supplemental_pilot scope")
+    if config.get("protocol", {}).get("format_version") != "F4":
+        raise ValueError("F4 full-field Pilot must explicitly select format_version=F4")
+    if config.get("protocol", {}).get("inference_config") != (
+        "participant/configs/e03_a6_f4_inference_config.json"
+    ):
+        raise ValueError("F4 full-field Pilot must use its isolated F4 inference config")
+    if config.get("data", {}).get("historical_f2_dev") != "data/processed/sft/v1/dev.jsonl":
+        raise ValueError("F4 full-field Pilot must use the frozen F2 Dev source")
+
+    baseline = deepcopy(dict(config))
+    baseline["version"] = "E03-A6-F3-expanded-pilot-v1"
+    baseline["experiment_id"] = EXPANDED_PILOT_EXPERIMENT_ID
+    baseline["protocol"]["format_version"] = "F3"
+    baseline["protocol"]["inference_config"] = "participant/configs/e03_a6_f3_inference_config.json"
+    validate_expanded_pilot_config(baseline)
 def validate_pilot_resume_manifest(
     manifest: Mapping[str, Any], *, run_id: str, checkpoint_name: str,
 ) -> None:
@@ -258,6 +284,38 @@ def validate_expanded_pilot_resume_manifest(
         raise ValueError("supplemental Pilot resume cannot alter or authorize Full training")
 
 
+def validate_expanded_f4_pilot_resume_manifest(
+    manifest: Mapping[str, Any], *, run_id: str, checkpoint_name: str,
+    pause_step: int = 64, max_steps: int = 256,
+) -> None:
+    if not run_id.startswith("E03-A6-F4-PILOT-EXPANDED-") or manifest.get("run_id") != run_id:
+        raise ValueError("resume Run ID does not match the F4 full-field Pilot")
+    if (
+        manifest.get("experiment_id") != EXPANDED_F4_PILOT_EXPERIMENT_ID
+        or manifest.get("training_scope") != "supplemental_pilot"
+        or manifest.get("format_version") != "F4"
+    ):
+        raise ValueError("resume manifest is not the F4 full-field supplemental Pilot")
+    if manifest.get("status") != "interrupted" or manifest.get("stage") != "checkpoint_saved":
+        raise ValueError("F4 resume requires the same Pilot paused at its verified checkpoint")
+    if (
+        manifest.get("optimizer_steps") != pause_step
+        or manifest.get("max_optimizer_steps") != max_steps
+        or manifest.get("stop_reason") != "requested_checkpoint_pause"
+    ):
+        raise ValueError("F4 Pilot resume progress differs from its frozen step boundary")
+    expected_name = f"checkpoint-{pause_step}"
+    if checkpoint_name != expected_name:
+        raise ValueError("F4 Pilot resume must use its configured same-Run pause checkpoint")
+    last_checkpoint = manifest.get("last_checkpoint")
+    if not isinstance(last_checkpoint, str) or not last_checkpoint.replace("\\", "/").endswith(
+        f"/{run_id}/trainer/{expected_name}"
+    ):
+        raise ValueError("F4 Pilot checkpoint path does not belong to this Run")
+    if manifest.get("full_training_status") != "not_authorized_not_run":
+        raise ValueError("F4 supplemental resume cannot alter or authorize Full training")
+
+
 def validate_historical_pilot_selection(selection: Mapping[str, Any]) -> list[str]:
     rows = selection.get("rows")
     if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)) or len(rows) != 512:
@@ -289,3 +347,17 @@ def f3_prefix_through_r_marker(
             boundary = marker + len("\nR=")
             return list(token_ids[:end]), decoded[:boundary]
     raise ValueError("generated token IDs did not complete the F3 R= boundary")
+
+
+def f4_prefix_through_response_marker(
+    token_ids: Sequence[int], decode_prefix: Any,
+) -> tuple[list[int], str]:
+    """Return generated IDs through the token that completes ``\nResponse=``."""
+    marker_text = "\nResponse="
+    for end in range(1, len(token_ids) + 1):
+        decoded = decode_prefix(list(token_ids[:end]))
+        marker = decoded.find(marker_text)
+        if marker >= 0:
+            boundary = marker + len(marker_text)
+            return list(token_ids[:end]), decoded[:boundary]
+    raise ValueError("generated token IDs did not complete the F4 Response= boundary")
