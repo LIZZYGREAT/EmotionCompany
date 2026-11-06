@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 
 MICROFIT_EXPERIMENT_ID = "E03-A6-F3-MICROFIT"
 PILOT_EXPERIMENT_ID = "E03-A6-F3-PILOT"
+EXPANDED_PILOT_EXPERIMENT_ID = "E03-A6-F3-PILOT-EXPANDED"
 HISTORICAL_SELECTION_ROWS_SHA256 = "b53336224071914500aa91a4ad82c6f9e6334b11eb5a69231a6b4e20ba09314e"
+EXPANDED_SELECTION_ROWS_SHA256 = "37cf91d4ced6d7a286cf4b74faf8a65294fa63e3a3ca6b7ef1663095ec1848a4"
 
 
 def canonical_sha256(value: Any) -> str:
@@ -157,6 +160,48 @@ def validate_pilot_config(config: Mapping[str, Any]) -> None:
         raise ValueError("Pilot quality review thresholds must remain fixed and versioned before training")
 
 
+def validate_expanded_pilot_config(config: Mapping[str, Any]) -> None:
+    """Validate the separately identified, nested 1,024-row / 256-step follow-up Pilot."""
+    if config.get("version") != "E03-A6-F3-expanded-pilot-v1":
+        raise ValueError("unsupported F3 expanded Pilot config version")
+    if config.get("experiment_id") != EXPANDED_PILOT_EXPERIMENT_ID:
+        raise ValueError("expanded Pilot must use its isolated experiment ID")
+    if config.get("training_scope") != "supplemental_pilot":
+        raise ValueError("expanded Pilot must declare supplemental_pilot scope")
+    training = config.get("training", {})
+    if (
+        training.get("max_optimizer_steps") != 256
+        or training.get("pause_after_step") != 64
+        or training.get("epochs") != 1
+    ):
+        raise ValueError("expanded Pilot budget is frozen at one 1,024-row pass and a step-64 checkpoint pause")
+    selection = training.get("sample_selection", {})
+    if selection != {
+        "method": "seeded_length_deciles_v1",
+        "count": 1024,
+        "seed": 42,
+        "length_bins": 10,
+        "base_count": 512,
+        "base_rows_sha256": HISTORICAL_SELECTION_ROWS_SHA256,
+        "expected_rows_sha256": EXPANDED_SELECTION_ROWS_SHA256,
+    }:
+        raise ValueError("expanded Pilot selection must be the frozen nested 1,024-row cohort")
+
+    # Reuse the original Pilot contract to ensure every non-sample-size training
+    # setting, model identity, protocol gate, and quality threshold stays fixed.
+    baseline = deepcopy(dict(config))
+    baseline["version"] = "E03-A6-F3-pilot-v1"
+    baseline["experiment_id"] = PILOT_EXPERIMENT_ID
+    baseline["training_scope"] = "pilot"
+    baseline["training"]["max_optimizer_steps"] = 128
+    baseline["training"]["pause_after_step"] = 32
+    baseline["training"]["sample_selection"] = {
+        "method": "seeded_length_deciles_v1",
+        "count": 512,
+        "seed": 42,
+        "expected_rows_sha256": HISTORICAL_SELECTION_ROWS_SHA256,
+    }
+    validate_pilot_config(baseline)
 def validate_pilot_resume_manifest(
     manifest: Mapping[str, Any], *, run_id: str, checkpoint_name: str,
 ) -> None:
@@ -180,6 +225,37 @@ def validate_pilot_resume_manifest(
         raise ValueError("A6 Pilot resume is limited to its same-Run checkpoint-32")
     if manifest.get("full_training_status") != "not_authorized_not_run":
         raise ValueError("Pilot resume cannot alter or authorize the Full training boundary")
+
+
+def validate_expanded_pilot_resume_manifest(
+    manifest: Mapping[str, Any], *, run_id: str, checkpoint_name: str,
+    pause_step: int = 64, max_steps: int = 256,
+) -> None:
+    if not run_id.startswith("E03-A6-F3-PILOT-EXPANDED-") or manifest.get("run_id") != run_id:
+        raise ValueError("resume Run ID does not match the supplemental A6 Pilot")
+    if (
+        manifest.get("experiment_id") != EXPANDED_PILOT_EXPERIMENT_ID
+        or manifest.get("training_scope") != "supplemental_pilot"
+    ):
+        raise ValueError("resume manifest is not the 1,024-row supplemental Pilot")
+    if manifest.get("status") != "interrupted" or manifest.get("stage") != "checkpoint_saved":
+        raise ValueError("resume requires the same supplemental Run paused at its verified checkpoint")
+    if (
+        manifest.get("optimizer_steps") != pause_step
+        or manifest.get("max_optimizer_steps") != max_steps
+        or manifest.get("stop_reason") != "requested_checkpoint_pause"
+    ):
+        raise ValueError("supplemental Pilot resume progress differs from its frozen step boundary")
+    expected_name = f"checkpoint-{pause_step}"
+    if checkpoint_name != expected_name:
+        raise ValueError("supplemental Pilot resume must use its configured same-Run pause checkpoint")
+    last_checkpoint = manifest.get("last_checkpoint")
+    if not isinstance(last_checkpoint, str) or not last_checkpoint.replace("\\", "/").endswith(
+        f"/{run_id}/trainer/{expected_name}"
+    ):
+        raise ValueError("supplemental Pilot checkpoint path does not belong to this Run")
+    if manifest.get("full_training_status") != "not_authorized_not_run":
+        raise ValueError("supplemental Pilot resume cannot alter or authorize Full training")
 
 
 def validate_historical_pilot_selection(selection: Mapping[str, Any]) -> list[str]:

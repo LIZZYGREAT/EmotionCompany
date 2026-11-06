@@ -12,6 +12,8 @@ from src.training.e03_a6_contract import (
     MICROFIT_EXPERIMENT_ID,
     PILOT_EXPERIMENT_ID,
     canonical_sha256,
+    validate_expanded_pilot_config,
+    validate_expanded_pilot_resume_manifest,
     f3_prefix_through_r_marker,
     validate_historical_pilot_selection,
     validate_microfit_config,
@@ -105,6 +107,42 @@ def test_pilot_config_freezes_historical_ids_optimizer_and_128_step_budget():
     assert config["evaluation"]["pilot_dev_generation_rows"] == 160
 
 
+def test_expanded_pilot_config_freezes_nested_1024_rows_and_256_steps():
+    config = yaml.safe_load((ROOT / "configs/training/e03_a6_f3_expanded_pilot.yaml").read_text())
+    validate_expanded_pilot_config(config)
+    from scripts.e03_a6_f3_pilot_evaluate import _validate_training_config
+
+    _validate_training_config(config)
+    assert config["experiment_id"] == "E03-A6-F3-PILOT-EXPANDED"
+    assert config["training_scope"] == "supplemental_pilot"
+    assert config["training"]["sample_selection"]["count"] == 1024
+    assert config["training"]["sample_selection"]["base_count"] == 512
+    assert config["training"]["max_optimizer_steps"] == 256
+    assert config["training"]["pause_after_step"] == 64
+
+
+@pytest.mark.parametrize("mutation", [
+    {"training.max_optimizer_steps": 4048},
+    {"training.sample_selection.count": 2048},
+    {"training.pause_after_step": 128},
+    {"training_scope": "full"},
+])
+def test_expanded_pilot_rejects_scope_or_budget_drift(mutation):
+    config = yaml.safe_load((ROOT / "configs/training/e03_a6_f3_expanded_pilot.yaml").read_text())
+    changed = copy.deepcopy(config)
+    for path, value in mutation.items():
+        if "." in path:
+            parent_path, key = path.rsplit(".", 1)
+            parent = changed
+            for component in parent_path.split("."):
+                parent = parent[component]
+            parent[key] = value
+        else:
+            changed[path] = value
+    with pytest.raises(ValueError):
+        validate_expanded_pilot_config(changed)
+
+
 @pytest.mark.parametrize("mutation", [
     {"experiment_id": "E01-B-PILOT"},
     {"training.max_optimizer_steps": 4048},
@@ -150,6 +188,31 @@ def test_pilot_resume_requires_its_own_exact_checkpoint_32_manifest():
             changed,
             run_id=manifest["run_id"],
             checkpoint_name="checkpoint-32",
+        )
+
+
+def test_expanded_pilot_resume_requires_its_own_checkpoint_64():
+    run_id = "E03-A6-F3-PILOT-EXPANDED-20261106-01"
+    manifest = {
+        "run_id": run_id,
+        "experiment_id": "E03-A6-F3-PILOT-EXPANDED",
+        "training_scope": "supplemental_pilot",
+        "status": "interrupted",
+        "stage": "checkpoint_saved",
+        "optimizer_steps": 64,
+        "max_optimizer_steps": 256,
+        "stop_reason": "requested_checkpoint_pause",
+        "last_checkpoint": f"outputs/training/{run_id}/trainer/checkpoint-64",
+        "full_training_status": "not_authorized_not_run",
+    }
+    validate_expanded_pilot_resume_manifest(
+        manifest, run_id=run_id, checkpoint_name="checkpoint-64",
+    )
+    changed = copy.deepcopy(manifest)
+    changed["last_checkpoint"] = "outputs/training/other-run/trainer/checkpoint-64"
+    with pytest.raises(ValueError):
+        validate_expanded_pilot_resume_manifest(
+            changed, run_id=run_id, checkpoint_name="checkpoint-64",
         )
 
 

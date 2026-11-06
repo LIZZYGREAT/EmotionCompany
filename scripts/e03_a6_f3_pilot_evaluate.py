@@ -108,6 +108,18 @@ def _load_config(path: Path) -> dict[str, Any]:
     return value
 
 
+def _validate_training_config(training_config: dict[str, Any]) -> None:
+    from src.training.e03_a6_contract import (
+        validate_expanded_pilot_config,
+        validate_pilot_config,
+    )
+
+    if training_config.get("training_scope") == "supplemental_pilot":
+        validate_expanded_pilot_config(training_config)
+    else:
+        validate_pilot_config(training_config)
+
+
 def _load_assets(config: dict[str, Any]) -> dict[str, Any]:
     source = config["sources"]
     input_path = _resolve(source["input_path"])
@@ -163,13 +175,15 @@ def _load_assets(config: dict[str, Any]) -> dict[str, Any]:
     expected_training = config["training"]
     if (
         training_manifest.get("run_id") != expected_training["run_id"]
+        or training_manifest.get("experiment_id") != expected_training["expected_experiment_id"]
+        or training_manifest.get("training_scope") != expected_training["expected_training_scope"]
         or training_manifest.get("status") != expected_training["expected_status"]
         or training_manifest.get("stage") != expected_training["expected_stage"]
         or training_manifest.get("optimizer_steps") != expected_training["expected_optimizer_steps"]
         or training_manifest.get("base_weight_sha256_after_training") != expected_training["expected_base_weight_sha256"]
         or training_manifest.get("full_training_status") != "not_authorized_not_run"
     ):
-        raise ValueError("Pilot training manifest has not passed its frozen 128-step boundary")
+        raise ValueError("F3 Pilot training manifest has not passed its frozen training boundary")
     if (
         reload_check.get("status") != "passed"
         or reload_check.get("base_weights_unchanged") is not True
@@ -574,11 +588,10 @@ def run_evaluation(config_path: Path, config: dict[str, Any], mode: str) -> dict
         raise ValueError("mode must be fast or smoke")
     import torch
     from participant import run_inference as runner
-    from src.training.e03_a6_contract import validate_pilot_config
 
     assets = _load_assets(config)
     training_config = yaml.safe_load((assets["run_root"] / "config_snapshot.yaml").read_text(encoding="utf-8"))
-    validate_pilot_config(training_config)
+    _validate_training_config(training_config)
     if training_config.get("pilot_quality_gates") != config.get("pilot_quality_gates"):
         raise ValueError("Pilot evaluation gates differ from the values frozen before training")
     identity = _runtime_identity(config_path, config, assets, mode)
@@ -841,9 +854,7 @@ def run_evaluation(config_path: Path, config: dict[str, Any], mode: str) -> dict
 def run_preflight(config_path: Path, config: dict[str, Any]) -> dict[str, Any]:
     assets = _load_assets(config)
     training_config = yaml.safe_load((assets["run_root"] / "config_snapshot.yaml").read_text(encoding="utf-8"))
-    from src.training.e03_a6_contract import validate_pilot_config
-
-    validate_pilot_config(training_config)
+    _validate_training_config(training_config)
     if training_config.get("pilot_quality_gates") != config.get("pilot_quality_gates"):
         raise ValueError("evaluation quality gates differ from the values frozen before Pilot training")
     source_report = {
@@ -872,13 +883,12 @@ def run_preflight(config_path: Path, config: dict[str, Any]) -> dict[str, Any]:
 def score_existing_generation(config_path: Path, config: dict[str, Any], mode: str) -> dict[str, Any]:
     """Score a fully generated journal without loading a model or repeating inference."""
     import yaml
-    from src.training.e03_a6_contract import validate_pilot_config
 
     if mode not in {"fast", "smoke"}:
         raise ValueError("score mode must be fast or smoke")
     assets = _load_assets(config)
     training_config = yaml.safe_load((assets["run_root"] / "config_snapshot.yaml").read_text(encoding="utf-8"))
-    validate_pilot_config(training_config)
+    _validate_training_config(training_config)
     if training_config.get("pilot_quality_gates") != config.get("pilot_quality_gates"):
         raise ValueError("Pilot evaluation quality gates changed after training")
     mode_name = "fast-160" if mode == "fast" else "smoke-32"

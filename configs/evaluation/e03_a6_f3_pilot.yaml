@@ -3,6 +3,8 @@ experiment_id: E03-A6-F3-PILOT-20261106-01
 training:
   run_id: E03-A6-F3-PILOT-20261106-01
   run_root: outputs/training/E03-A6-F3-PILOT-20261106-01
+  expected_experiment_id: E03-A6-F3-PILOT
+  expected_training_scope: pilot
   expected_status: passed
   expected_stage: pilot_training_reloaded
   expected_optimizer_steps: 128
