@@ -1,0 +1,123 @@
+version: E03-A7-classifier-split-v1
+experiment_id: E03-A7-CLASSIFIER-SPLIT
+status: cpu_preflight_required
+authorization:
+  execution_enabled: false
+  gpu_preflight: requires_clean_sources_and_single_arm_ticket
+  initial_training: requires_bound_step_0512_ticket
+  continuation: requires_user_signed_node_receipt
+  official_val: prohibited
+identity:
+  base_model_id: Qwen/Qwen3-1.7B
+  base_model_revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  base_model_path: participant/model
+  pad_token_id: 151643
+  base_weight_sha256: 005d20550c04f4e246e5b434448786b44a0196b47d758d0acc77aba279e5bbc5
+  tokenizer_signature_sha256: 1662c9e99c6185441026a168b2dd6b09af103dc6dc3563b72f598411f14d1913
+  chat_template_sha256: a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8
+  p0_sha256: d427e4996d0075a3adfe03ae25881d093687a6565f5b037f605accecc84c70b2
+  train_schema_sha256: a9467e520b06a96859acaa2ff022e395d08ff6ad5e8ae3532a22cc24c630cada
+  output_schema_sha256: 91c42d56ae433212aab7905eabdbb96cf8463c2f887dc46b3f31647ab3a5d591
+  d03_manifest_sha256: 605867b5ab0162de05ea9e396bffd574cd4029c5adc3c29d851f41ff73a96b8d
+  normalized_train_sha256: 1f1030c146792b21c78d2cc2ced83d1e202670562e1b2344a44ed2d43892aaa2
+  d042_manifest_sha256: dd2ef98b33081a1606c431e34bede875cfb41217550ddcc6c27f01a5a5ee5210
+  d043_manifest_sha256: 26356695d527abb6f24c56f111fff92c8c0b51d0387a726491db6e477e6cfb97
+  excluded_ledger_sha256: db071514977dc4e5696f472540cc294a91dd9d493a99c1bfa33a23d9194326af
+  sft_train_sha256: 072076d1a74fe1e29e89a598d2e6acee7188624de0738bfecfe3ea19267f1e79
+  a5_config_sha256: 877b96fba1cdd5e91ec9b42a91acdb7c039ab958d9170dd265ee1e1ca2b34086
+  a5_audit_run_id: E03-A5-SUPERVISION-20261106-04
+  a5_audit_manifest_sha256: dbfd4e62bc3c9b56a4dcbd839d94205b2c62e84d34c0823d185d6f2f58a4b598
+  a5_supervision_sha256: ef63cc78425daa7a84e9e28af0ff70ec2dd35c31d586a64056cd7ea449c9b4c7
+  a5_split_sha256: 1a3f04ce824e2bbfd8170f5b98a607ae691422548967a18fe1a93bee5ff3e792
+  frozen_dev_ids_sha256: d3c84beb6227e87c0fd09e425619635cd9fc6bac5b087e3f1010fb089f4ff8d2
+  frozen_dev_input_sha256: 60b33016c53ca65203052c231717efecc07c441e33069a2cd4800148deaec355
+  frozen_dev_references_sha256: 21ce9928a17ea2a6852c7c96e4a291732a453145781f2b6061991f4fa9a3a9d2
+  frozen_dev_id_map_sha256: 13773ff4feb349819de4bc9e00d131603ad0943244c1cc0050b582c7ba777b23
+  a4_config_sha256: 03b0cae81ed9a077676f43e9a14d580a46c601b9e8ccff9445b9e20e8e252996
+  baseline_config_sha256: c8659debb30c2b3b46ed6a8c07600d8727ebabf95b0715af0e62454c13a2d785
+data:
+  normalized_train: data/processed/v1/train.jsonl
+  sft_train: data/processed/sft/v1/train.jsonl
+  train_schema: data/train/train_public.schema.json
+  output_schema: participant/templates/submission_schema.json
+  prompt: configs/prompts/p0.txt
+  a5_config: configs/experiments/e03_a5.yaml
+  a5_audit_root: outputs/diagnostics/e03_a5/E03-A5-SUPERVISION-20261106-04
+  a5_supervision: outputs/diagnostics/e03_a5/E03-A5-SUPERVISION-20261106-04/supervision.jsonl
+  a5_splits: outputs/diagnostics/e03_a5/E03-A5-SUPERVISION-20261106-04/conversation_splits.json
+  excluded_ledger: outputs/sft_data/v1/excluded_samples.jsonl
+  frozen_dev_input: outputs/diagnostics/e03_a3/E03-A3-DIAG-20261104-05/frozen_eval_input.jsonl
+  frozen_dev_references: outputs/diagnostics/e03_a3/E03-A3-DIAG-20261104-05/frozen_eval_references.jsonl
+  frozen_dev_id_map: outputs/diagnostics/e03_a3/E03-A3-DIAG-20261104-05/frozen_eval_id_map.jsonl
+  a4_config: configs/training/e03_a4_lr_stability.yaml
+  baseline_config: configs/evaluation/e03_profile_candidate.yaml
+  expected_d03_train_rows: 16312
+  expected_sft_train_rows: 16192
+  expected_fit_rows: 11304
+  expected_calibration_rows: 2455
+  expected_internal_holdout_rows: 2433
+  expected_dev_rows: 224
+  expected_dev_conversations: 101
+protocol:
+  prompt_version: P0
+  format_version: F2
+  truncation_version: T1
+  history_policy: T1_recent_contiguous_complete_message_suffix
+  max_prompt_tokens: 1280
+  thinking: false
+  gold_completion_in_model_input: false
+model:
+  quantization: NF4
+  compute_dtype: bfloat16
+  double_quant: true
+  device_map: single_cuda_device
+  lora:
+    r: 8
+    alpha: 16
+    dropout: 0.0
+    bias: none
+    target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+    init_seed: 42
+  heads:
+    profile_labels: 33
+    emotion_labels: 16
+    dtype: float32
+    profile_seed: 42
+    emotion_seed: 43
+training:
+  pair_id: E03-A7-PAIR-001
+  first_stop_step: 512
+  stage_steps: [512, 1024, 2048, 4048]
+  fit_epoch_boundary_step: 2826
+  fit_sample_count: 11304
+  max_optimizer_steps: 4048
+  sample_exposures_at_max: 16192
+  unique_fit_ids: 11304
+  micro_batch_size: 1
+  gradient_accumulation_steps: 4
+  schedule_seed: 42
+  optimizer: AdamW
+  learning_rate: 0.0001
+  scheduler: constant
+  warmup_steps: 0
+  weight_decay: 0.0
+  gradient_clip_norm: 1.0
+  gradient_checkpointing: true
+  lambda_emotion: 0.3
+  lambda_status: provisional_until_both_gpu_dry_steps_pass
+  source_adapter: null
+  response_loss: false
+  emotion_only_arm: false
+evaluation:
+  profile_thresholds: [0.5, train_calibration_global]
+  calibration_thresholds: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+  calibration_min_micro_precision: 0.45
+  threshold_tie_break: higher_threshold
+  calibration_split: train_calibration
+  frozen_dev_points: 224
+  bootstrap_repetitions: 1000
+  bootstrap_seed: 42
+  official_val_use: prohibited
+outputs:
+  training_root: outputs/training/E03-A7
+  evaluation_root: outputs/evaluation/e03_a7

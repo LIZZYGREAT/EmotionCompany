@@ -14,7 +14,13 @@ jobs:
     name: unit-cpu
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: unit-cpu-torch
+    if: always()
     steps:
+      - name: Require A7 Torch regression suite
+        if: ${{ needs['unit-cpu-torch'].result != 'success' }}
+        run: exit 1
+
       - name: Checkout
         uses: actions/checkout@v7
         with:
@@ -77,4 +83,35 @@ jobs:
             tests/test_e03_a4_stability_eval.py \
             tests/test_e03_pipeline_audit.py \
             tests/test_e03_experiment_spec.py \
-            tests/test_e03_experiment_ctl.py
+            tests/test_e03_experiment_ctl.py \
+            tests/test_e03_a7_data.py \
+            tests/test_e03_a7_authorize.py
+
+  unit-cpu-torch:
+    name: unit-cpu-torch
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+
+      - name: Install PyTorch CPU test dependencies
+        run: |
+          python -m pip install --disable-pip-version-check 'pytest==9.1.1' 'PyYAML==6.0.3'
+          python -m pip install --disable-pip-version-check \
+            --extra-index-url https://download.pytorch.org/whl/cpu \
+            'torch==2.10.0+cpu'
+
+      - name: Run A7 Torch CPU synthetic regression suite
+        run: |
+          python -m pytest -q \
+            tests/test_e03_a7_classifier.py \
+            tests/test_e03_a7_resume.py \
+            tests/test_e03_a7_evaluate.py
