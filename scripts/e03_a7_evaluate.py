@@ -422,6 +422,8 @@ def _score_after_prediction_freeze(
         "checkpoint_step": step,
         "training_code_sha256": training_code_sha256,
         "evaluation_code_sha256": e03_a7_train._code_sha256(),
+        "prediction_generation_code_sha256": eval_manifest.get("evaluation_code_sha256"),
+        "scoring_code_sha256": e03_a7_train._code_sha256(),
         "engineering_gate": "passed",
         "model_quality_status": "inconclusive",
         "progression_authorization_status": "awaiting_manual_review",
@@ -474,6 +476,7 @@ def _score_after_prediction_freeze(
         gold_read=True,
         gold_read_after_predictions_locked=True,
         references_sha256=report["source_facts"]["references_sha256"],
+        scoring_code_sha256=e03_a7_train._code_sha256(),
         evaluation_report_sha256=sha256_file(report_path),
         scored_at_utc=_now(),
     )
@@ -815,6 +818,49 @@ def _load_training_data(config: Mapping[str, Any]) -> tuple[dict[str, Any], dict
     return supervision, splits, prompt_index
 
 
+def _compatible_locked_evaluation_code_hashes(config: Mapping[str, Any], config_sha: str) -> set[str]:
+    current_code_sha = e03_a7_train._code_sha256()
+    receipt_path = e03_a7_train._pair_root(config) / "reload_compatibility.json"
+    if not receipt_path.is_file():
+        return {current_code_sha}
+    receipt = _json(receipt_path)
+    prior_code_sha = receipt.get("prior_compatible_code_sha256")
+    extensions = receipt.get("compatibility_extensions", [])
+    if (
+        receipt.get("status") != "reload_compatibility_repaired"
+        or receipt.get("scope") != "inference_base_dtype_reload_only"
+        or receipt.get("compatible_code_sha256") != current_code_sha
+        or receipt.get("config_sha256") != config_sha
+        or receipt.get("pair_id") != config.get("training", {}).get("pair_id")
+        or not isinstance(prior_code_sha, str)
+        or len(prior_code_sha) != 64
+        or not isinstance(extensions, list)
+        or not extensions
+    ):
+        return {current_code_sha}
+    accepted = {current_code_sha}
+    previous_new_code_sha = None
+    for extension in extensions:
+        extension_old = extension.get("prior_compatible_code_sha256")
+        extension_new = extension.get("compatible_code_sha256")
+        if (
+            extension.get("changed_code_paths") != ["scripts/e03_a7_evaluate.py"]
+            or extension.get("training_semantics_unchanged") is not True
+            or extension.get("optimizer_steps_added") != 0
+            or not isinstance(extension_old, str)
+            or len(extension_old) != 64
+            or not isinstance(extension_new, str)
+            or len(extension_new) != 64
+            or (previous_new_code_sha is not None and extension_old != previous_new_code_sha)
+        ):
+            return {current_code_sha}
+        accepted.update((extension_old, extension_new))
+        previous_new_code_sha = extension_new
+    if previous_new_code_sha != current_code_sha or prior_code_sha != extensions[-1].get("prior_compatible_code_sha256"):
+        return {current_code_sha}
+    return accepted
+
+
 def _resume_locked_scoring(
     config: Mapping[str, Any],
     config_sha: str,
@@ -835,20 +881,27 @@ def _resume_locked_scoring(
     calibration_predictions_path = eval_root / "calibration_probabilities.jsonl"
     calibration_manifest_path = eval_root / "calibration.json"
     expected_run_id = f"{pair_id}-{arm}"
+    compatible_eval_code_hashes = _compatible_locked_evaluation_code_hashes(config, config_sha)
     prediction_sha = sha256_file(predictions_path)
     calibration_sha = sha256_file(calibration_predictions_path)
+    manifest_status = manifest.get("status")
+    is_fresh_lock = manifest_status == "dev_predictions_frozen_gold_not_read" and manifest.get("gold_read") is False
+    is_interrupted_score = (
+        manifest_status in {"scoring_started_after_prediction_lock", "scoring_interrupted_after_gold_read"}
+        and manifest.get("gold_read") is True
+        and manifest.get("gold_read_after_predictions_locked") is True
+    )
     if (
-        manifest.get("status") not in {"scoring_started_after_prediction_lock", "scoring_interrupted_after_gold_read"}
-        or manifest.get("gold_read") is not True
-        or manifest.get("gold_read_after_predictions_locked") is not True
+        not (is_fresh_lock or is_interrupted_score)
         or manifest.get("run_id") != expected_run_id
         or manifest.get("arm") != arm
         or manifest.get("checkpoint_step") != step
         or manifest.get("config_sha256") != config_sha
         or manifest.get("training_code_sha256") != training_code_sha
-        or manifest.get("evaluation_code_sha256") != e03_a7_train._code_sha256()
+        or manifest.get("evaluation_code_sha256") not in compatible_eval_code_hashes
         or manifest.get("predictions_sha256") != prediction_sha
         or manifest.get("calibration_predictions_sha256") != calibration_sha
+        or manifest.get("calibration_manifest_sha256") != sha256_file(calibration_manifest_path)
         or manifest.get("prediction_count") != int(config["data"]["expected_dev_rows"])
         or manifest.get("prediction_ids_sha256") != config["identity"]["frozen_dev_ids_sha256"]
     ):
@@ -929,7 +982,32 @@ def _evaluate_pair(args: argparse.Namespace) -> int:
         if eval_root.exists():
             report_path = eval_root / "evaluation_report.json"
             manifest_path = eval_root / "evaluation_manifest.json"
-            if report_path.is_file() and manifest_path.is_file():
+            if manifest_path.is_file() and (eval_root / "predictions.jsonl").is_file() and (eval_root / "calibration.json").is_file():
+                manifest = _json(manifest_path)
+                if report_path.is_file() and manifest.get("status") == "scored":
+                    report = _json(report_path)
+                    if (
+                        report.get("status") != "scored"
+                        or report.get("arm") != arm
+                        or report.get("checkpoint_step") != step
+                        or manifest.get("predictions_sha256") != report.get("locked_predictions_sha256")
+                    ):
+                        raise ValueError(f"A7 {arm} existing evaluation output does not match this node")
+                else:
+                    _resume_locked_scoring(
+                        config,
+                        config_sha,
+                        preflight["code_sha256"],
+                        pair_id,
+                        arm,
+                        step,
+                        eval_root,
+                        a5_config,
+                        evaluation_assets,
+                        supervision,
+                        splits,
+                    )
+            elif report_path.is_file() and manifest_path.is_file():
                 report = _json(report_path)
                 manifest = _json(manifest_path)
                 if (
@@ -940,20 +1018,6 @@ def _evaluate_pair(args: argparse.Namespace) -> int:
                     or manifest.get("predictions_sha256") != report.get("locked_predictions_sha256")
                 ):
                     raise ValueError(f"A7 {arm} existing evaluation output does not match this node")
-            elif manifest_path.is_file() and (eval_root / "predictions.jsonl").is_file() and (eval_root / "calibration.json").is_file():
-                _resume_locked_scoring(
-                    config,
-                    config_sha,
-                    preflight["code_sha256"],
-                    pair_id,
-                    arm,
-                    step,
-                    eval_root,
-                    a5_config,
-                    evaluation_assets,
-                    supervision,
-                    splits,
-                )
             else:
                 raise FileExistsError(f"A7 {arm} evaluation output is incomplete and cannot resume from a prediction lock: {eval_root}")
         else:

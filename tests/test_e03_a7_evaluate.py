@@ -83,6 +83,49 @@ def test_a7_baseline_reconciliation_enum_includes_emotion_label():
     assert statuses["valid"] == 1
 
 
+def test_a7_locked_score_recovery_accepts_only_the_bound_preceding_eval_code(monkeypatch, tmp_path):
+    code_before = "a" * 64
+    code_middle = "b" * 64
+    current_code = "c" * 64
+    receipt = {
+        "status": "reload_compatibility_repaired",
+        "scope": "inference_base_dtype_reload_only",
+        "compatible_code_sha256": current_code,
+        "prior_compatible_code_sha256": code_middle,
+        "config_sha256": "config-sha",
+        "pair_id": "pair",
+        "compatibility_extensions": [
+            {
+                "prior_compatible_code_sha256": code_before,
+                "compatible_code_sha256": code_middle,
+                "changed_code_paths": ["scripts/e03_a7_evaluate.py"],
+                "training_semantics_unchanged": True,
+                "optimizer_steps_added": 0,
+            },
+            {
+                "prior_compatible_code_sha256": code_middle,
+                "compatible_code_sha256": current_code,
+                "changed_code_paths": ["scripts/e03_a7_evaluate.py"],
+                "training_semantics_unchanged": True,
+                "optimizer_steps_added": 0,
+            },
+        ],
+    }
+    (tmp_path / "reload_compatibility.json").write_text(json.dumps(receipt), encoding="utf-8")
+    monkeypatch.setattr(e03_a7_evaluate.e03_a7_train, "_code_sha256", lambda: current_code)
+    monkeypatch.setattr(e03_a7_evaluate.e03_a7_train, "_pair_root", lambda _config: tmp_path)
+
+    assert e03_a7_evaluate._compatible_locked_evaluation_code_hashes(
+        {"training": {"pair_id": "pair"}}, "config-sha",
+    ) == {code_before, code_middle, current_code}
+
+    receipt["compatibility_extensions"][-1]["changed_code_paths"] = ["scripts/e03_a7_train.py"]
+    (tmp_path / "reload_compatibility.json").write_text(json.dumps(receipt), encoding="utf-8")
+    assert e03_a7_evaluate._compatible_locked_evaluation_code_hashes(
+        {"training": {"pair_id": "pair"}}, "config-sha",
+    ) == {current_code}
+
+
 def test_a7_scoring_records_gold_access_before_reading_references(monkeypatch, tmp_path):
     eval_dir = tmp_path / "step-0512"
     eval_dir.mkdir()
