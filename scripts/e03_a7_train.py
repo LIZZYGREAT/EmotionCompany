@@ -1028,7 +1028,9 @@ def _verify_export_reload(config: Mapping[str, Any], arm: str, torch: Any, check
         str(adapter_dir),
         is_trainable=False,
         local_files_only=True,
-        autocast_adapter_dtype=False,
+        # Training keeps LoRA tensors in FP32 even though the frozen Base
+        # computes in BF16. Let PEFT restore that adapter precision on load.
+        autocast_adapter_dtype=True,
     )
     model.eval()
     head_module = build_heads(

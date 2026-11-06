@@ -1,10 +1,13 @@
 import random
+import sys
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
 from torch import nn
 
+from scripts import e03_a7_train
 from scripts.e03_a7_train import _validate_reload_compatibility_receipt, _verify_training_ledger_prefix
 from src.training.e03_a7_staged import (
     capture_rng_state,
@@ -49,6 +52,62 @@ def test_a7_reload_compatibility_is_bound_to_exact_old_and_new_code_hashes():
         _validate_reload_compatibility_receipt(
             preflight, receipt, current_code_sha="different-code", config_sha="config"
         )
+
+
+def test_a7_independent_reload_restores_fp32_lora_adapter_dtype(monkeypatch, tmp_path):
+    calls = []
+
+    class FakePeftModel:
+        @staticmethod
+        def from_pretrained(base, adapter_path, **kwargs):
+            calls.append((base, adapter_path, kwargs))
+            return SimpleNamespace(config=SimpleNamespace(hidden_size=4), eval=lambda: None)
+
+    class FakeHead:
+        def load_state_dict(self, _state, strict):
+            assert strict is True
+
+    class FakeHeads:
+        profile_head = FakeHead()
+
+        def to(self, _device):
+            return self
+
+    monkeypatch.setitem(sys.modules, "peft", SimpleNamespace(PeftModel=FakePeftModel))
+    safetensors = ModuleType("safetensors")
+    safetensors.__path__ = []
+    safetensors_torch = ModuleType("safetensors.torch")
+    safetensors_torch.load_file = lambda *_args, **_kwargs: {}
+    monkeypatch.setitem(sys.modules, "safetensors", safetensors)
+    monkeypatch.setitem(sys.modules, "safetensors.torch", safetensors_torch)
+
+    base = object()
+    heads = FakeHeads()
+    monkeypatch.setattr(e03_a7_train, "_load_base", lambda *_args, **_kwargs: base)
+    monkeypatch.setattr(e03_a7_train, "build_heads", lambda *_args, **_kwargs: heads)
+    logits = torch.tensor([1.0])
+    monkeypatch.setattr(
+        e03_a7_train,
+        "_expected_reload_logits",
+        lambda *_args, **_kwargs: [{"sample_id": "fixed", "profile_logits": logits, "emotion_logits": None}],
+    )
+    fake_torch = SimpleNamespace(
+        cuda=SimpleNamespace(current_device=lambda: 0),
+        device=lambda *_args: "cuda:0",
+        allclose=torch.allclose,
+    )
+
+    result = e03_a7_train._verify_export_reload(
+        {
+            "model": {"heads": {"profile_seed": 1, "emotion_seed": 2}},
+            "identity": {"pad_token_id": 0},
+        },
+        "P", fake_torch, tmp_path / "checkpoint", [("fixed", [1])],
+        [{"sample_id": "fixed", "profile_logits": logits, "emotion_logits": None}],
+    )
+
+    assert result["status"] == "independent_adapter_head_reload_passed"
+    assert calls[0][2]["autocast_adapter_dtype"] is True
 
 
 def _step(model, optimizer, scheduler, step_index):
