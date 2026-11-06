@@ -1,0 +1,92 @@
+version: E03-A6-F4-STAGED-FULL-training-v1
+experiment_id: E03-A6-F4-STAGED-FULL
+training_scope: staged_full_train
+status: ready_for_staged_full_preflight
+
+base_model:
+  model_id: Qwen/Qwen3-1.7B
+  revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  local_path: participant/model
+  expected_weight_sha256: 005d20550c04f4e246e5b434448786b44a0196b47d758d0acc77aba279e5bbc5
+
+data:
+  split: train
+  train_path: data/processed/sft/e03_a6_f4_full/train.jsonl
+  dataset_manifest: data/processed/sft/e03_a6_f4_full/manifest.json
+  f2_train_path: data/processed/sft/v1/train.jsonl
+  normalized_train_path: data/processed/v1/train.jsonl
+  f2_manifest: outputs/sft_data/v1/manifest.json
+  d03_manifest: outputs/data_pipeline/v1/manifest.json
+  d042_manifest: outputs/token_audit/v1/manifest.json
+  expected_train_rows: 16192
+  expected_source_train_rows: 16312
+  expected_historical_excluded_rows: 120
+  output_root: outputs/training
+  init_adapter: null
+  resume_from_checkpoint: null
+
+protocol:
+  format_version: F4
+  prompt_version: P_A6_F4
+  prompt_path: configs/prompts/p_a6_f4.txt
+  prompt_sha256: 84a29d425d1ed2bc61cdf83b47713538738c80b0b625daf486ea9d744b2832cf
+  selection_prompt_version: P0
+  selection_prompt_path: configs/prompts/p0.txt
+  p0_sha256: d427e4996d0075a3adfe03ae25881d093687a6565f5b037f605accecc84c70b2
+  runner_config: participant/configs/e03_a6_f4_inference_config.json
+  tokenizer_signature_sha256: 1662c9e99c6185441026a168b2dd6b09af103dc6dc3563b72f598411f14d1913
+  chat_template_sha256: a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8
+  eos_token_id: 151645
+  truncation_version: T1
+  history_policy: P0_T1_same_selected_history_then_F4_prompt
+  max_train_seq_length: 2048
+  max_prompt_tokens: 1280
+  packing: false
+  padding_free: false
+
+quantization:
+  method: bitsandbytes_4bit
+  quant_type: nf4
+  compute_dtype: bfloat16
+  use_double_quant: true
+  device_map:
+    "": 0
+  max_cuda_memory_fraction: 0.92
+
+lora:
+  r: 8
+  alpha: 16
+  dropout: 0.0
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  bias: none
+  checkpoint_dtype: float32
+
+optimizer:
+  name: AdamW
+  learning_rate: 0.0001
+  lr_scheduler: constant
+  warmup_steps: 0
+  weight_decay: 0.0
+
+training:
+  seed: 42
+  per_device_micro_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 4
+  max_optimizer_steps: 4048
+  epochs: 1
+  save_interval_steps: 512
+  save_total_limit: 10
+  gradient_checkpointing: true
+  evaluation_interval_steps: 0
+  parameter_check_interval_steps: 512
+  max_training_seconds: 43200
+  min_free_disk_gb: 10
+  checkpointing: true
+  train_sampling_strategy: random
+
+evaluation:
+  max_new_tokens: 256
+  do_sample: false
+  sft_dev_loss_rows: 0
+  autocast_adapter_dtype: true

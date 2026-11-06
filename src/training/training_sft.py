@@ -60,13 +60,14 @@ _A6_F3_ADAPTER_EXPERIMENT_IDS = frozenset({
     "E03-A6-F3-PILOT",
     "E03-A6-F3-PILOT-EXPANDED",
     "E03-A6-F4-PILOT-EXPANDED",
+    "E03-A6-F4-STAGED-FULL",
 })
 
 
 def _uses_a6_f3_adapter_dtype(config: dict[str, Any]) -> bool:
     return (
         config.get("experiment_id") in _A6_F3_ADAPTER_EXPERIMENT_IDS
-        and config.get("training_scope") in {"pilot", "supplemental_pilot"}
+        and config.get("training_scope") in {"pilot", "supplemental_pilot", "staged_full_train"}
     )
 
 
@@ -991,6 +992,7 @@ def _build_sft_trainer(
     run_root: Path,
     eval_rows: list[dict[str, Any]] | None = None,
     training_counts: _TrainingCounters | None = None,
+    sample_order_recorder: Any | None = None,
     _cpu_fixture: bool = False,
 ) -> Any:
     """Build the pinned TRL path without allowing it to retokenize or truncate."""
@@ -1052,6 +1054,13 @@ def _build_sft_trainer(
     class RecordedSFTTrainer(SFTTrainer):
         def training_step(self, *args, **kwargs):
             inputs = kwargs.get("inputs") if "inputs" in kwargs else args[1]
+            if sample_order_recorder is not None:
+                sample_ids = inputs.pop("_e03_sample_ids", None)
+                if not isinstance(sample_ids, list):
+                    raise RuntimeError("F4 staged Trainer batch lost its sample-ID side channel")
+                sample_order_recorder.record_micro_batch(sample_ids)
+            elif "_e03_sample_ids" in inputs:
+                raise RuntimeError("unexpected sample-ID side channel without a recorder")
             if training_counts is not None:
                 training_counts.record(inputs)
             return super().training_step(*args, **kwargs)
@@ -1192,7 +1201,11 @@ def _build_sft_trainer(
         if set(observed_batch) != expected_fields:
             raise RuntimeError(f"SFTTrainer batch fields differ from the configured collator: {sorted(observed_batch)}")
         for name in expected_fields:
-            if not torch.equal(observed_batch[name].cpu(), expected_batch[name].cpu()):
+            if name == "_e03_sample_ids":
+                equal = observed_batch[name] == expected_batch[name]
+            else:
+                equal = torch.equal(observed_batch[name].cpu(), expected_batch[name].cpu())
+            if not equal:
                 raise RuntimeError(f"SFTTrainer changed pre-encoded {name} in verified batch {offset}")
     trainer.e01_data_path_facts = {
         "skip_prepare_dataset": trainer._skip_prepare_dataset,
@@ -1337,6 +1350,7 @@ def _optimizer_evidence_callback(
     checkpoint_facts: dict[str, Any] | None = None,
     stop_after_step: int | None = None,
     previous_training_seconds: float = 0.0,
+    sample_order_recorder: Any | None = None,
 ) -> Any:
     """Collect gradient/update evidence around the actual Trainer optimizer step."""
     from transformers import TrainerCallback
@@ -1454,6 +1468,10 @@ def _optimizer_evidence_callback(
                 if not changed_names:
                     raise RuntimeError("Trainer optimizer.step did not change LoRA parameters at a verification step")
             next_step = int(state.global_step) + 1
+            order_facts = (
+                sample_order_recorder.commit_optimizer_step(next_step)
+                if sample_order_recorder is not None else {}
+            )
             token_facts: dict[str, int] = {}
             if self.collator is not None:
                 counts = self.collator.counts()
@@ -1479,6 +1497,7 @@ def _optimizer_evidence_callback(
                 }
             self.current.update({
                 "optimizer_step": next_step,
+                **order_facts,
                 **token_facts,
                 "updated_parameter_count": len(changed_names),
                 "updated_parameter_names": changed_names,
@@ -1487,6 +1506,11 @@ def _optimizer_evidence_callback(
                 "optimizer_step_seconds": time.perf_counter() - self.started,
                 "cuda_memory": inference.cuda_memory_facts(torch),
             })
+            if self.config.get("experiment_id") == "E03-A6-F4-STAGED-FULL":
+                memory = self.current["cuda_memory"]
+                allowed = float(self.config["quantization"]["max_cuda_memory_fraction"])
+                if memory.get("allocator_peak_allocated_bytes", 0) > memory.get("total_memory_bytes", 0) * allowed:
+                    raise RuntimeError("F4 staged training exceeded its frozen CUDA allocated-memory budget")
             self.steps.append(self.current)
             self.before = {}
             return control
@@ -1560,8 +1584,13 @@ def _optimizer_evidence_callback(
                 return control
             checkpoint = self.run_root / "trainer" / f"checkpoint-{int(state.global_step)}"
             if checkpoint.is_dir():
+                order_facts = (
+                    sample_order_recorder.checkpoint_facts(int(state.global_step))
+                    if sample_order_recorder is not None else {}
+                )
                 _write_checkpoint_manifest(checkpoint, {
                     **self.checkpoint_facts,
+                    **order_facts,
                     "run_id": self.run_root.name,
                     "optimizer_step": int(state.global_step),
                 })

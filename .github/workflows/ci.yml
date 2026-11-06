@@ -49,8 +49,11 @@ jobs:
             git diff --check "$PR_BASE_SHA...$PR_HEAD_SHA"
           elif [[ "$BEFORE_SHA" =~ ^0+$ ]]; then
             git diff --check "origin/main...$EVENT_SHA"
-          else
+          elif git cat-file -e "$BEFORE_SHA^{commit}" 2>/dev/null; then
             git diff --check "$BEFORE_SHA" "$EVENT_SHA"
+          else
+            BASE_SHA="$(git merge-base origin/main "$EVENT_SHA")"
+            git diff --check "$BASE_SHA" "$EVENT_SHA"
           fi
 
       - name: Run CPU synthetic regression suite
@@ -80,4 +83,8 @@ jobs:
             tests/test_e03_experiment_ctl.py \
             tests/test_e03_a6_protocol.py \
             tests/test_e03_a6_data.py \
-            tests/test_e03_a6_runner.py
+            tests/test_e03_a6_runner.py \
+            tests/test_e03_a6_f4_protocol.py \
+            tests/test_e03_a6_f4_staged_contract.py \
+            tests/test_e03_a6_f4_staged_resume.py \
+            tests/test_e03_a6_f4_staged_fast.py
