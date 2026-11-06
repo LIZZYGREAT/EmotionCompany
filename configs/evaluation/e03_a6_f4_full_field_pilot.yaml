@@ -1,0 +1,58 @@
+version: E03-A6-F4-pilot-eval-v1
+experiment_id: E03-A6-F4-PILOT-EXPANDED-20261106-01
+training:
+  run_id: E03-A6-F4-PILOT-EXPANDED-20261106-01
+  run_root: outputs/training/E03-A6-F4-PILOT-EXPANDED-20261106-01
+  expected_experiment_id: E03-A6-F4-PILOT-EXPANDED
+  expected_training_scope: supplemental_pilot
+  expected_status: passed
+  expected_stage: pilot_training_reloaded
+  expected_optimizer_steps: 256
+  expected_base_weight_sha256: 005d20550c04f4e246e5b434448786b44a0196b47d758d0acc77aba279e5bbc5
+  expected_adapter_weight_sha256: 3a7b077eb5d3a055412c02a2613957762ac647806902e1f620ba82b38468e809
+  expected_adapter_config_sha256: 1694a64a2b6a8edeff98c5b9c16326ff8aabf218a87979818c5e24fcaedb5d71
+  inference_config_path: participant/configs/e03_a6_f4_inference_config.json
+sources:
+  input_path: outputs/evaluation/e01_b/pilot_dev_v1/smoke_input.jsonl
+  expected_input_sha256: 63e1f14707cd66b1d9c41777aeabdb2a54d357fbe6109993507d33da4780162b
+  id_map_path: outputs/evaluation/e01_b/pilot_dev_v1/smoke_id_map.jsonl
+  expected_id_map_sha256: fc1d444395f363adf6bdf03a7bfe6194a4c101e3126c3a1c76755bc40b1a8309
+  references_path: outputs/evaluation/e01_b/pilot_dev_v1/smoke_references.jsonl
+  expected_references_sha256: b6ee4a702c915a5de8a95e2bb4f35f51b1592ab4d8fc91cc00f166460ed48955
+  expected_count: 160
+  expected_ids_sha256: 98f24f1c1b41e1676618f4e557daa402b3cbb80686916ca818e1bdc1b89ae49c
+  historical_f2_raw_path: outputs/evaluation/e01_b/pilot/E01-B-PILOT-EVAL-20261028-101136/raw_predictions.jsonl
+  expected_historical_f2_raw_sha256: f09f194ade0a460a11692a2f6079849bda6f367f2e8cc94c3974e69599ec418d
+selection:
+  smoke_ids_path: configs/evaluation/e03_a6_f3_pilot_smoke_ids.json
+  smoke_count: 32
+  expected_smoke_ids_sha256: ed44f38d1230e2161ad337a2afb557d56f7a33f6da251c5b3ce9fba595af9444
+protocol:
+  format_version: F4
+  prompt_version: P_A6_F4
+  selection_prompt_version: P0
+  truncation_version: T1
+  tokenizer_signature_sha256: 1662c9e99c6185441026a168b2dd6b09af103dc6dc3563b72f598411f14d1913
+  max_prompt_tokens: 1280
+generation:
+  fast_max_new_tokens: 256
+  full_max_new_tokens: 1200
+  do_sample: false
+  fast_budget_seconds: 1800
+  smoke_budget_seconds: 5400
+pilot_quality_gates:
+  fast:
+    min_strict_f3_parse_rate: 0.9
+    min_cases_with_nonempty_profile_prediction: 16
+    min_profile_true_positives: 5
+    max_profile_false_positives: 30
+    min_profile_micro_precision: 0.2
+    min_emotion_accuracy: 0.3
+    max_single_emotion_prediction_share: 0.8
+  full_generation_smoke:
+    min_strict_f3_parse_rate: 0.95
+    min_official_schema_valid_rate: 1.0
+    min_prefix_full_equivalence_rate: 1.0
+    min_nonempty_response_rate: 0.95
+    min_eos_rate: 0.9
+output_root: outputs/evaluation/e03_a6_f4_full_field_pilot

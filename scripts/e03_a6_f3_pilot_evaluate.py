@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Target-free F3 Fast and full-generation Smoke evaluation for the A6 Pilot."""
+"""Target-free F3/F4 Fast and full-generation Smoke evaluation for the A6 Pilot."""
 
 from __future__ import annotations
 
@@ -29,10 +29,12 @@ from src.evaluation.f3_pilot import (
     selected_ids_sha256,
     validate_reference_coverage,
 )
+from src.evaluation.f4_pilot import F4FastPrefixStopper
 from src.evaluation.metrics import corpus_bleu4_char, profile_metrics, rouge_l_f1
 from src.evaluation.profile_prefix import parse_profile_prefix
 from src.evaluation.source_integrity import unique_index, validate_target_free_inputs
 from src.shared.f3_protocol import F3ParseError, parse_f3
+from src.shared.f4_protocol import F4ParseError, parse_f4
 
 
 def _now() -> str:
@@ -93,28 +95,32 @@ def _append_jsonl_fsynced(path: Path, value: Mapping[str, Any]) -> None:
 
 def _load_config(path: Path) -> dict[str, Any]:
     value = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or value.get("version") != "E03-A6-F3-pilot-eval-v1":
-        raise ValueError("unsupported E03-A6 F3 Pilot evaluation config")
-    if value.get("protocol", {}).get("format_version") != "F3":
-        raise ValueError("Pilot evaluation must be explicitly locked to F3")
+    if not isinstance(value, dict):
+        raise ValueError("unsupported E03-A6 Pilot evaluation config")
+    format_version = value.get("protocol", {}).get("format_version")
+    if format_version not in {"F3", "F4"} or value.get("version") != f"E03-A6-{format_version}-pilot-eval-v1":
+        raise ValueError("Pilot evaluation config must be version-locked to F3 or F4")
     if value.get("protocol", {}).get("truncation_version") != "T1":
         raise ValueError("Pilot evaluation must retain T1 history selection")
     if value.get("generation", {}).get("do_sample") is not False:
         raise ValueError("Pilot evaluation requires Greedy generation")
     if int(value.get("sources", {}).get("expected_count", 0)) != 160:
-        raise ValueError("F3 Pilot Fast cohort must remain the frozen 160-row set")
+        raise ValueError("Pilot Fast cohort must remain the frozen 160-row set")
     if int(value.get("selection", {}).get("smoke_count", 0)) != 32:
-        raise ValueError("F3 Pilot full-generation Smoke must remain 32 rows")
+        raise ValueError("Pilot full-generation Smoke must remain 32 rows")
     return value
 
 
 def _validate_training_config(training_config: dict[str, Any]) -> None:
     from src.training.e03_a6_contract import (
         validate_expanded_pilot_config,
+        validate_expanded_f4_pilot_config,
         validate_pilot_config,
     )
 
-    if training_config.get("training_scope") == "supplemental_pilot":
+    if training_config.get("protocol", {}).get("format_version") == "F4":
+        validate_expanded_f4_pilot_config(training_config)
+    elif training_config.get("training_scope") == "supplemental_pilot":
         validate_expanded_pilot_config(training_config)
     else:
         validate_pilot_config(training_config)
@@ -183,7 +189,7 @@ def _load_assets(config: dict[str, Any]) -> dict[str, Any]:
         or training_manifest.get("base_weight_sha256_after_training") != expected_training["expected_base_weight_sha256"]
         or training_manifest.get("full_training_status") != "not_authorized_not_run"
     ):
-        raise ValueError("F3 Pilot training manifest has not passed its frozen training boundary")
+        raise ValueError("Pilot training manifest has not passed its frozen training boundary")
     if (
         reload_check.get("status") != "passed"
         or reload_check.get("base_weights_unchanged") is not True
@@ -234,10 +240,11 @@ def _load_assets(config: dict[str, Any]) -> dict[str, Any]:
 
     prompt_text, schema, enums, prompt_facts = runner.load_runtime_protocol(run_config)
     selection_prompt_text, selection_facts = runner.load_f3_selection_prompt(run_config)
-    if prompt_facts.get("format_version") != "F3" or selection_facts.get("version") != "P0":
-        raise ValueError("Pilot F3 prompt or P0/T1 history-selection identity changed")
+    format_version = config["protocol"]["format_version"]
+    if prompt_facts.get("format_version") != format_version or selection_facts.get("version") != "P0":
+        raise ValueError(f"Pilot {format_version} prompt or P0/T1 history-selection identity changed")
     if run_config.get("context", {}).get("max_prompt_tokens") != int(config["protocol"]["max_prompt_tokens"]):
-        raise ValueError("Pilot F3 max prompt budget differs from the frozen 1280-token limit")
+        raise ValueError(f"Pilot {format_version} max prompt budget differs from the frozen 1280-token limit")
     if prompt_facts.get("tokenizer_id") != run_config["tokenizer"].get("model_id"):
         raise ValueError("Pilot F3 tokenizer identity changed")
 
@@ -266,6 +273,7 @@ def _load_assets(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _runtime_identity(config_path: Path, config: dict[str, Any], assets: dict[str, Any], mode: str) -> dict[str, Any]:
+    format_key = config["protocol"]["format_version"].lower()
     serialized_run_config = json.dumps(
         assets["run_config"], ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8")
@@ -274,8 +282,12 @@ def _runtime_identity(config_path: Path, config: dict[str, Any], assets: dict[st
         "config_path": str(config_path.resolve()),
         "config_sha256": _sha256(config_path),
         "script_sha256": _sha256(Path(__file__).resolve()),
-        "f3_eval_helpers_sha256": _sha256(ROOT / "src/evaluation/f3_pilot.py"),
-        "f3_protocol_sha256": _sha256(ROOT / "src/shared/f3_protocol.py"),
+        f"{format_key}_eval_helpers_sha256": _sha256(ROOT / f"src/evaluation/{format_key}_pilot.py")
+        if config["protocol"]["format_version"] == "F4"
+        else _sha256(ROOT / "src/evaluation/f3_pilot.py"),
+        f"{format_key}_protocol_sha256": _sha256(ROOT / "src/shared/f4_protocol.py")
+        if config["protocol"]["format_version"] == "F4"
+        else _sha256(ROOT / "src/shared/f3_protocol.py"),
         "participant_runner_sha256": _sha256(ROOT / "participant/run_inference.py"),
         "training_manifest_sha256": _sha256(assets["run_root"] / "manifest.json"),
         "reload_check_sha256": _sha256(assets["run_root"] / "reload_check_standalone.json"),
@@ -321,7 +333,7 @@ def _load_model(run_config: dict[str, Any], torch: Any) -> tuple[Any, Any, dict[
         prepare_quantized_base=True,
         is_trainable=False,
         local_files_only=True,
-        autocast_adapter_dtype=runner.adapter_autocast_dtype_for_format("F3"),
+        autocast_adapter_dtype=runner.adapter_autocast_dtype_for_format(run_config.get("format_version", "F2")),
     )
     model.eval()
     tokenizer, tokenizer_facts = runner.load_runtime_tokenizer(run_config, local_model)
@@ -330,7 +342,7 @@ def _load_model(run_config: dict[str, Any], torch: Any) -> tuple[Any, Any, dict[
         raise RuntimeError("Pilot evaluation did not load real NF4/BF16/CUDA without offload")
     adapter_dtypes = sorted({str(p.dtype) for name, p in model.named_parameters() if ".lora_A." in name or ".lora_B." in name})
     if adapter_dtypes != ["torch.float32"]:
-        raise RuntimeError(f"Pilot F3 Adapter dtype changed during evaluation: {adapter_dtypes}")
+        raise RuntimeError(f"Pilot Adapter dtype changed during evaluation: {adapter_dtypes}")
     return model, tokenizer, {
         "base_weight_sha256": weight_identity.get("observed_weight_hash"),
         "adapter_weight_sha256": run_config["adapter"]["expected_adapter_weight_sha256"],
@@ -350,7 +362,7 @@ def _run_generate(
     prompt_ids: list[int],
     *,
     max_new_tokens: int,
-    stopper: F3FastPrefixStopper | None = None,
+    stopper: Any | None = None,
 ) -> tuple[list[int], str, float, bool]:
     from transformers import StoppingCriteria, StoppingCriteriaList
     from participant import run_inference as runner
@@ -482,19 +494,23 @@ def _score_fast(
     reference_index = _read_references_after_generation(config, ids)
     targets = [reference_index[eval_id]["target"] for eval_id in ids]
     score = score_fast_cases(targets, cases, assets["enums"], config["pilot_quality_gates"]["fast"])
+    if config["protocol"]["format_version"] == "F4":
+        score["gate_values"]["strict_f4_parse_rate"] = score["gate_values"].pop("strict_f3_parse_rate")
+        score["gate_checks"]["strict_f4_parse_rate"] = score["gate_checks"].pop("strict_f3_parse_rate")
     history = _historical_f2_score(assets, reference_index, assets["enums"])
+    format_key = config["protocol"]["format_version"].lower()
     result = {
         "status": "complete",
-        "stage": "F3 Fast-only Dev 160",
+        "stage": f"{config['protocol']['format_version']} Fast-only Dev 160",
         "created_at_utc": _now(),
         "cohort_count": len(ids),
         "cohort_ids_sha256": config["sources"]["expected_ids_sha256"],
         "references_read_by_generator": False,
-        "f3": score,
+        format_key: score,
         "historical_f2_raw_prefix": history,
         "generation_efficiency": {
-            "f3_fast_generated_tokens_total": sum(int(case.get("generated_token_count", 0)) for case in cases),
-            "f3_fast_mean_generated_tokens": (
+            f"{format_key}_fast_generated_tokens_total": sum(int(case.get("generated_token_count", 0)) for case in cases),
+            f"{format_key}_fast_mean_generated_tokens": (
                 sum(int(case.get("generated_token_count", 0)) for case in cases) / len(cases)
                 if cases else 0.0
             ),
@@ -505,7 +521,7 @@ def _score_fast(
                 float(row.get("latency_ms", 0.0)) / 1000 for row in assets["historical_raw"]
             ),
         },
-        "f3_vs_f2_same_raw_layer": {
+        f"{format_key}_vs_f2_same_raw_layer": {
             "profile_micro_f1_delta": (
                 score["fixed_denominator_profile_metrics"]["overall_33_label_micro_f1"]
                 - history["fixed_denominator_profile_metrics"]["overall_33_label_micro_f1"]
@@ -529,6 +545,9 @@ def _score_smoke(
     reference_index = _read_references_after_generation(config, ids)
     smoke_gate = config["pilot_quality_gates"]["full_generation_smoke"]
     score = score_smoke_cases(cases, smoke_gate)
+    if config["protocol"]["format_version"] == "F4":
+        score["gate_values"]["strict_f4_parse_rate"] = score["gate_values"].pop("strict_f3_parse_rate")
+        score["gate_checks"]["strict_f4_parse_rate"] = score["gate_checks"].pop("strict_f3_parse_rate")
     targets = [reference_index[eval_id]["target"] for eval_id in ids]
     fast_cases = [
         {
@@ -557,7 +576,7 @@ def _score_smoke(
     from statistics import fmean
     result = {
         "status": "complete",
-        "stage": "F3 full-generation Smoke 32",
+        "stage": f"{config['protocol']['format_version']} full-generation Smoke 32",
         "created_at_utc": _now(),
         "cohort_count": len(cases),
         "cohort_ids_sha256": selected_ids_sha256(ids),
@@ -623,7 +642,7 @@ def run_evaluation(config_path: Path, config: dict[str, Any], mode: str) -> dict
         )
         manifest.update(
             status="complete",
-            gate_passed=(summary["f3"]["gate_passed"] if mode == "fast" else summary["smoke"]["gate_passed"]),
+            gate_passed=(summary[config["protocol"]["format_version"].lower()]["gate_passed"] if mode == "fast" else summary["smoke"]["gate_passed"]),
             scored_at_utc=_now(),
             references_sha256=_sha256(_resolve(config["sources"]["references_path"])),
             summary_sha256=_sha256(output_dir / "summary.json"),
@@ -637,6 +656,11 @@ def run_evaluation(config_path: Path, config: dict[str, Any], mode: str) -> dict
         _write_json_atomic(output_dir / "run_manifest.json", manifest)
         return manifest
 
+    format_version = config["protocol"]["format_version"]
+    stopper_class = F3FastPrefixStopper if format_version == "F3" else F4FastPrefixStopper
+    parser = parse_f3 if format_version == "F3" else parse_f4
+    parse_error_types = (F3ParseError,) if format_version == "F3" else (F4ParseError,)
+    prediction_parser = runner.parse_f3_prediction if format_version == "F3" else runner.parse_f4_prediction
     budget_seconds = int(config["generation"][f"{mode}_budget_seconds"])
     deadline = time.monotonic() + budget_seconds
     current_id: str | None = None
@@ -666,11 +690,11 @@ def run_evaluation(config_path: Path, config: dict[str, Any], mode: str) -> dict
                 selection_prompt_text=assets["selection_prompt_text"],
             )
             if selection.get("floor_exceeds_cap"):
-                raise ValueError(f"F3 prompt floor exceeds the frozen cap: {current_id}")
+                raise ValueError(f"{format_version} prompt floor exceeds the frozen cap: {current_id}")
             prompt_ids = list(selection["prompt_ids"])
             prompt_sha = hashlib.sha256(json.dumps(prompt_ids, separators=(",", ":")).encode()).hexdigest()
             if mode == "fast":
-                stopper = F3FastPrefixStopper(
+                stopper = stopper_class(
                     lambda values: tokenizer.decode(list(values), skip_special_tokens=True),
                     assets["enums"], deadline=deadline,
                 )
@@ -703,14 +727,14 @@ def run_evaluation(config_path: Path, config: dict[str, Any], mode: str) -> dict
                     max_new_tokens=int(config["generation"]["full_max_new_tokens"]),
                 )
                 try:
-                    full_parsed = parse_f3(raw_text, assets["enums"])
+                    full_parsed = parser(raw_text, assets["enums"])
                     full_parse_success = True
                     full_parse_status = "success"
-                except F3ParseError as exc:
+                except parse_error_types as exc:
                     full_parsed = None
                     full_parse_success = False
                     full_parse_status = exc.code
-                prediction, runner_status, strict_parse, failure_code = runner.parse_f3_prediction(
+                prediction, runner_status, strict_parse, failure_code = prediction_parser(
                     current_id, raw_text, assets["enums"],
                 )
                 try:
@@ -741,22 +765,26 @@ def run_evaluation(config_path: Path, config: dict[str, Any], mode: str) -> dict
                 }
                 full_prefix_result: dict[str, Any] | None = None
                 try:
-                    from src.training.e03_a6_contract import f3_prefix_through_r_marker
+                    from src.training.e03_a6_contract import (
+                        f3_prefix_through_r_marker,
+                        f4_prefix_through_response_marker,
+                    )
 
-                    full_prefix_ids, full_prefix_text = f3_prefix_through_r_marker(
+                    prefix_helper = f3_prefix_through_r_marker if format_version == "F3" else f4_prefix_through_response_marker
+                    full_prefix_ids, full_prefix_text = prefix_helper(
                         generated_ids,
                         lambda values: tokenizer.decode(list(values), skip_special_tokens=True),
                     )
-                    parsed_prefix = parse_f3(full_prefix_text, assets["enums"])
+                    parsed_prefix = parser(full_prefix_text, assets["enums"])
                     full_prefix_result = {
                         "token_ids": full_prefix_ids,
                         "parsed": parsed_prefix,
                         "text": full_prefix_text,
                     }
-                except (ValueError, F3ParseError) as exc:
+                except (ValueError, *parse_error_types) as exc:
                     full_prefix_result = {"token_ids": None, "parsed": None, "text": None, "error": f"{type(exc).__name__}: {exc}"}
 
-                stopper = F3FastPrefixStopper(
+                stopper = stopper_class(
                     lambda values: tokenizer.decode(list(values), skip_special_tokens=True),
                     assets["enums"], deadline=deadline,
                 )
@@ -825,7 +853,7 @@ def run_evaluation(config_path: Path, config: dict[str, Any], mode: str) -> dict
             summary = _score_smoke(config, assets, completed, output_dir)
         manifest.update(
             status="complete",
-            gate_passed=(summary["f3"]["gate_passed"] if mode == "fast" else summary["smoke"]["gate_passed"]),
+            gate_passed=(summary[config["protocol"]["format_version"].lower()]["gate_passed"] if mode == "fast" else summary["smoke"]["gate_passed"]),
             scored_at_utc=_now(),
             references_sha256=_sha256(_resolve(config["sources"]["references_path"])),
             summary_sha256=_sha256(output_dir / "summary.json"),
@@ -905,7 +933,7 @@ def score_existing_generation(config_path: Path, config: dict[str, Any], mode: s
     # The generation code hash may differ because this recovery command uses a
     # corrected scorer. All source/model/config identities must still match.
     for key in expected_identity:
-        if key in {"script_sha256", "f3_eval_helpers_sha256"}:
+        if key in {"script_sha256", f"{config['protocol']['format_version'].lower()}_eval_helpers_sha256"}:
             continue
         if recorded_identity.get(key) != expected_identity[key]:
             raise ValueError(f"existing Pilot generation identity changed: {key}")
@@ -923,7 +951,7 @@ def score_existing_generation(config_path: Path, config: dict[str, Any], mode: s
     summary = _score_fast(config, assets, cases, output_dir) if mode == "fast" else _score_smoke(config, assets, cases, output_dir)
     manifest.update(
         status="complete",
-        gate_passed=(summary["f3"]["gate_passed"] if mode == "fast" else summary["smoke"]["gate_passed"]),
+        gate_passed=(summary[config["protocol"]["format_version"].lower()]["gate_passed"] if mode == "fast" else summary["smoke"]["gate_passed"]),
         references_sha256=_sha256(_resolve(config["sources"]["references_path"])),
         summary_sha256=_sha256(output_dir / "summary.json"),
         cases_sha256=_sha256(cases_path),
@@ -931,7 +959,9 @@ def score_existing_generation(config_path: Path, config: dict[str, Any], mode: s
         rescored_at_utc=_now(),
         scoring_identity={
             "script_sha256": _sha256(Path(__file__).resolve()),
-            "f3_eval_helpers_sha256": _sha256(ROOT / "src/evaluation/f3_pilot.py"),
+            f"{config['protocol']['format_version'].lower()}_eval_helpers_sha256": _sha256(ROOT / f"src/evaluation/{config['protocol']['format_version'].lower()}_pilot.py")
+            if config["protocol"]["format_version"] == "F4"
+            else _sha256(ROOT / "src/evaluation/f3_pilot.py"),
             "scorer": "fixed-cohort-subset-reference-coverage-v1",
         },
         scoring_recovery=(
