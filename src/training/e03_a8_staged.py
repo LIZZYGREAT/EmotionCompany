@@ -21,6 +21,7 @@ import yaml
 from participant import run_inference as inference
 from src.data.sft_collator import SFTDataCollator
 from src.training.e03_a8_contract import (
+    ACCUMULATION_STEPS,
     AUTHORIZED_MAX_STEP,
     DATA_CODE_PATHS,
     EVALUATION_CODE_PATHS,
@@ -354,6 +355,10 @@ def _gradient_facts(parameters: list[tuple[str, Any]], torch: Any) -> dict[str, 
     if not finite or nonzero == 0 or not bool(torch.isfinite(norm).item()) or float(norm.item()) == 0.0:
         raise RuntimeError("A8 LoRA gradients are non-finite or zero")
     return {"finite": finite, "nonzero_parameter_gradients": nonzero, "global_norm": float(norm.detach().cpu().item())}
+
+
+def _backward_scaled_completion_loss(loss: Any) -> None:
+    (loss / ACCUMULATION_STEPS).backward()
 
 
 def _run_paths(config: dict[str, Any], run_id: str) -> tuple[Path, Path, Path]:
@@ -943,7 +948,7 @@ def _execute_segment(
                         raise FloatingPointError(f"A8 non-finite loss at optimizer step {step_index + 1}")
                     losses.append(float(loss.detach().float().item()))
                     completion_tokens += int(row["completion_length"])
-                    (loss / ACCUMULATION_STEPS).backward()
+                    _backward_scaled_completion_loss(loss)
                 gradient = _gradient_facts(trainable, torch)
                 optimizer.step()
                 scheduler.step()

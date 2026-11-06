@@ -13,6 +13,7 @@ from src.training.e03_a8_contract import (
     validate_stage_transition,
     write_conditional_authorization,
 )
+from src.training.e03_a8_staged import _backward_scaled_completion_loss
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -28,6 +29,24 @@ def test_a8_configs_keep_fixed_training_contract(arm: str, path: Path) -> None:
 @pytest.mark.parametrize("start,end", [(None, 512), (512, 1024), (1024, 2048)])
 def test_allowed_a8_stage_transitions(start: int | None, end: int) -> None:
     validate_stage_transition(start, end)
+
+
+def test_training_microbatch_loss_uses_the_frozen_accumulation_factor() -> None:
+    class FakeLoss:
+        divided_by: int | None = None
+        backward_called = False
+
+        def __truediv__(self, divisor: int) -> "FakeLoss":
+            self.divided_by = divisor
+            return self
+
+        def backward(self) -> None:
+            self.backward_called = True
+
+    loss = FakeLoss()
+    _backward_scaled_completion_loss(loss)
+    assert loss.divided_by == 4
+    assert loss.backward_called is True
 
 
 @pytest.mark.parametrize("start,end", [(2048, 4048), (512, 2048), (None, 1024)])
