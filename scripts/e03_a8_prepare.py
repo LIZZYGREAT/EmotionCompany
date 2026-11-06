@@ -154,8 +154,8 @@ def prepare_a8_dataset(config_path: Path, *, root: Path = ROOT) -> dict[str, Any
     normalized_by_id = {row["sample_id"]: row for row in normalized}
 
     runner_config = _read_json(paths["inference_config"])
-    base_path = _resolve(runner_config["model"]["local_path"] if isinstance(runner_config.get("model"), dict) else "participant/model")
-    tokenizer, tokenizer_facts = inference.load_runtime_tokenizer(runner_config, base_path)
+    tokenizer_source = Path(runner_config["tokenizer"].get("local_path") or "participant/model")
+    tokenizer, tokenizer_facts = inference.load_runtime_tokenizer(runner_config, tokenizer_source)
     expected_tokenizer = {
         "model_id": "Qwen/Qwen3-1.7B",
         "revision": runner_config.get("model", {}).get("revision", "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e"),
