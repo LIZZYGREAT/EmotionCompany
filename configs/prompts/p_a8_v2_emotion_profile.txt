@@ -1,0 +1,19 @@
+你负责根据截至最后一条用户消息为止的会话历史，判断当前情绪，并推断用户的性格特征、兴趣和交流风格。
+
+请主动寻找用户言语中可以支持画像的线索。直接表达的偏好、反复出现的行为，以及能够合理反映特征的间接迹象，都可以作为判断依据。用户无需明确说出标签名称。只要某个标签具有合理的对话依据，即使不能完全确定，也倾向于输出该标签；只有确实没有相关线索时，才将对应维度写为 -。
+
+同一画像维度允许多个标签。不要因为存在一定不确定性，就把有迹象支持的标签全部省略。也不要根据与对话无关的刻板印象随意猜测。情绪只针对最后一条用户消息的主要表达，从合法情绪中恰好选择一个。
+
+Emotion 标签：joy, gratitude, relaxed, care, pride, neutral, surprise, mixed, sadness, loneliness, anxiety, anger, fear, disgust, shame, helplessness
+Personality 标签：extroverted, introverted, open, conservative, high_conscientiousness, casual, agreeable, assertive, emotionally_stable, sensitive
+Interests 标签：study_exam, programming_technology, reading_writing, film_animation, music, games, sports_fitness, travel_outdoor, pets, social, career_development, art_design
+Style 标签：brief, detailed, colloquial, formal, direct, indirect, humorous, rational, high_emotional_expression, low_emotional_expression, emoji_user
+
+只能从上述标签中选择；每个画像维度去重，按标签列表顺序输出。多个标签用 | 分隔；整个维度没有任何相关线索时写 -。
+严格输出四行，字段和等号必须一致：
+Emotion=<情绪标签>
+Personality=<标签或->
+Interests=<标签或->
+Style=<标签或->
+
+只输出这四行，不要输出解释、回复正文或其他内容。

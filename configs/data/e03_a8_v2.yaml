@@ -1,0 +1,42 @@
+version: E03-A8-V2-data-v1
+experiment_id: E03-A8-V2
+inputs:
+  normalized_train: data/processed/v1/train.jsonl
+  f2_train: data/processed/sft/v1/train.jsonl
+  f2_manifest: outputs/sft_data/v1/manifest.json
+  d03_manifest: outputs/data_pipeline/v1/manifest.json
+  d042_manifest: outputs/token_audit/v1/manifest.json
+  d042_budget_rows: outputs/token_audit/v1/budget_simulations.jsonl
+  train_schema: data/train/train_public.schema.json
+  p0_prompt: configs/prompts/p0.txt
+  inference_config: participant/configs/e03_a6_f4_inference_config.json
+  tokenizer_signature_sha256: 1662c9e99c6185441026a168b2dd6b09af103dc6dc3563b72f598411f14d1913
+  chat_template_sha256: a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8
+  p0_sha256: d427e4996d0075a3adfe03ae25881d093687a6565f5b037f605accecc84c70b2
+  eos_token_id: 151645
+outputs:
+  dataset_dir: outputs/data/e03_a8_v2
+  run_root: outputs/training/E03-A8-V2
+expected_counts:
+  source_train: 16312
+  effective_train: 16192
+  historical_excluded: 120
+profile:
+  max_prompt_tokens: 1280
+  max_train_seq_length: 2048
+  history_policy: P0_T1_same_selected_history_then_common_P_EP_budget
+  completion_policy: complete_classification_only_or_block
+  padding_side: right
+  packing: false
+  padding_free: false
+prompts:
+  P: configs/prompts/p_a8_v2_profile.txt
+  EP: configs/prompts/p_a8_v2_emotion_profile.txt
+schedule:
+  algorithm: a8-v2-greedy-stratified-75-25-v1
+  seed: 42
+  gradient_accumulation_steps: 4
+  planned_steps: 4048
+  first_window_rows: 2048
+  first_window_nonempty_rows: 1536
+  first_window_all_empty_rows: 512
