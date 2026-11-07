@@ -84,12 +84,12 @@ def load_config(config_path: str | Path) -> tuple[dict[str, Any], Path]:
     if not resolved.is_file():
         raise FileNotFoundError(f"训练配置不存在: {resolved}")
     config = yaml.safe_load(resolved.read_text(encoding="utf-8"))
-    if not isinstance(config, dict) or config.get("version") != "E01-training-v1":
-        raise ValueError("训练配置 version 必须为 E01-training-v1")
+    if not isinstance(config, dict) or config.get("version") not in {"E01-training-v1", "E03-B-P2-training-v1"}:
+        raise ValueError("训练配置 version 必须为 E01-training-v1 或 E03-B-P2-training-v1")
     required = {"experiment_id", "status", "base_model", "data", "protocol", "quantization", "lora", "optimizer", "training", "evaluation"}
     if not required <= set(config):
         raise ValueError(f"训练配置缺少字段: {sorted(required - set(config))}")
-    if config["experiment_id"] not in {"E01-A", "E01-B", "E01-B-PILOT"}:
+    if config["experiment_id"] not in {"E01-A", "E01-B", "E01-B-PILOT", "E03-B-P2-TWOFIELD"}:
         raise ValueError("experiment_id 只允许 E01-A、E01-B 或 E01-B-PILOT")
     if config["data"].get("init_adapter") is not None or config["data"].get("resume_from_checkpoint") is not None:
         raise ValueError("E01 baseline 必须从 Base + 新 LoRA 初始化；init_adapter/resume_from_checkpoint 必须为空")
@@ -348,7 +348,54 @@ def deterministic_select_pilot_samples(
     return selected
 
 
+def _training_rows_e03b(config: dict[str, Any]) -> tuple[Path, Path, Path, dict[str, Any]]:
+    """E03-B-P2 自有数据入口：只校验本实验的 manifest，不碰 D0.4.3。"""
+    data = config["data"]
+    train_path = _resolve(data["train_path"])
+    dev_path = _resolve(data["dev_path"])
+    manifest_path = _resolve(data["sft_manifest"])
+    for path in (train_path, dev_path, manifest_path):
+        if not path.is_file():
+            raise FileNotFoundError(f"required E03-B-P2 file missing: {path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("version") != "E03B-v1":
+        raise ValueError("E03-B-P2 manifest version must be E03B-v1")
+    if manifest.get("outputs", {}).get("dataset_dir") != "data/processed/sft/e03b":
+        raise ValueError("E03-B-P2 data directory differs from the encoded dataset")
+    profile = manifest.get("config", {}).get("profile", {})
+    if profile.get("max_train_seq_length") != config["protocol"]["max_train_seq_length"]:
+        raise ValueError("E03-B-P2 S differs from config")
+    if profile.get("max_prompt_tokens") != config["protocol"]["max_prompt_tokens"]:
+        raise ValueError("E03-B-P2 P differs from config")
+    files = manifest.get("outputs", {}).get("files", {})
+    for name, path in (("train.jsonl", train_path), ("dev.jsonl", dev_path)):
+        meta = files.get(name, {})
+        if not meta.get("sha256") or sha256_file(path) != meta["sha256"]:
+            raise ValueError(f"E03-B-P2 {name} hash does not match its manifest")
+        rows = 0
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                row = json.loads(line)
+                rows += 1
+                prompt_length = int(row["prompt_length"])
+                inputs = row["input_ids"]
+                labels = row["labels"]
+                if prompt_length <= 0 or prompt_length >= len(inputs):
+                    raise ValueError(f"E03-B-P2 {row.get('sample_id')}: bad prompt_length")
+                if labels[:prompt_length] != [-100] * prompt_length:
+                    raise ValueError(f"E03-B-P2 {row.get('sample_id')}: prompt labels not masked")
+                if labels[prompt_length:] != inputs[prompt_length:]:
+                    raise ValueError(f"E03-B-P2 {row.get('sample_id')}: completion labels mismatch")
+                if 151645 not in inputs[prompt_length:]:
+                    raise ValueError(f"E03-B-P2 {row.get('sample_id')}: completion missing eos")
+        if rows != int(meta.get("records", -1)):
+            raise ValueError(f"E03-B-P2 {name} row count differs from manifest")
+    return train_path, dev_path, train_path, {"sft": manifest, "e03b": True}
+
+
 def _training_rows(config: dict[str, Any]) -> tuple[Path, Path, Path, dict[str, Any]]:
+    if config["experiment_id"] == "E03-B-P2-TWOFIELD":
+        return _training_rows_e03b(config)
     data = config["data"]
     train_path = _resolve(data["train_path"])
     dev_path = _resolve(data["dev_path"])
@@ -429,6 +476,16 @@ def _select_real_samples(config: dict[str, Any], train_path: Path, normalized_pa
             })
         if len(selected) != int(config["data"]["expected_train_rows"]) or len({row["sample_id"] for row in selected}) != len(selected):
             raise ValueError("Full B selection must contain all 16,192 unique effective Train IDs")
+    elif config["experiment_id"] == "E03-B-P2-TWOFIELD":
+        selected = [
+            {
+                **row,
+                "emotion_label": "neutral",
+                "profile_empty": True,
+                "sequence_length": row["prompt_length"] + row["completion_length"],
+            }
+            for row in sft_metadata
+        ]
     else:
         raise ValueError("Unknown training experiment")
     selected_ids = {row["sample_id"] for row in selected}
