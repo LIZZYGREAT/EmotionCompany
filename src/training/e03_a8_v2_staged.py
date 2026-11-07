@@ -1347,8 +1347,8 @@ def execute_continue(
     allow_authorized_continuation: bool,
 ) -> Path:
     """Continue the P Arm from a reviewed, verified checkpoint boundary."""
-    if not allow_authorized_continuation or stop_at_step not in {1024, 2048}:
-        raise ValueError("A8-V2 continuation requires explicit authorization and must stop at Step 1024 or 2048")
+    if not allow_authorized_continuation or stop_at_step not in {1024, 2048, 4048}:
+        raise ValueError("A8-V2 continuation requires explicit authorization and must stop at Step 1024, 2048, or 4048")
     config, _config_file = _load_config(config_path, "P")
     if config["arm"] != "P":
         raise ValueError("A8-V2 continuation is authorized for P only")
@@ -1360,8 +1360,9 @@ def execute_continue(
     parent_manifest_path = parent_run_root / "manifest.json"
     parent_manifest = _read_json(parent_manifest_path)
     parent_step = parent_manifest.get("optimizer_steps")
-    if parent_step not in {512, 1024} or stop_at_step != parent_step * 2:
-        raise ValueError("A8-V2 continuation must double a reviewed Step 512 or Step 1024 checkpoint")
+    next_boundary = {512: 1024, 1024: 2048, 2048: 4048}.get(parent_step)
+    if next_boundary is None or stop_at_step != next_boundary:
+        raise ValueError("A8-V2 continuation must advance from the reviewed checkpoint to the next boundary: 512→1024, 1024→2048, or 2048→4048")
     parent_node = parent_manifest.get("nodes", {}).get(str(parent_step), {})
     parent_checkpoint = parent_run_root / "trainer" / f"checkpoint-{parent_step}"
     parent_checkpoint_manifest_path = parent_checkpoint / "checkpoint_manifest.json"

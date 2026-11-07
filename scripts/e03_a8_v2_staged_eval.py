@@ -98,8 +98,8 @@ def _first_training_loss(training_config: dict[str, Any], training_manifest: dic
 
 
 def _validate_run(training_config: dict[str, Any], run_id: str, step: int) -> tuple[dict[str, Any], dict[str, Any], Path, Path]:
-    if step not in {512, 1024, 2048} or (step > 512 and training_config["arm"] != "P"):
-        raise ValueError("A8-V2 supports Step 512, plus explicitly authorized P continuation through Step 2048")
+    if step not in {512, 1024, 2048, 4048} or (step > 512 and training_config["arm"] != "P"):
+        raise ValueError("A8-V2 supports Step 512, plus explicitly authorized P continuation through Step 4048")
     training_root = _resolve(training_config["data"]["output_root"]) / run_id
     training_manifest_path = training_root / "manifest.json"
     training_manifest = _read_json(training_manifest_path)
