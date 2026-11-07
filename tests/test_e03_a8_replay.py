@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from src.data.e03_a8_replay import (
@@ -8,8 +11,11 @@ from src.data.e03_a8_replay import (
     score_candidate_difficulty,
     select_candidates,
     set_replay_learning_rate,
+    validate_encoded_gold_completion,
 )
 from src.evaluation.e03_a8_replay_metrics import freeze_val_splits, gate_reasons
+
+SCHEMA = json.loads((Path(__file__).resolve().parents[1] / "data/train/train_public.schema.json").read_text(encoding="utf-8"))
 
 
 def _gold(index: int) -> dict[str, list[str]]:
@@ -179,6 +185,31 @@ def test_replay_lr_reset_and_checkpoint_path_protection(tmp_path):
             local_baseline=local,
             archive_root=archive,
         )
+
+
+def test_gold_round_trip_ignores_only_template_text_after_eos():
+    completion = "Personality=-\nInterests=-\nStyle=-"
+
+    class Tokenizer:
+        eos_token_id = 99
+
+        def decode(self, ids, **_kwargs):
+            ids = list(ids)
+            if ids == [99]:
+                return "<|im_end|>"
+            if ids == [2, 99, 3]:
+                return completion + "<|im_end|>\n"
+            raise AssertionError(f"unexpected decode request: {ids}")
+
+    parsed = validate_encoded_gold_completion(
+        Tokenizer(),
+        [1, 2, 99, 3],
+        1,
+        completion,
+        SCHEMA,
+        sample_id="train:synthetic:pp0",
+    )
+    assert parsed["user_profile"] == {"personality_traits": [], "interests": [], "style": []}
 
 
 def test_val_splits_are_conversation_disjoint_and_repeatable():

@@ -35,6 +35,7 @@ from src.data.e03_a8_replay import (
     score_candidate_difficulty,
     set_replay_learning_rate as _set_replay_learning_rate,
     select_candidates,
+    validate_encoded_gold_completion,
 )
 from src.data.e03_a8_sft import canonical_sha256
 from src.data.sft_collator import SFTDataCollator
@@ -761,7 +762,7 @@ def _source_compact_records(config: dict[str, Any], model_config: dict[str, Any]
                     "sample_id": sample_id,
                     "conversation_id": row.get("conversation_id"),
                     "source": source,
-                    "target": {"user_profile": {dim: list(profile[dim]) for dim in PROFILE_DIMS}},
+                    "target": row["target"],
                     "history_message_count": len(row.get("history", [])),
                 }
     if set(normalized["train"]) & set(normalized["dev"]):
@@ -797,12 +798,19 @@ def _source_compact_records(config: dict[str, Any], model_config: dict[str, Any]
                     prompt_cap=int(model_config["protocol"]["max_prompt_tokens"]),
                     sequence_cap=int(model_config["protocol"]["max_train_seq_length"]),
                 )
-                completion_text = tokenizer.decode(
-                    row["input_ids"][row["prompt_length"]:],
-                    skip_special_tokens=True,
-                    clean_up_tokenization_spaces=False,
+                expected_completion = serialize_specialist_completion(
+                    gold_row["target"],
+                    _schema_cache["schema"],
+                    "P",
                 )
-                parsed = parse_specialist_output(completion_text, _schema_cache["schema"], "P")
+                parsed = validate_encoded_gold_completion(
+                    tokenizer,
+                    row["input_ids"],
+                    int(row["prompt_length"]),
+                    expected_completion,
+                    _schema_cache["schema"],
+                    sample_id=sample_id,
+                )
                 expected_profile = {
                     dim: sorted(gold_row["target"]["user_profile"][dim], key=enums[dim].index)
                     for dim in PROFILE_DIMS

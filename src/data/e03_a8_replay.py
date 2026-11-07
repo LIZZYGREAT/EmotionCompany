@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from src.shared.e03_a8_protocol import PROFILE_DIMS
+from src.shared.e03_a8_protocol import parse_specialist_output
 
 
 def canonical_json_sha256(value: Any) -> str:
@@ -17,6 +18,30 @@ def canonical_json_sha256(value: Any) -> str:
 
     payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def validate_encoded_gold_completion(
+    tokenizer: Any,
+    input_ids: Sequence[int],
+    prompt_length: int,
+    expected_completion: str,
+    official_schema: Mapping[str, Any],
+    *,
+    sample_id: str,
+) -> dict[str, Any]:
+    """Validate Gold text before EOS and the chat-template boundary after EOS."""
+    from src.shared.prompting import validate_completion_suffix
+
+    full_ids = list(map(int, input_ids))
+    prompt_ids = full_ids[:prompt_length]
+    validate_completion_suffix(
+        tokenizer,
+        expected_completion,
+        prompt_ids,
+        full_ids,
+        sample_id=sample_id,
+    )
+    return parse_specialist_output(expected_completion, official_schema, "P")
 
 
 def set_replay_learning_rate(optimizer: Any, scheduler: Any, learning_rate: float) -> dict[str, Any]:
