@@ -1,0 +1,95 @@
+version: E03-A8-hard-replay-v1
+experiment_id: E03-A8-REPLAY
+arm: P
+seed: 42
+
+parent:
+  run_id: E03-A8-DEVFT-20261108-02-PDEV-1EPOCH
+  checkpoint_path: outputs/training/E03-A8-DEVFT/P/E03-A8-DEVFT-20261108-02-PDEV-1EPOCH/trainer/checkpoint-0456
+  checkpoint_manifest_sha256: 79f59d95247771160198f7e5dcecfe05ea754f222d3a2236f72f0eeadceb9c79
+  global_optimizer_step: 4504
+  devft_step: 456
+  sample_cursor: 1821
+  adapter_weight_sha256: fa09260cb95f07e4fe25dc886c2d4ef31bd6bf65d3449fe0855370d76e7e851f
+  base_weight_sha256: 005d20550c04f4e246e5b434448786b44a0196b47d758d0acc77aba279e5bbc5
+
+model_config: configs/training/e03_a8_v2_p_staged.yaml
+training_config: configs/training/e03_a8_devft_p.yaml
+
+data:
+  train_encoded: outputs/data/e03_a8_v2/p_train.jsonl
+  train_manifest: outputs/data/e03_a8_v2/manifest.json
+  train_manifest_sha256: 2ca41600e5b5668c0ac07cdff962d309493954f2fc747265c7de39581ff95ebc
+  train_encoded_sha256: fdb30337e7afc53a85612640c598bfbbdce3a895a2ba999beea76f63c72edca0
+  train_count: 16192
+  train_normalized: data/processed/v1/train.jsonl
+  train_normalized_sha256: 1f1030c146792b21c78d2cc2ced83d1e202670562e1b2344a44ed2d43892aaa2
+  dev_encoded: outputs/data/e03_a8_devft_v1/p_devft.jsonl
+  dev_manifest: outputs/data/e03_a8_devft_v1/manifest.json
+  dev_manifest_sha256: a95553503a05bb20186578d2d0022bcdbac8f1f84ff23ad4b5093dbab46896e2
+  dev_encoded_sha256: 689eded23c265f9b5d993052ced230501ab9d28f664333628d8a0414c79b7cf3
+  dev_count: 1821
+  dev_normalized: data/processed/v1/dev.jsonl
+  dev_normalized_sha256: bfacf9cd4a0e069e50862f973a98a3d379215231b0797e94ac76c5a70c5fbd78
+  expected_total_count: 18013
+  official_schema: data/train/train_public.schema.json
+  official_schema_sha256: a9467e520b06a96859acaa2ff022e395d08ff6ad5e8ae3532a22cc24c630cada
+
+candidate_selection:
+  count: 3000
+  source_counts:
+    train: 2700
+    dev: 300
+  nonempty_fraction: 0.75
+  max_samples_per_conversation: 5
+  rare_label_sample_cap: 10
+
+schedule:
+  pilot_steps: 128
+  extension_steps: 256
+  gradient_accumulation_steps: 4
+  dev_exposure_fraction_max: 0.25
+  pilot_hard_repeat_fraction_min: 0.20
+  per_conversation_chunk_max: 4
+  bucket_quotas:
+    pilot:
+      miss: 230
+      extra: 128
+      maintain: 154
+    extension:
+      miss: 461
+      extra: 256
+      maintain: 307
+
+training:
+  learning_rate: 0.00002
+  weight_decay: 0.0
+  checkpoint_steps: [128, 256, 384]
+  ledger_flush_steps: 32
+  max_cuda_memory_fraction: 0.92
+  max_training_seconds: 14400
+
+validation:
+  input_path: outputs/evaluation/e03_a8_devft_v1/E03-A8-DEVFT-20261108-02-PDEV-1EPOCH/val_target_free.jsonl
+  input_sha256: b6e6859c4583294ff58227331c17b9f0fc4371ff109f3612de29ddc8e4a16b54
+  id_map_path: outputs/evaluation/e03_a8_devft_v1/E03-A8-DEVFT-20261108-02-PDEV-1EPOCH/val_id_map.jsonl
+  id_map_sha256: 2a98e4ed166c1719c35ae7ad437ab668dc5ee7b1dc311b6d4d01d768250ba126
+  historical_exposure_path: outputs/evaluation/e03_a8_devft_v1/E03-A8-DEVFT-20261108-02-PDEV-1EPOCH/a2_exposed_ids.json
+  historical_exposure_sha256: 55404687e64ca442d72a55781cd60c5b9989207ea68f8f22bceb6a46cc3729fb
+  parent_predictions_path: outputs/evaluation/e03_a8_devft_v1/E03-A8-DEVFT-20261108-02-PDEV-1EPOCH/predictions.jsonl
+  parent_predictions_sha256: 493b9a973a45b893b6dc134872c1bd0b2df06ba49b1319ef92c47652c7b6faac
+  normalized_gold_path: data/processed/v1/val.jsonl
+  normalized_gold_sha256: 0e9a65f8da4d695beff0bbb9784855de318e5b2bcfa0e8777dc52f71b193ea0f
+  minimum_cohort_points: 100
+  gate_fraction_by_conversation: 0.25
+  minimum_micro_f1_delta: 0.003
+  maximum_precision_drop: 0.02
+  maximum_dimension_f1_drop: 0.02
+  minimum_strict_parse_rate: 0.99
+  minimum_eos_rate: 0.99
+  maximum_new_fp_ratio: 1.5
+
+outputs:
+  training_root: outputs/training/E03-A8-REPLAY
+  evaluation_root: outputs/evaluation/e03_a8_replay
+  archive_root: ~/model-archives/EmotionCompany

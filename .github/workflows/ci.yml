@@ -87,4 +87,5 @@ jobs:
             tests/test_e03_a6_f4_protocol.py \
             tests/test_e03_a6_f4_staged_contract.py \
             tests/test_e03_a6_f4_staged_resume.py \
-            tests/test_e03_a6_f4_staged_fast.py
+            tests/test_e03_a6_f4_staged_fast.py \
+            tests/test_e03_a8_replay.py
