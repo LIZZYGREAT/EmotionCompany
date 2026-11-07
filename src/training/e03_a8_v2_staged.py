@@ -535,6 +535,8 @@ def execute_gpu_dry_step(config_path: Path, run_id: str, preflight_root: Path, *
     data_facts = _validate_prepared_data(config)
     tokenizer = model = None
     torch = None
+    comparisons: list[dict[str, Any]] = []
+    failed_comparisons: list[str] = []
     dry_root.mkdir(parents=True, exist_ok=False)
     try:
         tokenizer, tokenizer_facts = _runtime_tokenizer(config)
@@ -549,7 +551,6 @@ def execute_gpu_dry_step(config_path: Path, run_id: str, preflight_root: Path, *
         parameters = _lora_parameters(model)
         collator = SFTDataCollator(tokenizer.pad_token_id, max_sequence_length=2048)
         id_index = JsonlById(_resolve(config["data"]["train_path"]))
-        comparisons = []
         for name, sample_id in data_facts["representative_ids"].items():
             row = id_index.get(sample_id)
             _row_contract(row, eos_token_id=int(config["protocol"]["eos_token_id"]), prompt_cap=1280, sequence_cap=2048)
@@ -579,8 +580,6 @@ def execute_gpu_dry_step(config_path: Path, run_id: str, preflight_root: Path, *
                 and gradient_facts["global_relative_l2_error"] <= 5e-4
                 and gradient_facts["gradient_cosine_similarity"] >= 0.999999
             )
-            if not passed:
-                raise RuntimeError(f"A8-V2 selective loss/gradient equivalence failed for {name}: {gradient_facts}")
             comparisons.append({
                 "sample_id": sample_id,
                 "length_group": name,
@@ -595,10 +594,15 @@ def execute_gpu_dry_step(config_path: Path, run_id: str, preflight_root: Path, *
                     "global_relative_l2_max": 5e-4,
                     "cosine_min": 0.999999,
                 },
+                "passed": passed,
             })
+            if not passed:
+                failed_comparisons.append(name)
             model.zero_grad(set_to_none=True)
             del old_grads, new_grads, batch
         id_index.close()
+        if failed_comparisons:
+            raise RuntimeError(f"A8-V2 selective loss/gradient equivalence failed for {failed_comparisons}")
         final_lora_sha = _lora_tensor_sha256(model, torch)
         if initial_sha != final_lora_sha:
             raise RuntimeError("A8-V2 dry-run modified LoRA parameters without an optimizer step")
@@ -640,6 +644,8 @@ def execute_gpu_dry_step(config_path: Path, run_id: str, preflight_root: Path, *
         _write_json(dry_root / "dry_step.json", {
             "status": "failed", "run_id": run_id, "arm": config["arm"],
             "error": f"{type(exc).__name__}: {exc}", "created_at_utc": _now(),
+            "equivalence_comparisons": comparisons,
+            "failed_comparison_groups": failed_comparisons,
         })
         raise
     finally:
