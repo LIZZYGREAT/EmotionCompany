@@ -903,22 +903,47 @@ def _verify_v2_checkpoint(checkpoint: Path, expected: dict[str, Any]) -> dict[st
     return record
 
 
-def _execute_training(config: dict[str, Any], run_id: str, run_root: Path, *, preflight: dict[str, Any], data_facts: dict[str, Any], dry: dict[str, Any]) -> Path:
+def _execute_training(
+    config: dict[str, Any],
+    run_id: str,
+    run_root: Path,
+    *,
+    preflight: dict[str, Any],
+    data_facts: dict[str, Any],
+    dry: dict[str, Any],
+    continuation: dict[str, Any] | None = None,
+) -> Path:
     torch = __import__("torch")
     tokenizer = model = None
     ledger = None
     started = time.monotonic()
-    code_identity = preflight["training_code_sha256"]
+    start_step = int(continuation["start_step"]) if continuation else 0
+    stop_step = int(continuation["stop_step"]) if continuation else 512
+    prior_training_seconds = 0.0
+    code_identity = _code_identity(V2_TRAINING_CODE_PATHS) if continuation else preflight["training_code_sha256"]
     benchmark_gate = _require_performance_gate(config, config["arm"])
     try:
         tokenizer, _tokenizer_facts = _runtime_tokenizer(config)
         from src.training.training_sft import _load_train_model
 
         _set_seed(int(config["training"]["seed"]), torch)
-        model, torch, model_facts = _load_train_model(config, _base_path(config))
+        if continuation:
+            model, torch, model_facts = _load_train_model(
+                config,
+                _base_path(config),
+                adapter_path=continuation["parent_checkpoint"],
+                is_trainable_adapter=True,
+                autocast_adapter_dtype=True,
+            )
+        else:
+            model, torch, model_facts = _load_train_model(config, _base_path(config))
         trainable = _lora_parameters(model)
-        initial_lora_sha = _lora_tensor_sha256(model, torch)
-        if initial_lora_sha != dry["initial_lora_tensor_sha256"]:
+        loaded_lora_sha = _lora_tensor_sha256(model, torch)
+        initial_lora_sha = dry["initial_lora_tensor_sha256"]
+        if continuation:
+            if loaded_lora_sha != continuation["parent_adapter_tensor_sha256"]:
+                raise ValueError("A8-V2 continuation Adapter tensors differ from the parent Step 512 checkpoint")
+        elif loaded_lora_sha != initial_lora_sha:
             raise ValueError("A8-V2 fresh training LoRA differs from its dry-run initialization")
         optimizer = torch.optim.AdamW(
             [parameter for _name, parameter in trainable],
@@ -926,6 +951,24 @@ def _execute_training(config: dict[str, Any], run_id: str, run_root: Path, *, pr
             weight_decay=float(config["optimizer"]["weight_decay"]),
         )
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _step: 1.0)
+        if continuation:
+            restored = restore_recovery_bundle(
+                continuation["parent_checkpoint"],
+                optimizer=optimizer,
+                scheduler=scheduler,
+                torch=torch,
+                expected_run_id=continuation["parent_run_id"],
+                expected_arm=config["arm"],
+                accumulation_steps=int(config["training"]["gradient_accumulation_steps"]),
+            )
+            if (
+                restored.get("global_step") != start_step
+                or restored.get("sample_cursor") != start_step * int(config["training"]["gradient_accumulation_steps"])
+                or scheduler.last_epoch != start_step
+                or not optimizer.state
+            ):
+                raise ValueError("A8-V2 continuation parent recovery state is not at the requested boundary")
+            prior_training_seconds = float(restored.get("training_seconds", 0.0))
         base_before = _base_identity(config)
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
@@ -937,7 +980,7 @@ def _execute_training(config: dict[str, Any], run_id: str, run_root: Path, *, pr
         recent_step_events = []
         pending_loss_tensors = []
         with JsonlById(train_path) as train_rows:
-            for step_index in range(512):
+            for step_index in range(start_step, stop_step):
                 step = step_index + 1
                 step_host_started = time.monotonic()
                 scheduled = schedule[step_index]
@@ -950,7 +993,7 @@ def _execute_training(config: dict[str, Any], run_id: str, run_root: Path, *, pr
                 forward_enqueue_seconds = backward_enqueue_seconds = 0.0
                 step_event_start = torch.cuda.Event(enable_timing=True)
                 step_event_end = torch.cuda.Event(enable_timing=True)
-                diagnostic = step <= 4 or step % int(config["training"]["diagnostic_interval_steps"]) == 0 or step == 512
+                diagnostic = step <= 4 or step % int(config["training"]["diagnostic_interval_steps"]) == 0 or step == stop_step
                 micro_events = []
                 for sample_id in scheduled["sample_ids"]:
                     timer = time.monotonic()
@@ -1024,7 +1067,7 @@ def _execute_training(config: dict[str, Any], run_id: str, run_root: Path, *, pr
                     "step_wall_host_seconds": step_end_host - step_host_started,
                 })
 
-                if step % int(config["training"]["diagnostic_interval_steps"]) == 0 or step == 512:
+                if step % int(config["training"]["diagnostic_interval_steps"]) == 0 or step == stop_step:
                     torch.cuda.synchronize()
                     flat_losses = torch.stack([loss for item in pending for loss in item["loss_tensors"]]).detach().cpu().tolist()
                     memory = inference.cuda_memory_facts(torch)
@@ -1078,28 +1121,30 @@ def _execute_training(config: dict[str, Any], run_id: str, run_root: Path, *, pr
                     persist_seconds = ledger.flush()
                     pending.clear()
                     recent_step_events.clear()
-                    if elapsed_now > float(config["training"]["max_training_seconds"]):
+                    if prior_training_seconds + elapsed_now > float(config["training"]["max_training_seconds"]):
                         raise TimeoutError("A8-V2 Run exceeded its frozen cumulative training-time budget")
-                    print(f"[E03-A8-V2 {config['arm']}] optimizer_step={step}/512 loss={row_ledger['mean_completion_loss']:.5f} supervised_tokens={row_ledger['completion_tokens']} ledger_flush_s={persist_seconds:.2f}", flush=True)
+                    print(f"[E03-A8-V2 {config['arm']}] optimizer_step={step}/{stop_step} loss={row_ledger['mean_completion_loss']:.5f} supervised_tokens={row_ledger['completion_tokens']} ledger_flush_s={persist_seconds:.2f}", flush=True)
 
         torch.cuda.synchronize()
         if pending or ledger.pending:
             raise RuntimeError("A8-V2 final ledger was not flushed before checkpointing")
-        training_seconds = time.monotonic() - started
+        segment_training_seconds = time.monotonic() - started
+        training_seconds = prior_training_seconds + segment_training_seconds
         base_after = _base_identity(config)
         if base_before.get("observed_weight_hash") != base_after.get("observed_weight_hash"):
             raise RuntimeError("A8-V2 Base weights changed during training")
         all_ledger = _read_jsonl(run_root / "step_ledger.jsonl")
-        if len(all_ledger) != 512 or [row["optimizer_step"] for row in all_ledger] != list(range(1, 513)):
-            raise RuntimeError("A8-V2 ledger is not a complete, ordered 512-step record")
+        expected_steps = list(range(start_step + 1, stop_step + 1))
+        if len(all_ledger) != len(expected_steps) or [row["optimizer_step"] for row in all_ledger] != expected_steps:
+            raise RuntimeError("A8-V2 stage ledger is not a complete, ordered record for its step range")
         checkpoint, checkpoint_record = _save_checkpoint(
             model=model, optimizer=optimizer, scheduler=scheduler, torch=torch, run_root=run_root,
-            config=config, run_id=run_id, step=512, data_facts=data_facts, preflight=preflight,
+            config=config, run_id=run_id, step=stop_step, data_facts=data_facts, preflight=preflight,
             initial_lora_sha=initial_lora_sha, last_loss=float(all_ledger[-1]["mean_completion_loss"]),
             training_seconds=training_seconds, cuda_memory=inference.cuda_memory_facts(torch),
             code_identity=code_identity,
         )
-        probe_id = schedule[0]["sample_ids"][0]
+        probe_id = schedule[start_step]["sample_ids"][0]
         with JsonlById(train_path) as train_rows:
             probe_row = train_rows.get(probe_id)
         probe_ids = list(probe_row["input_ids"][:probe_row["prompt_length"]])
@@ -1113,16 +1158,36 @@ def _execute_training(config: dict[str, Any], run_id: str, run_root: Path, *, pr
         reload_check = _independent_reload_check(checkpoint, config, probe_ids, before_token, before_lora, expected_adapter_sha)
         gpu_times = [float(row["timing"]["gpu_step_seconds"]) for row in all_ledger]
         wall_times = [float(row["timing"]["step_wall_host_seconds"]) for row in all_ledger]
+        parent_training_node = None
+        if continuation:
+            parent_training = _read_json(continuation["parent_run_root"] / "step-0512" / "training.json")
+            parent_training_node = parent_training
+        segment_loss_mean = sum(float(row["mean_completion_loss"]) for row in all_ledger) / len(all_ledger)
+        segment_completion_tokens = sum(int(row["completion_tokens"]) for row in all_ledger)
+        cumulative_completion_tokens = segment_completion_tokens + int(parent_training_node["completion_tokens_seen"] if parent_training_node else 0)
+        cumulative_loss_mean = (
+            (float(parent_training_node["loss_mean"]) * start_step + segment_loss_mean * len(all_ledger)) / stop_step
+            if parent_training_node else segment_loss_mean
+        )
         training_node = {
             "status": "training_checkpoint_passed",
             "experiment_id": "E03-A8-V2",
             "run_id": run_id,
             "arm": config["arm"],
-            "optimizer_step": 512,
-            "samples_seen": 2048,
+            "optimizer_step": stop_step,
+            "steps_in_segment": stop_step - start_step,
+            "segment_start_step_exclusive": start_step,
+            "samples_seen": stop_step * int(config["training"]["gradient_accumulation_steps"]),
+            "continuation_parent": {
+                "run_id": continuation["parent_run_id"],
+                "step": start_step,
+                "checkpoint_manifest_sha256": continuation["parent_checkpoint_manifest_sha256"],
+                "adapter_weight_sha256": continuation["parent_adapter_weight_sha256"],
+                "adapter_tensor_sha256": continuation["parent_adapter_tensor_sha256"],
+            } if continuation else None,
             "sample_order_sha256": data_facts["schedule_sha256"],
             "consumed_sample_ids_sha256": checkpoint_record["consumed_sample_ids_sha256"],
-            "completion_tokens_seen": sum(int(row["completion_tokens"]) for row in all_ledger),
+            "completion_tokens_seen": cumulative_completion_tokens,
             "checkpoint_path": str(checkpoint.relative_to(run_root)),
             "checkpoint_manifest_sha256": sha256_file(checkpoint / "checkpoint_manifest.json"),
             "checkpoint": checkpoint_record,
@@ -1132,7 +1197,8 @@ def _execute_training(config: dict[str, Any], run_id: str, run_root: Path, *, pr
             "base_weight_sha256_after": base_after.get("observed_weight_hash"),
             "base_weights_unchanged": True,
             "cumulative_training_seconds": training_seconds,
-            "loss_mean": sum(float(row["mean_completion_loss"]) for row in all_ledger) / len(all_ledger),
+            "loss_mean": cumulative_loss_mean,
+            "segment_loss_mean": segment_loss_mean,
             "last_loss": float(all_ledger[-1]["mean_completion_loss"]),
             "step_gpu_seconds": {
                 "mean": sum(gpu_times) / len(gpu_times),
@@ -1151,21 +1217,21 @@ def _execute_training(config: dict[str, Any], run_id: str, run_root: Path, *, pr
             "model_facts": model_facts,
             "created_at_utc": _now(),
         }
-        node_dir = run_root / "step-0512"
+        node_dir = run_root / f"step-{stop_step:04d}"
         node_dir.mkdir(parents=False, exist_ok=False)
         _write_json(node_dir / "training.json", training_node, exclusive=True)
         _write_json(run_root / "manifest.json", {
             **_read_json(run_root / "manifest.json"),
             "status": "awaiting_evaluation",
             "stage": "checkpoint_saved_awaiting_evaluation",
-            "optimizer_steps": 512,
+            "optimizer_steps": stop_step,
             "last_checkpoint": str(checkpoint.relative_to(run_root)),
             "checkpoint_manifest_sha256": training_node["checkpoint_manifest_sha256"],
             "cumulative_training_seconds": training_seconds,
             "base_weight_sha256_after_training": base_after.get("observed_weight_hash"),
-            "nodes": {"512": {
+            "nodes": {str(stop_step): {
                 "training_status": "passed",
-                "training_summary_path": "step-0512/training.json",
+                "training_summary_path": str((node_dir / "training.json").relative_to(run_root)),
                 "checkpoint_manifest_sha256": training_node["checkpoint_manifest_sha256"],
                 "evaluation_status": "not_run",
                 "authorization_status": "awaiting_evaluation",
@@ -1269,6 +1335,144 @@ def execute_start(config_path: Path, run_id: str, preflight_root: Path, dry_root
         "created_at_utc": _now(),
     }, exclusive=True)
     return _execute_training(config, run_id, run_root, preflight=preflight, data_facts=data_facts, dry=dry)
+
+
+def execute_continue(
+    config_path: Path,
+    run_id: str,
+    parent_run_id: str,
+    preflight_root: Path,
+    dry_root: Path,
+    *,
+    stop_at_step: int,
+    allow_1024_continuation: bool,
+) -> Path:
+    """Continue the P Arm from its verified Step 512 optimizer/RNG boundary."""
+    if not allow_1024_continuation or stop_at_step != 1024:
+        raise ValueError("A8-V2 Step 512→1024 requires the explicit --allow-1024-continuation authorization")
+    config, _config_file = _load_config(config_path, "P")
+    if config["arm"] != "P":
+        raise ValueError("A8-V2 Step 1024 continuation is authorized for P only")
+    preflight = _validate_preflight(config, run_id, preflight_root)
+    dry = _validate_dry(config, run_id, preflight_root, dry_root)
+    data_facts = _validate_prepared_data(config)
+
+    _parent_preflight_root, _parent_dry_root, parent_run_root = _run_paths(config, parent_run_id)
+    parent_manifest_path = parent_run_root / "manifest.json"
+    parent_manifest = _read_json(parent_manifest_path)
+    parent_node = parent_manifest.get("nodes", {}).get("512", {})
+    parent_checkpoint = parent_run_root / "trainer" / "checkpoint-512"
+    parent_checkpoint_manifest_path = parent_checkpoint / "checkpoint_manifest.json"
+    parent_checkpoint_sha = sha256_file(parent_checkpoint_manifest_path)
+    if (
+        parent_manifest.get("run_id") != parent_run_id
+        or parent_manifest.get("arm") != "P"
+        or parent_manifest.get("optimizer_steps") != 512
+        or parent_manifest.get("config_sha256") != _config_sha256(config)
+        or parent_manifest.get("dataset_manifest_sha256") != data_facts["dataset_manifest_sha256"]
+        or parent_manifest.get("sample_order_sha256") != data_facts["schedule_sha256"]
+        or parent_manifest.get("authorized_max_step") != 512
+        or parent_node.get("training_status") != "passed"
+        or parent_node.get("checkpoint_manifest_sha256") != parent_checkpoint_sha
+        or parent_manifest.get("checkpoint_manifest_sha256") != parent_checkpoint_sha
+    ):
+        raise ValueError("A8-V2 P parent Run is not a verified Step 512 continuation source")
+    parent_checkpoint_record = _verify_v2_checkpoint(parent_checkpoint, {
+        "run_id": parent_run_id,
+        "arm": "P",
+        "optimizer_step": 512,
+        "config_sha256": parent_manifest["config_sha256"],
+        "dataset_manifest_sha256": parent_manifest["dataset_manifest_sha256"],
+        "sample_order_sha256": parent_manifest["sample_order_sha256"],
+        "training_code_sha256": parent_manifest["training_code_sha256"],
+    })
+    parent_training_node = _read_json(parent_run_root / "step-0512" / "training.json")
+    parent_tensor_sha = parent_training_node.get("independent_reload_check", {}).get("adapter_tensor_sha256_after_reload")
+    parent_dry = _read_json(parent_run_root / "dry_step_gate.json")
+    sibling_ep_dry_path = _resolve("outputs/training/E03-A8-V2/EP") / f"{parent_run_id}-dry" / "dry_step.json"
+    sibling_ep_dry = _read_json(sibling_ep_dry_path)
+    if (
+        parent_dry.get("status") != "passed"
+        or sibling_ep_dry.get("status") != "passed"
+        or dry.get("initial_lora_tensor_sha256") != parent_dry.get("initial_lora_tensor_sha256")
+        or sibling_ep_dry.get("initial_lora_tensor_sha256") != parent_dry.get("initial_lora_tensor_sha256")
+    ):
+        raise ValueError("A8-V2 continuation fresh-start dry-run differs from the paired P/EP initialization")
+    if (
+        parent_checkpoint_record.get("adapter_identity", {}).get("weight_sha256") is None
+        or parent_training_node.get("independent_reload_check", {}).get("status") != "passed"
+        or not isinstance(parent_tensor_sha, str)
+        or parent_training_node.get("independent_reload_check", {}).get("adapter_tensor_sha256_before_save") != parent_tensor_sha
+    ):
+        raise ValueError("A8-V2 parent Step 512 checkpoint has no adapter weight identity")
+
+    _preflight_root, _dry_root, run_root = _run_paths(config, run_id)
+    if run_root.exists():
+        raise FileExistsError(f"refusing to overwrite A8-V2 continuation Run: {run_root}")
+    run_root.mkdir(parents=True, exist_ok=False)
+    (run_root / "trainer").mkdir()
+    shutil.copy2((preflight_root if preflight_root.is_absolute() else ROOT / preflight_root) / "preflight.json", run_root / "preflight.json")
+    shutil.copy2((dry_root if dry_root.is_absolute() else ROOT / dry_root) / "dry_step.json", run_root / "dry_step_gate.json")
+    shutil.copy2(_resolve(config["data"]["sample_order_path"]), run_root / "sample_order.jsonl")
+    _write_json(run_root / "config_snapshot.json", config, exclusive=True)
+    _write_json(run_root / "manifest.json", {
+        "status": "running",
+        "stage": "continuation_initialized",
+        "experiment_id": "E03-A8-V2",
+        "training_scope": "generative_profile_specialist",
+        "arm": "P",
+        "run_id": run_id,
+        "config_sha256": _config_sha256(config),
+        "preflight_sha256": sha256_file(run_root / "preflight.json"),
+        "dry_step_sha256": sha256_file(run_root / "dry_step_gate.json"),
+        "training_code_sha256": preflight["training_code_sha256"],
+        "evaluation_code_sha256": preflight["evaluation_code_sha256"],
+        "dataset_manifest_sha256": data_facts["dataset_manifest_sha256"],
+        "train_file_sha256": sha256_file(_resolve(config["data"]["train_path"])),
+        "sample_order_sha256": data_facts["schedule_sha256"],
+        "initial_lora_tensor_sha256": dry["initial_lora_tensor_sha256"],
+        "performance_gate": _require_performance_gate(config, "P"),
+        "max_optimizer_steps": 4048,
+        "authorized_max_step": 1024,
+        "authorization_source": "Explicit user instruction: continue P to 1024 optimizer steps",
+        "recovery_state_persisted": True,
+        "optimizer_steps": 512,
+        "continuation": {
+            "parent_run_id": parent_run_id,
+            "parent_manifest_sha256": sha256_file(parent_manifest_path),
+            "parent_checkpoint_path": str(parent_checkpoint.relative_to(ROOT)),
+            "parent_checkpoint_manifest_sha256": parent_checkpoint_sha,
+            "parent_adapter_weight_sha256": parent_checkpoint_record["adapter_identity"]["weight_sha256"],
+            "parent_adapter_tensor_sha256": parent_tensor_sha,
+            "start_step_exclusive": 512,
+            "stop_step_inclusive": stop_at_step,
+            "sample_cursor_start": 2048,
+            "optimizer_state_restored": True,
+            "scheduler_state_restored": True,
+            "rng_state_restored": True,
+        },
+        "nodes": {},
+        "created_at_utc": _now(),
+    }, exclusive=True)
+    return _execute_training(
+        config,
+        run_id,
+        run_root,
+        preflight=preflight,
+        data_facts=data_facts,
+        dry=dry,
+        continuation={
+            "parent_run_id": parent_run_id,
+            "parent_run_root": parent_run_root,
+            "parent_training_node": parent_training_node,
+            "parent_checkpoint": parent_checkpoint,
+            "parent_checkpoint_manifest_sha256": parent_checkpoint_sha,
+            "parent_adapter_weight_sha256": parent_checkpoint_record["adapter_identity"]["weight_sha256"],
+            "parent_adapter_tensor_sha256": parent_tensor_sha,
+            "start_step": 512,
+            "stop_step": stop_at_step,
+        },
+    )
 
 
 DEFAULT_CONFIGS = {

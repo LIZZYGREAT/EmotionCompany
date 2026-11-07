@@ -78,8 +78,8 @@ def _eval_root(eval_config: dict[str, Any], arm: str, run_id: str, step: int) ->
 
 
 def _validate_run(training_config: dict[str, Any], run_id: str, step: int) -> tuple[dict[str, Any], dict[str, Any], Path, Path]:
-    if step != 512:
-        raise ValueError("A8-V2 execution plan ends at Step 512")
+    if step not in {512, 1024} or (step == 1024 and training_config["arm"] != "P"):
+        raise ValueError("A8-V2 supports Step 512, plus the explicitly authorized P Step 1024 continuation")
     training_root = _resolve(training_config["data"]["output_root"]) / run_id
     training_manifest_path = training_root / "manifest.json"
     training_manifest = _read_json(training_manifest_path)
@@ -235,7 +235,7 @@ def evaluate_checkpoint(
             engineering_reasons.append("nf4_cuda_placement_or_offload_gate_failed")
         if base_before.get("observed_weight_hash") != base_after.get("observed_weight_hash"):
             engineering_reasons.append("base_weight_changed_during_evaluation")
-        train_summary = _read_json(training_root / "step-0512" / "training.json")
+        train_summary = _read_json(training_root / f"step-{step:04d}" / "training.json")
         if train_summary.get("independent_reload_check", {}).get("status") != "passed":
             engineering_reasons.append("independent_checkpoint_reload_failed")
         if sum(int(row.get("generated_token_count", 0)) for row in generated) != generation_facts["generated_token_count"]:
@@ -248,7 +248,7 @@ def evaluate_checkpoint(
             "run_id": run_id,
             "checkpoint_step": step,
             "samples_seen": step * 4,
-            "authorized_max_step": 512,
+            "authorized_max_step": int(training_manifest["authorized_max_step"]),
             "engineering_gate": engineering_gate,
             "engineering_gate_reasons": engineering_reasons,
             "checkpoint_manifest_sha256": checkpoint_sha,
@@ -280,10 +280,17 @@ def evaluate_checkpoint(
             "training": {
                 "train_rows": 16192,
                 "samples_seen": step * 4,
-                "completion_tokens_seen": sum(int(row.get("completion_tokens", 0)) for row in _read_jsonl(training_root / "step_ledger.jsonl")),
-                "loss_start": _read_jsonl(training_root / "step_ledger.jsonl")[0]["mean_completion_loss"],
+                "completion_tokens_seen": int(train_summary["completion_tokens_seen"]),
+                "loss_start": _read_jsonl(
+                    _resolve(training_config["data"]["output_root"])
+                    / training_manifest["continuation"]["parent_run_id"]
+                    / "step_ledger.jsonl"
+                    if training_manifest.get("continuation")
+                    else training_root / "step_ledger.jsonl"
+                )[0]["mean_completion_loss"],
                 "loss_node": train_summary["last_loss"],
                 "loss_mean": train_summary["loss_mean"],
+                "segment_loss_mean": train_summary.get("segment_loss_mean", train_summary["loss_mean"]),
                 "cumulative_training_seconds": train_summary["cumulative_training_seconds"],
                 "initial_lora_tensor_sha256": training_manifest["initial_lora_tensor_sha256"],
                 "sample_order_sha256": data_facts["schedule_sha256"],
@@ -300,7 +307,10 @@ def evaluate_checkpoint(
                 "union_ids_sha256": cohorts["union_ids_sha256"],
                 "prediction_sha256": prediction_sha,
             },
-            "quality_decision": {"decision": "awaiting_manual_review", "reason": "plan_stop_after_step_512_for_manual_review"},
+            "quality_decision": {
+                "decision": "awaiting_manual_review",
+                "reason": f"plan_stop_after_step_{step}_for_manual_review",
+            },
             "progression_authorization_status": "awaiting_manual_review",
             "node_metrics_individually_reviewed": False,
             "created_at_utc": _now(),
@@ -344,7 +354,7 @@ def evaluate_checkpoint(
         )
         training_manifest["last_evaluation_summary_path"] = str(summary_path.relative_to(ROOT))
         training_manifest["last_evaluation_summary_sha256"] = sha256_file(summary_path)
-        training_manifest.update(status="awaiting_manual_review", stage="step_512_manual_review_boundary")
+        training_manifest.update(status="awaiting_manual_review", stage=f"step_{step}_manual_review_boundary")
         _write_json(training_root / "manifest.json", training_manifest)
         return summary
     except BaseException as exc:

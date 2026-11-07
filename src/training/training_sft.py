@@ -837,6 +837,7 @@ def _load_train_model(
     base_path: Path,
     *,
     adapter_path: Path | None = None,
+    is_trainable_adapter: bool = False,
     autocast_adapter_dtype: bool | None = None,
 ) -> tuple[Any, Any, dict[str, Any]]:
     import torch
@@ -867,14 +868,28 @@ def _load_train_model(
             model,
             adapter_path,
             prepare_quantized_base=True,
-            is_trainable=False,
+            is_trainable=is_trainable_adapter,
             local_files_only=True,
             autocast_adapter_dtype=autocast_adapter_dtype,
         )
-        model.eval()
+        if is_trainable_adapter:
+            if bool(config["training"]["gradient_checkpointing"]):
+                if not getattr(model, "is_gradient_checkpointing", False):
+                    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+                if getattr(model, "_require_grads_hook", None) is None:
+                    model.enable_input_require_grads()
+            trainable = [(name, parameter) for name, parameter in model.named_parameters() if parameter.requires_grad]
+            if not trainable or any(".lora_A." not in name and ".lora_B." not in name for name, _ in trainable):
+                raise RuntimeError("trainable adapter must expose only LoRA A/B parameters")
+            model.train()
+        else:
+            model.eval()
         facts = inference.inspect_quantization_runtime(model, _training_quantization_inspection_config(config), torch)
         if not facts.get("real_nf4_verified") or facts.get("offload_devices"):
             raise RuntimeError("reloaded Adapter failed NF4/BF16/CUDA placement verification")
+        if is_trainable_adapter:
+            facts["trainable_parameter_count"] = sum(parameter.numel() for _name, parameter in trainable)
+            facts["all_trainable_parameters_are_lora"] = True
         facts["adapter_dtype_autocast"] = "peft_default" if autocast_adapter_dtype is None else autocast_adapter_dtype
         return model, torch, facts
     from peft import prepare_model_for_kbit_training
