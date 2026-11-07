@@ -77,9 +77,29 @@ def _eval_root(eval_config: dict[str, Any], arm: str, run_id: str, step: int) ->
     return root
 
 
+def _first_training_loss(training_config: dict[str, Any], training_manifest: dict[str, Any], training_root: Path) -> float:
+    output_root = _resolve(training_config["data"]["output_root"])
+    manifest = training_manifest
+    run_root = training_root
+    visited = {str(manifest.get("run_id"))}
+    while manifest.get("continuation"):
+        parent_run_id = manifest["continuation"].get("parent_run_id")
+        if not isinstance(parent_run_id, str) or parent_run_id in visited:
+            raise ValueError("A8-V2 continuation lineage is invalid or cyclic")
+        visited.add(parent_run_id)
+        run_root = (output_root / parent_run_id).resolve()
+        if not run_root.is_relative_to(output_root):
+            raise ValueError("A8-V2 continuation lineage escapes its output namespace")
+        manifest = _read_json(run_root / "manifest.json")
+    ledger = _read_jsonl(run_root / "step_ledger.jsonl")
+    if not ledger:
+        raise ValueError("A8-V2 first training stage has no loss ledger")
+    return float(ledger[0]["mean_completion_loss"])
+
+
 def _validate_run(training_config: dict[str, Any], run_id: str, step: int) -> tuple[dict[str, Any], dict[str, Any], Path, Path]:
-    if step not in {512, 1024} or (step == 1024 and training_config["arm"] != "P"):
-        raise ValueError("A8-V2 supports Step 512, plus the explicitly authorized P Step 1024 continuation")
+    if step not in {512, 1024, 2048} or (step > 512 and training_config["arm"] != "P"):
+        raise ValueError("A8-V2 supports Step 512, plus explicitly authorized P continuation through Step 2048")
     training_root = _resolve(training_config["data"]["output_root"]) / run_id
     training_manifest_path = training_root / "manifest.json"
     training_manifest = _read_json(training_manifest_path)
@@ -93,6 +113,7 @@ def _validate_run(training_config: dict[str, Any], run_id: str, step: int) -> tu
         training_manifest.get("run_id") != run_id
         or training_manifest.get("arm") != training_config["arm"]
         or training_manifest.get("optimizer_steps") != step
+        or training_manifest.get("authorized_max_step") != step
         or training_manifest.get("config_sha256") != _config_sha256(training_config)
         or training_manifest.get("checkpoint_manifest_sha256") != checkpoint_sha
         or node.get("training_status") != "passed"
@@ -281,13 +302,7 @@ def evaluate_checkpoint(
                 "train_rows": 16192,
                 "samples_seen": step * 4,
                 "completion_tokens_seen": int(train_summary["completion_tokens_seen"]),
-                "loss_start": _read_jsonl(
-                    _resolve(training_config["data"]["output_root"])
-                    / training_manifest["continuation"]["parent_run_id"]
-                    / "step_ledger.jsonl"
-                    if training_manifest.get("continuation")
-                    else training_root / "step_ledger.jsonl"
-                )[0]["mean_completion_loss"],
+                "loss_start": _first_training_loss(training_config, training_manifest, training_root),
                 "loss_node": train_summary["last_loss"],
                 "loss_mean": train_summary["loss_mean"],
                 "segment_loss_mean": train_summary.get("segment_loss_mean", train_summary["loss_mean"]),

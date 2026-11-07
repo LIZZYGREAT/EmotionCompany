@@ -942,7 +942,7 @@ def _execute_training(
         initial_lora_sha = dry["initial_lora_tensor_sha256"]
         if continuation:
             if loaded_lora_sha != continuation["parent_adapter_tensor_sha256"]:
-                raise ValueError("A8-V2 continuation Adapter tensors differ from the parent Step 512 checkpoint")
+                raise ValueError("A8-V2 continuation Adapter tensors differ from the parent checkpoint")
         elif loaded_lora_sha != initial_lora_sha:
             raise ValueError("A8-V2 fresh training LoRA differs from its dry-run initialization")
         optimizer = torch.optim.AdamW(
@@ -1160,8 +1160,7 @@ def _execute_training(
         wall_times = [float(row["timing"]["step_wall_host_seconds"]) for row in all_ledger]
         parent_training_node = None
         if continuation:
-            parent_training = _read_json(continuation["parent_run_root"] / "step-0512" / "training.json")
-            parent_training_node = parent_training
+            parent_training_node = continuation["parent_training_node"]
         segment_loss_mean = sum(float(row["mean_completion_loss"]) for row in all_ledger) / len(all_ledger)
         segment_completion_tokens = sum(int(row["completion_tokens"]) for row in all_ledger)
         cumulative_completion_tokens = segment_completion_tokens + int(parent_training_node["completion_tokens_seen"] if parent_training_node else 0)
@@ -1345,14 +1344,14 @@ def execute_continue(
     dry_root: Path,
     *,
     stop_at_step: int,
-    allow_1024_continuation: bool,
+    allow_authorized_continuation: bool,
 ) -> Path:
-    """Continue the P Arm from its verified Step 512 optimizer/RNG boundary."""
-    if not allow_1024_continuation or stop_at_step != 1024:
-        raise ValueError("A8-V2 Step 512→1024 requires the explicit --allow-1024-continuation authorization")
+    """Continue the P Arm from a reviewed, verified checkpoint boundary."""
+    if not allow_authorized_continuation or stop_at_step not in {1024, 2048}:
+        raise ValueError("A8-V2 continuation requires explicit authorization and must stop at Step 1024 or 2048")
     config, _config_file = _load_config(config_path, "P")
     if config["arm"] != "P":
-        raise ValueError("A8-V2 Step 1024 continuation is authorized for P only")
+        raise ValueError("A8-V2 continuation is authorized for P only")
     preflight = _validate_preflight(config, run_id, preflight_root)
     dry = _validate_dry(config, run_id, preflight_root, dry_root)
     data_facts = _validate_prepared_data(config)
@@ -1360,42 +1359,61 @@ def execute_continue(
     _parent_preflight_root, _parent_dry_root, parent_run_root = _run_paths(config, parent_run_id)
     parent_manifest_path = parent_run_root / "manifest.json"
     parent_manifest = _read_json(parent_manifest_path)
-    parent_node = parent_manifest.get("nodes", {}).get("512", {})
-    parent_checkpoint = parent_run_root / "trainer" / "checkpoint-512"
+    parent_step = parent_manifest.get("optimizer_steps")
+    if parent_step not in {512, 1024} or stop_at_step != parent_step * 2:
+        raise ValueError("A8-V2 continuation must double a reviewed Step 512 or Step 1024 checkpoint")
+    parent_node = parent_manifest.get("nodes", {}).get(str(parent_step), {})
+    parent_checkpoint = parent_run_root / "trainer" / f"checkpoint-{parent_step}"
     parent_checkpoint_manifest_path = parent_checkpoint / "checkpoint_manifest.json"
     parent_checkpoint_sha = sha256_file(parent_checkpoint_manifest_path)
     if (
         parent_manifest.get("run_id") != parent_run_id
         or parent_manifest.get("arm") != "P"
-        or parent_manifest.get("optimizer_steps") != 512
         or parent_manifest.get("config_sha256") != _config_sha256(config)
         or parent_manifest.get("dataset_manifest_sha256") != data_facts["dataset_manifest_sha256"]
         or parent_manifest.get("sample_order_sha256") != data_facts["schedule_sha256"]
-        or parent_manifest.get("authorized_max_step") != 512
+        or parent_manifest.get("authorized_max_step") != parent_step
         or parent_node.get("training_status") != "passed"
+        or parent_node.get("evaluation_status") != "complete"
+        or parent_node.get("evaluation_engineering_gate") != "passed"
         or parent_node.get("checkpoint_manifest_sha256") != parent_checkpoint_sha
         or parent_manifest.get("checkpoint_manifest_sha256") != parent_checkpoint_sha
     ):
-        raise ValueError("A8-V2 P parent Run is not a verified Step 512 continuation source")
+        raise ValueError("A8-V2 P parent Run is not an evaluated, verified continuation source")
     parent_checkpoint_record = _verify_v2_checkpoint(parent_checkpoint, {
         "run_id": parent_run_id,
         "arm": "P",
-        "optimizer_step": 512,
+        "optimizer_step": parent_step,
         "config_sha256": parent_manifest["config_sha256"],
         "dataset_manifest_sha256": parent_manifest["dataset_manifest_sha256"],
         "sample_order_sha256": parent_manifest["sample_order_sha256"],
         "training_code_sha256": parent_manifest["training_code_sha256"],
     })
-    parent_training_node = _read_json(parent_run_root / "step-0512" / "training.json")
+    parent_training_node = _read_json(parent_run_root / f"step-{parent_step:04d}" / "training.json")
     parent_tensor_sha = parent_training_node.get("independent_reload_check", {}).get("adapter_tensor_sha256_after_reload")
     parent_dry = _read_json(parent_run_root / "dry_step_gate.json")
-    sibling_ep_dry_path = _resolve("outputs/training/E03-A8-V2/EP") / f"{parent_run_id}-dry" / "dry_step.json"
+
+    init_manifest = parent_manifest
+    init_run_id = parent_run_id
+    init_run_root = parent_run_root
+    seen_parent_ids = {parent_run_id}
+    while init_manifest.get("continuation"):
+        init_run_id = init_manifest["continuation"].get("parent_run_id")
+        if not isinstance(init_run_id, str) or init_run_id in seen_parent_ids:
+            raise ValueError("A8-V2 continuation parent chain is invalid or cyclic")
+        seen_parent_ids.add(init_run_id)
+        _init_preflight, _init_dry, init_run_root = _run_paths(config, init_run_id)
+        init_manifest = _read_json(init_run_root / "manifest.json")
+    original_p_dry = _read_json(init_run_root / "dry_step_gate.json")
+    sibling_ep_dry_path = _resolve("outputs/training/E03-A8-V2/EP") / f"{init_run_id}-dry" / "dry_step.json"
     sibling_ep_dry = _read_json(sibling_ep_dry_path)
     if (
         parent_dry.get("status") != "passed"
+        or original_p_dry.get("status") != "passed"
         or sibling_ep_dry.get("status") != "passed"
-        or dry.get("initial_lora_tensor_sha256") != parent_dry.get("initial_lora_tensor_sha256")
-        or sibling_ep_dry.get("initial_lora_tensor_sha256") != parent_dry.get("initial_lora_tensor_sha256")
+        or dry.get("initial_lora_tensor_sha256") != original_p_dry.get("initial_lora_tensor_sha256")
+        or parent_dry.get("initial_lora_tensor_sha256") != original_p_dry.get("initial_lora_tensor_sha256")
+        or sibling_ep_dry.get("initial_lora_tensor_sha256") != original_p_dry.get("initial_lora_tensor_sha256")
     ):
         raise ValueError("A8-V2 continuation fresh-start dry-run differs from the paired P/EP initialization")
     if (
@@ -1404,7 +1422,7 @@ def execute_continue(
         or not isinstance(parent_tensor_sha, str)
         or parent_training_node.get("independent_reload_check", {}).get("adapter_tensor_sha256_before_save") != parent_tensor_sha
     ):
-        raise ValueError("A8-V2 parent Step 512 checkpoint has no adapter weight identity")
+        raise ValueError("A8-V2 parent checkpoint has no matching Adapter tensor identity")
 
     _preflight_root, _dry_root, run_root = _run_paths(config, run_id)
     if run_root.exists():
@@ -1433,10 +1451,10 @@ def execute_continue(
         "initial_lora_tensor_sha256": dry["initial_lora_tensor_sha256"],
         "performance_gate": _require_performance_gate(config, "P"),
         "max_optimizer_steps": 4048,
-        "authorized_max_step": 1024,
-        "authorization_source": "Explicit user instruction: continue P to 1024 optimizer steps",
+        "authorized_max_step": stop_at_step,
+        "authorization_source": f"Explicit user instruction: continue P to {stop_at_step} optimizer steps",
         "recovery_state_persisted": True,
-        "optimizer_steps": 512,
+        "optimizer_steps": parent_step,
         "continuation": {
             "parent_run_id": parent_run_id,
             "parent_manifest_sha256": sha256_file(parent_manifest_path),
@@ -1444,9 +1462,9 @@ def execute_continue(
             "parent_checkpoint_manifest_sha256": parent_checkpoint_sha,
             "parent_adapter_weight_sha256": parent_checkpoint_record["adapter_identity"]["weight_sha256"],
             "parent_adapter_tensor_sha256": parent_tensor_sha,
-            "start_step_exclusive": 512,
+            "start_step_exclusive": parent_step,
             "stop_step_inclusive": stop_at_step,
-            "sample_cursor_start": 2048,
+            "sample_cursor_start": parent_step * int(config["training"]["gradient_accumulation_steps"]),
             "optimizer_state_restored": True,
             "scheduler_state_restored": True,
             "rng_state_restored": True,
@@ -1469,7 +1487,7 @@ def execute_continue(
             "parent_checkpoint_manifest_sha256": parent_checkpoint_sha,
             "parent_adapter_weight_sha256": parent_checkpoint_record["adapter_identity"]["weight_sha256"],
             "parent_adapter_tensor_sha256": parent_tensor_sha,
-            "start_step": 512,
+            "start_step": parent_step,
             "stop_step": stop_at_step,
         },
     )

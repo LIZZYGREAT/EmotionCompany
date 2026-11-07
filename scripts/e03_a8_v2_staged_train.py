@@ -28,6 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allow-gpu-dry-run", action="store_true")
     parser.add_argument("--allow-first-stage-training", action="store_true")
     parser.add_argument("--allow-1024-continuation", action="store_true")
+    parser.add_argument("--allow-2048-continuation", action="store_true")
     args = parser.parse_args(argv)
     config_path = args.config or DEFAULT_CONFIGS[args.arm]
     if args.mode == "preflight":
@@ -57,7 +58,10 @@ def main(argv: list[str] | None = None) -> int:
             args.preflight_dir,
             args.dry_run_dir,
             stop_at_step=args.stop_at_step,
-            allow_1024_continuation=args.allow_1024_continuation,
+            allow_authorized_continuation=(
+                args.stop_at_step == 1024 and args.allow_1024_continuation
+                or args.stop_at_step == 2048 and args.allow_2048_continuation
+            ),
         )
     print(json.dumps({"status": "completed", "path": str(result)}, ensure_ascii=False, indent=2))
     return 0
