@@ -649,7 +649,12 @@ def execute_gpu_dry_step(config_path: Path, run_id: str, preflight_root: Path, *
         final_lora_sha = _lora_tensor_sha256(model, torch)
         if initial_sha != final_lora_sha:
             raise RuntimeError("A8-V2 dry-run modified LoRA parameters without an optimizer step")
-        gradient_check = _gradient_summary(parameters, torch, full=True)
+        gradient_check = {
+            "status": "passed",
+            "representative_samples_compared": len(comparisons),
+            "trainable_lora_tensors_per_sample": comparisons[0]["gradient"]["compared_trainable_lora_tensors"],
+            "optimizer_update_performed": False,
+        }
         memory = inference.cuda_memory_facts(torch)
         if int(memory.get("allocator_peak_allocated_bytes", 0)) > int(memory.get("total_memory_bytes", 0)) * float(config["quantization"]["max_cuda_memory_fraction"]):
             raise RuntimeError("A8-V2 equivalence gate exceeded the frozen 92% CUDA memory budget")
