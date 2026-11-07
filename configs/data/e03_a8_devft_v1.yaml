@@ -1,0 +1,26 @@
+version: E03-A8-DEVFT-data-v1
+experiment_id: E03-A8-DEVFT
+source_split: D0.3 Dev
+inputs:
+  normalized_dev: data/processed/v1/dev.jsonl
+  sft_dev: data/processed/sft/v1/dev.jsonl
+  sft_manifest: outputs/sft_data/v1/manifest.json
+  d03_manifest: outputs/data_pipeline/v1/manifest.json
+  d042_manifest: outputs/token_audit/v1/manifest.json
+  d042_budget_rows: outputs/token_audit/v1/budget_simulations.jsonl
+  train_schema: data/train/train_public.schema.json
+  p0_prompt: configs/prompts/p0.txt
+  inference_config: participant/configs/e03_a6_f4_inference_config.json
+outputs:
+  dataset_dir: outputs/data/e03_a8_devft_v1
+profile:
+  max_prompt_tokens: 1280
+  max_train_seq_length: 2048
+  history_policy: P0_T1_then_common_A8_P_EP_history
+  completion_policy: complete_classification_only_or_exclude_by_D0.4.2
+  packing: false
+  padding_free: false
+schedule:
+  algorithm: devft-shuffle-one-epoch-accumulation-v1
+  seed: 42
+  gradient_accumulation_steps: 4

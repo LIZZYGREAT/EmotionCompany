@@ -1,0 +1,22 @@
+version: E03-A8-DEVFT-staged-training-v1
+experiment_id: E03-A8-DEVFT
+arm: P
+model_config: configs/training/e03_a8_v2_p_staged.yaml
+parent_run_id: E03-A8-V2-20261107-04-P4048-R1
+parent_checkpoint: outputs/training/E03-A8-V2/P/E03-A8-V2-20261107-04-P4048-R1/trainer/checkpoint-4048
+data:
+  dataset_manifest: outputs/data/e03_a8_devft_v1/manifest.json
+  train_path: outputs/data/e03_a8_devft_v1/p_devft.jsonl
+  sample_order_path: outputs/data/e03_a8_devft_v1/sample_order.jsonl
+  output_root: outputs/training/E03-A8-DEVFT/P
+training:
+  seed: 42
+  per_device_micro_batch_size: 1
+  gradient_accumulation_steps: 4
+  max_optimizer_steps: 456
+  checkpoint_interval_steps: 128
+  diagnostic_interval_steps: 32
+  max_training_seconds: 14400
+  partial_group_loss_normalization: mean_over_actual_group_size
+authorization:
+  source: Explicit user instruction to continue P from Step 4048 on D0.3 Dev and then predict Val
