@@ -59,6 +59,7 @@ DATA_CONFIG_PATH = ROOT / "configs/data/e03_a8_devft_v1.yaml"
 TRAIN_CONFIG_PATH = ROOT / "configs/training/e03_a8_devft_p.yaml"
 MODEL_CONFIG_PATH = ROOT / "configs/training/e03_a8_v2_p_staged.yaml"
 RUN_ID = "E03-A8-DEVFT-20261108-01-PDEV-1EPOCH"
+PARENT_RUN_ID = "E03-A8-V2-20261107-04-P4048-R1"
 VAL_EXPOSURE_PATH = ROOT / "outputs/diagnostics/e03_a2/imports/e01-b-209"
 VAL_INPUT_VERSION = "E03-A8-DEVFT-target-free-val-v1"
 VAL_LABEL_EXCLUSION_VERSION = "E03-A2-exact-point-exclusion-v1"
@@ -514,7 +515,7 @@ def train_devft(run_id: str = RUN_ID) -> Path:
     parent_root = _resolve(model_config["data"]["output_root"]) / train_cfg["parent_run_id"]
     if train_cfg.get("version") != "E03-A8-DEVFT-staged-training-v1" or train_cfg.get("arm") != "P":
         raise ValueError("unsupported DevFT training config")
-    if train_cfg.get("parent_run_id") != RUN_ID:
+    if train_cfg.get("parent_run_id") != PARENT_RUN_ID:
         raise ValueError("DevFT parent Run differs from the frozen P4048 source")
     if len(schedule) != int(train_cfg["training"]["max_optimizer_steps"]):
         raise ValueError("DevFT training steps differ from its frozen one-epoch schedule")
