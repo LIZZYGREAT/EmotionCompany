@@ -1192,7 +1192,7 @@ def score_val(run_id: str = RUN_ID) -> Path:
         raise ValueError("Val predictions are not frozen or their identity changed")
     val_manifest, val_inputs, mapping = _load_target_free_val(eval_root)
     val_path = _resolve("data/processed/v1/val.jsonl")
-    d03 = _read_json("outputs/data_pipeline/v1/manifest.json")
+    d03 = _read_json(_resolve("outputs/data_pipeline/v1/manifest.json"))
     val_record = next((row for row in d03.get("outputs", []) if row.get("path") == "data/processed/v1/val.jsonl"), None)
     if not val_record or sha256_file(val_path) != val_record.get("sha256") or sha256_file(val_path) != val_manifest["source"]["normalized_val_sha256"]:
         raise ValueError("Val Gold source changed after target-free prediction freeze")
@@ -1281,6 +1281,7 @@ def score_val(run_id: str = RUN_ID) -> Path:
         "scoring_sha256": sha256_file(score_path),
         "a2_exposed_ids_sha256": sha256_file(eval_root / "a2_exposed_ids.json"),
         "references_read_after_prediction_freeze": True,
+        "scorer_code_sha256": sha256_file(Path(__file__).resolve()),
         "created_at_utc": _now(),
     }
     _write_json_exclusive(eval_root / "scoring_manifest.json", score_manifest)
