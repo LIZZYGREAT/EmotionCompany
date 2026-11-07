@@ -58,7 +58,7 @@ from src.training.training_sft import _load_train_model
 DATA_CONFIG_PATH = ROOT / "configs/data/e03_a8_devft_v1.yaml"
 TRAIN_CONFIG_PATH = ROOT / "configs/training/e03_a8_devft_p.yaml"
 MODEL_CONFIG_PATH = ROOT / "configs/training/e03_a8_v2_p_staged.yaml"
-RUN_ID = "E03-A8-DEVFT-20261108-01-PDEV-1EPOCH"
+RUN_ID = "E03-A8-DEVFT-20261108-02-PDEV-1EPOCH"
 PARENT_RUN_ID = "E03-A8-V2-20261107-04-P4048-R1"
 VAL_EXPOSURE_PATH = ROOT / "outputs/diagnostics/e03_a2/imports/e01-b-209"
 VAL_INPUT_VERSION = "E03-A8-DEVFT-target-free-val-v1"
