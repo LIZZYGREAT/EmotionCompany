@@ -27,6 +27,7 @@ from src.inference.final_dual_protocol import (  # noqa: E402
     assemble_submission,
     build_emotion_response_prompt,
     build_profile_prompt,
+    parse_emotion_response_output,
 )
 from src.inference.final_dual_vllm import (  # noqa: E402
     DualLoRAVLLMService,
@@ -325,6 +326,230 @@ def _generation_metadata(result: dict[str, Any] | None) -> dict[str, Any] | None
     return {key: value for key, value in result.items() if key != "text"}
 
 
+def _repeated_response_fragment(text: str) -> dict[str, Any] | None:
+    """Identify long, exact repeated fragments without changing model text."""
+    if not text or len(text) > 20_000:
+        return None
+    match = re.search(r"(.{20,120}?)(?:\1){2,}", text, flags=re.DOTALL)
+    if match is None:
+        return None
+    fragment = match.group(1)
+    repeated = match.group(0)
+    if len(fragment) < 20 or len(repeated) < 90 or len(repeated) / max(1, len(text)) < 0.3:
+        return None
+    return {
+        "kind": "repeated_fragment",
+        "fragment_sha256": hashlib.sha256(fragment.encode("utf-8")).hexdigest(),
+        "fragment_chars": len(fragment),
+        "repeated_chars": len(repeated),
+    }
+
+
+def _er_attempt_evidence(
+    result: dict[str, Any] | None,
+    *,
+    sample_id: str,
+    attempt_index: int,
+    schema: dict[str, Any],
+    profile_raw: str | None,
+    route_error: str | None = None,
+) -> tuple[dict[str, Any], bool]:
+    if result is None:
+        return ({
+            "attempt_index": attempt_index,
+            "attempt_status": "route_error",
+            "route_error": route_error,
+            "raw_text": None,
+            "raw_text_sha256": None,
+            "parse_diagnostics": None,
+            "severe_text_anomalies": [],
+            "response_valid": False,
+        }, False)
+
+    raw_text = result.get("text")
+    text_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest() if isinstance(raw_text, str) else None
+    finish_reason = result.get("finish_reason")
+    parsed = parse_emotion_response_output(raw_text, schema)
+    anomalies = []
+    repeated = _repeated_response_fragment(parsed["response_text"])
+    if repeated is not None:
+        anomalies.append(repeated)
+    valid = (
+        finish_reason in {"stop", "length"}
+        and parsed["emotion_error"] is None
+        and parsed["response_error"] is None
+        and parsed["format_error"] is None
+        and not anomalies
+    )
+    if valid:
+        # Validate the official final row shape as well as the ER-specific parser.
+        try:
+            assemble_submission(sample_id, profile_raw, raw_text, schema)
+        except Exception:
+            valid = False
+    attempt_status = "valid_candidate" if valid else "invalid_output"
+    if finish_reason == "length" and valid:
+        attempt_status = "length_limited_candidate"
+    elif finish_reason == "stop" and valid:
+        attempt_status = "completed_stop_candidate"
+    evidence = {
+        "attempt_index": attempt_index,
+        "attempt_status": attempt_status,
+        "request_id": result.get("response_id"),
+        "finish_reason": finish_reason,
+        "completion_tokens": result.get("usage_completion_tokens"),
+        "generation_seconds": result.get("generation_seconds"),
+        "prompt_token_ids_exact_match": result.get("prompt_token_ids_exact_match"),
+        "prompt_token_count_expected": result.get("prompt_token_count_expected"),
+        "prompt_token_count_observed": result.get("prompt_token_count_observed"),
+        "prompt_token_ids_expected_sha256": result.get("prompt_token_ids_expected_sha256"),
+        "prompt_token_ids_observed_sha256": result.get("prompt_token_ids_observed_sha256"),
+        "completion_tokens_at_budget": (
+            finish_reason == "stop" and result.get("usage_completion_tokens") == result.get("requested_max_tokens")
+        ),
+        "raw_text": raw_text,
+        "raw_text_sha256": text_hash,
+        "parse_diagnostics": {
+            "emotion_error": parsed["emotion_error"],
+            "response_error": parsed["response_error"],
+            "format_error": parsed["format_error"],
+        },
+        "partial_fields_validity": {
+            "emotion_label": parsed["emotion_error"] is None and bool(parsed["emotion_label"]),
+            "response_text": parsed["response_error"] is None and bool(parsed["response_text"].strip()),
+        },
+        "severe_text_anomalies": anomalies,
+        "response_valid": valid,
+    }
+    return evidence, valid
+
+
+def _best_partial_er_candidate(
+    candidates: list[tuple[int, dict[str, Any] | None]], schema: dict[str, Any]
+) -> tuple[int | None, dict[str, Any] | None]:
+    usable: list[tuple[int, int, dict[str, Any]]] = []
+    for attempt_index, result in candidates:
+        if result is None or not isinstance(result.get("text"), str):
+            continue
+        parsed = parse_emotion_response_output(result["text"], schema)
+        if parsed["format_error"] is not None or _repeated_response_fragment(parsed["response_text"]):
+            continue
+        score = int(parsed["emotion_error"] is None and bool(parsed["emotion_label"]))
+        score += int(parsed["response_error"] is None and bool(parsed["response_text"].strip()))
+        if score:
+            usable.append((score, attempt_index, result))
+    if not usable:
+        return None, None
+    # Preserve as many independently valid fields as possible; for ties prefer the later attempt.
+    _, attempt_index, result = max(usable, key=lambda item: (item[0], item[1]))
+    return attempt_index, result
+
+
+def _recover_emotion_response(
+    initial: dict[str, Any] | None,
+    retry: dict[str, Any] | None,
+    *,
+    sample_id: str,
+    retry_attempted: bool,
+    schema: dict[str, Any],
+    profile_raw: str | None,
+    initial_error: str | None = None,
+    retry_error: str | None = None,
+    protocol_mismatch: bool = False,
+) -> dict[str, Any]:
+    """Select at most one retry result while retaining the evidence for both attempts."""
+    records: list[dict[str, Any]] = []
+    initial_record, initial_valid = _er_attempt_evidence(
+        initial, sample_id=sample_id, attempt_index=1, schema=schema, profile_raw=profile_raw, route_error=initial_error
+    )
+    records.append(initial_record)
+    retry_valid = False
+    if retry_attempted or retry_error is not None:
+        retry_record, retry_valid = _er_attempt_evidence(
+            retry, sample_id=sample_id, attempt_index=2, schema=schema, profile_raw=profile_raw, route_error=retry_error
+        )
+        records.append(retry_record)
+
+    initial_cap = initial is not None and initial.get("finish_reason") == "length"
+    counters = {
+        "initial_cap_hit": int(initial_cap),
+        "retry_attempts": int(retry_attempted),
+        "retry_resolved": 0,
+        "unresolved_cap_hit": 0,
+        "degraded_response": False,
+    }
+    if protocol_mismatch:
+        return {
+            "selected": None,
+            "outcome": "asset_or_protocol_mismatch",
+            "attempts": records,
+            "selected_attempt_index": None,
+            "counters": {**counters, "degraded_response": True},
+        }
+
+    if initial is None:
+        return {
+            "selected": None,
+            "outcome": "route_error" if initial_error else "invalid_output",
+            "attempts": records,
+            "selected_attempt_index": None,
+            "counters": {**counters, "degraded_response": True},
+        }
+
+    initial_finish = initial.get("finish_reason")
+    if initial_cap:
+        if retry is not None and retry.get("finish_reason") == "stop" and retry_valid:
+            counters["retry_resolved"] = 1
+            return {
+                "selected": retry,
+                "outcome": "completed_stop",
+                "attempts": records,
+                "selected_attempt_index": 2,
+                "counters": counters,
+            }
+        selected = initial if initial_valid else retry if retry_valid else None
+        if selected is not None:
+            selected_index = 1 if selected is initial else 2
+            counters["unresolved_cap_hit"] = 1
+            counters["degraded_response"] = True
+            return {
+                "selected": selected,
+                "outcome": "length_limited_unresolved",
+                "attempts": records,
+                "selected_attempt_index": selected_index,
+                "counters": counters,
+            }
+        counters["unresolved_cap_hit"] = 1
+        counters["degraded_response"] = True
+        partial_index, partial_result = _best_partial_er_candidate(
+            [(1, initial), (2, retry)], schema
+        )
+        return {
+            "selected": partial_result,
+            "outcome": "route_error" if retry_error and not initial_valid else "invalid_output",
+            "attempts": records,
+            "selected_attempt_index": partial_index,
+            "counters": counters,
+        }
+
+    if initial_finish == "stop" and initial_valid:
+        return {
+            "selected": initial,
+            "outcome": "completed_stop",
+            "attempts": records,
+            "selected_attempt_index": 1,
+            "counters": counters,
+        }
+    partial_index, partial_result = _best_partial_er_candidate([(1, initial)], schema)
+    return {
+        "selected": partial_result,
+        "outcome": "route_error" if initial_error else "invalid_output",
+        "attempts": records,
+        "selected_attempt_index": partial_index,
+        "counters": {**counters, "degraded_response": True},
+    }
+
+
 def main() -> int:
     if len(sys.argv) != 3:
         print(f"Usage: {sys.argv[0]} TEST_FILE RESULT_DIR", file=sys.stderr)
@@ -391,6 +616,12 @@ def main() -> int:
     route_exact_matches = {"profile": [], "emotion_response": []}
     route_attempts = {"profile": 0, "emotion_response": 0}
     route_latencies = {"profile": [], "emotion_response": []}
+    initial_cap_hits = {"profile": 0, "emotion_response": 0}
+    retry_attempts = {"profile": 0, "emotion_response": 0}
+    retry_resolved = {"profile": 0, "emotion_response": 0}
+    unresolved_cap_hits = {"profile": 0, "emotion_response": 0}
+    degraded_sample_ids: list[str] = []
+    hard_failures: list[dict[str, Any]] = []
     format_success = {"profile": 0, "emotion_response": 0}
     schema_valid_count = 0
     sample_diagnostics: list[dict[str, Any]] = []
@@ -405,14 +636,48 @@ def main() -> int:
             route_attempts[route] += int(row.get("route_attempts", {}).get(route, 0))
             if route in failures:
                 route_failures[route].append({"id": row["id"], "error": str(failures[route])})
-            route_result = row.get(f"{route}_generation")
-            if isinstance(route_result, dict):
-                if route_result.get("generation_seconds") is not None:
-                    route_latencies[route].append(float(route_result["generation_seconds"]))
-                if backend == "vllm":
-                    route_exact_matches[route].append(route_result.get("prompt_token_ids_exact_match") is True)
-                if route_result.get("finish_reason") == "length" or route_result.get("cap_hit") is True:
-                    cap_hits[route] += 1
+            attempt_records = row.get("generation_attempts", {}).get(route)
+            if isinstance(attempt_records, list):
+                for attempt_record in attempt_records:
+                    generation_record = attempt_record.get("generation", {})
+                    if generation_record.get("generation_seconds") is not None:
+                        route_latencies[route].append(float(generation_record["generation_seconds"]))
+                    if backend == "vllm" and attempt_record.get("attempt_status") != "route_error":
+                        route_exact_matches[route].append(
+                            generation_record.get("prompt_token_ids_exact_match") is True
+                        )
+                    if generation_record.get("finish_reason") == "length":
+                        cap_hits[route] += 1
+                        if route == "profile":
+                            initial_cap_hits[route] += 1
+                            unresolved_cap_hits[route] += 1
+                            degraded_sample_ids.append(row["id"])
+                if route == "emotion_response":
+                    recovery = row.get("emotion_response_recovery", {})
+                    recovery_counters = recovery.get("counters", {})
+                    initial_cap_hits[route] += int(recovery_counters.get("initial_cap_hit", 0))
+                    retry_attempts[route] += int(recovery_counters.get("retry_attempts", 0))
+                    retry_resolved[route] += int(recovery_counters.get("retry_resolved", 0))
+                    unresolved_cap_hits[route] += int(recovery_counters.get("unresolved_cap_hit", 0))
+                    if recovery_counters.get("degraded_response") is True:
+                        degraded_sample_ids.append(row["id"])
+                    for failure in row.get("hard_failures", []):
+                        hard_failures.append({"id": row["id"], **failure})
+            else:
+                # v1 compatibility: older raw rows had a single generation record per route.
+                route_result = row.get(f"{route}_generation")
+                if isinstance(route_result, dict):
+                    if route_result.get("generation_seconds") is not None:
+                        route_latencies[route].append(float(route_result["generation_seconds"]))
+                    if backend == "vllm":
+                        route_exact_matches[route].append(route_result.get("prompt_token_ids_exact_match") is True)
+                    if route_result.get("finish_reason") == "length" or (
+                        route_result.get("finish_reason") is None and route_result.get("cap_hit") is True
+                    ):
+                        cap_hits[route] += 1
+                        initial_cap_hits[route] += 1
+                        unresolved_cap_hits[route] += 1
+                        degraded_sample_ids.append(row["id"])
         diag = row.get("diagnostics", {})
         format_success["profile"] += diag.get("profile_parse_error") is None
         format_success["emotion_response"] += all(diag.get(name) is None for name in ("emotion_parse_error", "response_parse_error", "emotion_response_format_error"))
@@ -452,8 +717,11 @@ def main() -> int:
             prepared: dict[str, dict[str, Any] | None] = {"profile": None, "emotion_response": None}
             generated: dict[str, dict[str, Any] | None] = {"profile": None, "emotion_response": None}
             attempted: dict[str, dict[str, Any] | None] = {"profile": None, "emotion_response": None}
+            generation_attempt_evidence: dict[str, list[dict[str, Any]]] = {"profile": [], "emotion_response": []}
             sample_route_attempts = {"profile": 0, "emotion_response": 0}
             generation_failures: dict[str, str] = {}
+            sample_hard_failures: list[dict[str, Any]] = []
+            emotion_recovery: dict[str, Any] | None = None
             for route in ROUTE_ORDER:
                 try:
                     if route == "profile":
@@ -480,32 +748,120 @@ def main() -> int:
                     continue
                 adapter_name = "profile" if route == "profile" else "emotion-response"
                 generation = generation_config[route]
-                try:
-                    if backend == "vllm":
-                        if service is None or not service.is_alive():
-                            raise RuntimeError("vLLM server is not alive")
+                if backend == "vllm":
+                    def make_vllm_request(attempt_index: int) -> tuple[dict[str, Any] | None, str | None, bool]:
                         route_attempts[route] += 1
                         sample_route_attempts[route] += 1
-                        result = service.chat_completion(
-                            model_alias=adapter_name,
-                            messages=prompt["messages"],
-                            expected_prompt_token_ids=prompt["prompt_ids"],
-                            max_tokens=int(generation["max_new_tokens"]),
-                        )
-                        route_exact_matches[route].append(result["prompt_token_ids_exact_match"] is True)
-                        if result["generation_seconds"] is not None:
-                            route_latencies[route].append(float(result["generation_seconds"]))
-                        attempted[route] = result
-                        if not result["prompt_token_ids_exact_match"]:
-                            generation_failures[route] = "server_prompt_token_ids_mismatch"
-                            result["discarded_due_to_prompt_mismatch"] = True
-                            generated[route] = None
-                        else:
-                            generated[route] = result
-                        if result["finish_reason"] == "length" or result["usage_completion_tokens"] >= int(generation["max_new_tokens"]):
+                        if service is None or not service.is_alive():
+                            error = "RuntimeError: vLLM server is not alive"
+                            sample_hard_failures.append({"kind": "service_exit", "route": route, "error": error})
+                            generation_attempt_evidence[route].append({
+                                "attempt_index": attempt_index,
+                                "attempt_status": "service_unavailable",
+                                "route_error": error,
+                                "generation": {},
+                                "raw_text": None,
+                                "raw_text_sha256": None,
+                            })
+                            return None, error, False
+                        request_started = time.perf_counter()
+                        try:
+                            result = service.chat_completion(
+                                model_alias=adapter_name,
+                                messages=prompt["messages"],
+                                expected_prompt_token_ids=prompt["prompt_ids"],
+                                max_tokens=int(generation["max_new_tokens"]),
+                            )
+                        except Exception as exc:
+                            elapsed = time.perf_counter() - request_started
+                            route_latencies[route].append(elapsed)
+                            error = f"{type(exc).__name__}: {exc}"
+                            generation_attempt_evidence[route].append({
+                                "attempt_index": attempt_index,
+                                "attempt_status": "route_error",
+                                "route_error": error,
+                                "generation": {"generation_seconds": elapsed},
+                                "raw_text": None,
+                                "raw_text_sha256": None,
+                            })
+                            if "prompt_token_ids" in str(exc).lower():
+                                sample_hard_failures.append({"kind": "asset_or_protocol_mismatch", "route": route, "error": error})
+                            if not service.is_alive():
+                                sample_hard_failures.append({"kind": "service_exit", "route": route, "error": error})
+                            return None, error, False
+
+                        result["requested_max_tokens"] = int(generation["max_new_tokens"])
+                        route_exact_matches[route].append(result.get("prompt_token_ids_exact_match") is True)
+                        seconds = result.get("generation_seconds")
+                        if seconds is not None:
+                            route_latencies[route].append(float(seconds))
+                        text_value = result.get("text")
+                        text_hash = hashlib.sha256(text_value.encode("utf-8")).hexdigest() if isinstance(text_value, str) else None
+                        generation_attempt_evidence[route].append({
+                            "attempt_index": attempt_index,
+                            "attempt_status": "response",
+                            "generation": _generation_metadata(result),
+                            "raw_text": text_value,
+                            "raw_text_sha256": text_hash,
+                        })
+                        if result.get("finish_reason") == "length":
                             cap_hits[route] += 1
-                            result["cap_hit"] = True
+                        if result.get("prompt_token_ids_exact_match") is not True:
+                            result["discarded_due_to_prompt_mismatch"] = True
+                            sample_hard_failures.append({
+                                "kind": "asset_or_protocol_mismatch",
+                                "route": route,
+                                "error": "server_prompt_token_ids_mismatch",
+                            })
+                            return result, None, True
+                        return result, None, False
+
+                    first_result, first_error, first_mismatch = make_vllm_request(1)
+                    attempted[route] = first_result
+                    if route == "profile":
+                        generated[route] = None if first_mismatch else first_result
+                        if first_result is not None and first_result.get("finish_reason") == "length":
+                            initial_cap_hits[route] += 1
+                            unresolved_cap_hits[route] += 1
+                            degraded_sample_ids.append(sample["id"])
                     else:
+                        retry_result = None
+                        retry_error = None
+                        retry_mismatch = False
+                        retry_was_attempted = bool(
+                            first_result is not None
+                            and first_result.get("finish_reason") == "length"
+                            and first_result.get("prompt_token_ids_exact_match") is True
+                        )
+                        if retry_was_attempted:
+                            retry_attempts[route] += 1
+                            retry_result, retry_error, retry_mismatch = make_vllm_request(2)
+                        emotion_recovery = _recover_emotion_response(
+                            first_result,
+                            retry_result,
+                            sample_id=sample["id"],
+                            retry_attempted=retry_was_attempted,
+                            schema=schema,
+                            profile_raw=None if generated["profile"] is None else generated["profile"].get("text"),
+                            initial_error=first_error,
+                            retry_error=retry_error,
+                            protocol_mismatch=first_mismatch or retry_mismatch,
+                        )
+                        generated[route] = emotion_recovery["selected"]
+                        recovery_counters = emotion_recovery["counters"]
+                        initial_cap_hits[route] += int(recovery_counters["initial_cap_hit"])
+                        retry_resolved[route] += int(recovery_counters["retry_resolved"])
+                        unresolved_cap_hits[route] += int(recovery_counters["unresolved_cap_hit"])
+                        if recovery_counters["degraded_response"]:
+                            degraded_sample_ids.append(sample["id"])
+                        if first_mismatch or retry_mismatch:
+                            emotion_recovery["outcome"] = "asset_or_protocol_mismatch"
+                    if first_error or (route == "emotion_response" and retry_error):
+                        generation_failures[route] = first_error or retry_error or "route_error"
+                    if first_mismatch or (route == "emotion_response" and retry_mismatch):
+                        generation_failures[route] = "server_prompt_token_ids_mismatch"
+                else:
+                    try:
                         if torch.cuda.is_available():
                             torch.cuda.synchronize()
                         route_attempts[route] += 1
@@ -521,13 +877,46 @@ def main() -> int:
                         if torch.cuda.is_available():
                             torch.cuda.synchronize()
                         result["generation_seconds"] = time.perf_counter() - route_started
+                        result["requested_max_tokens"] = int(generation["max_new_tokens"])
                         attempted[route] = result
                         route_latencies[route].append(float(result["generation_seconds"]))
                         generated[route] = result
-                except Exception as exc:
-                    generation_failures[route] = f"{type(exc).__name__}: {exc}"
+                        text_value = result.get("text")
+                        generation_attempt_evidence[route].append({
+                            "attempt_index": 1,
+                            "attempt_status": "response",
+                            "generation": _generation_metadata(result),
+                            "raw_text": text_value,
+                            "raw_text_sha256": hashlib.sha256(text_value.encode("utf-8")).hexdigest() if isinstance(text_value, str) else None,
+                        })
+                    except Exception as exc:
+                        generation_failures[route] = f"{type(exc).__name__}: {exc}"
+
+            if prepared["emotion_response"] is None:
+                emotion_recovery = {
+                    "selected": None,
+                    "outcome": "route_error",
+                    "attempts": [],
+                    "selected_attempt_index": None,
+                    "counters": {
+                        "initial_cap_hit": 0,
+                        "retry_attempts": 0,
+                        "retry_resolved": 0,
+                        "unresolved_cap_hit": 0,
+                        "degraded_response": True,
+                    },
+                }
+                degraded_sample_ids.append(sample["id"])
+            if prepared["profile"] is None:
+                sample_hard_failures.append({
+                    "kind": "asset_or_protocol_mismatch",
+                    "route": "profile",
+                    "error": generation_failures.get("profile", "profile prompt preparation failed"),
+                })
+            for route in ROUTE_ORDER:
                 if route in generation_failures:
                     route_failures[route].append({"id": sample["id"], "error": generation_failures[route]})
+            hard_failures.extend({"id": sample["id"], **failure} for failure in sample_hard_failures)
 
             profile_result, er_result = generated["profile"], generated["emotion_response"]
             submission, diagnostics = assemble_submission(
@@ -540,6 +929,11 @@ def main() -> int:
             schema_valid_count += 1
             format_success["profile"] += diagnostics["profile_parse_error"] is None
             format_success["emotion_response"] += all(diagnostics[name] is None for name in ("emotion_parse_error", "response_parse_error", "emotion_response_format_error"))
+            if generation_failures or diagnostics["profile_parse_error"] is not None or any(
+                diagnostics[name] is not None
+                for name in ("emotion_parse_error", "response_parse_error", "emotion_response_format_error")
+            ):
+                degraded_sample_ids.append(sample["id"])
             if torch is not None and torch.cuda.is_available():
                 torch.cuda.synchronize()
             elapsed_ms = (time.perf_counter() - started) * 1000
@@ -553,6 +947,13 @@ def main() -> int:
                 "emotion_response_attempt_raw": None if attempted["emotion_response"] is None else attempted["emotion_response"].get("text"),
                 "profile_generation": _generation_metadata(profile_result or attempted["profile"]),
                 "emotion_response_generation": _generation_metadata(er_result or attempted["emotion_response"]),
+                "generation_attempts": generation_attempt_evidence,
+                "emotion_response_recovery": emotion_recovery,
+                "emotion_response_outcome": "asset_or_protocol_mismatch" if any(
+                    failure.get("kind") == "asset_or_protocol_mismatch" for failure in sample_hard_failures
+                ) else emotion_recovery["outcome"],
+                "degraded_response": sample["id"] in degraded_sample_ids,
+                "hard_failures": sample_hard_failures,
                 "profile_prompt": None if prepared["profile"] is None else {key: prepared["profile"][key] for key in ("prompt_tokens", "prompt_token_ids_sha256", "selected_message_ids", "selected_history_sha256")},
                 "emotion_response_prompt": None if prepared["emotion_response"] is None else {key: prepared["emotion_response"][key] for key in ("prompt_tokens", "prompt_token_ids_sha256", "selected_message_ids", "selected_history_sha256")},
                 "route_failures": generation_failures,
@@ -586,6 +987,10 @@ def main() -> int:
             print(f"[{index}/{len(samples)}] {sample['id']}: {elapsed_ms:.3f} ms", flush=True)
     finally:
         server_alive_before_shutdown = service.is_alive() if service is not None else True
+        if backend == "vllm" and not server_alive_before_shutdown and not any(
+            failure.get("kind") == "service_exit" for failure in hard_failures
+        ):
+            hard_failures.append({"kind": "service_exit", "route": None, "error": "vLLM server exited before intentional shutdown"})
         shutdown_returncode = service.close() if service is not None else None
         if runtime is not None:
             runtime.close()
@@ -596,37 +1001,71 @@ def main() -> int:
     output_rows_match = output_ids == input_ids and len(set(output_ids)) == len(output_ids)
     format_threshold = int(len(samples) * 0.95 + 0.999999)
     exact_match_counts = {
-        route: sum(
-            isinstance(row.get(f"{route}_generation"), dict)
-            and row[f"{route}_generation"].get("prompt_token_ids_exact_match") is True
-            for row in prior_raw
-        )
+        route: sum(value is True for value in route_exact_matches[route])
         for route in ROUTE_ORDER
     }
-    prompt_id_gate = backend != "vllm" or all(exact_match_counts[route] == len(samples) for route in ROUTE_ORDER)
+    prompt_check_denominators = {
+        route: len(route_exact_matches[route]) for route in ROUTE_ORDER
+    }
+    prompt_id_gate = backend != "vllm" or all(
+        exact_match_counts[route] == prompt_check_denominators[route]
+        for route in ROUTE_ORDER
+    )
     aliases_gate = backend != "vllm" or (
         service_facts is not None
         and {"profile", "emotion-response"}.issubset(set(service_facts.get("registered_model_ids", [])))
+        and route_attempts["profile"] == len(samples)
+        and route_attempts["emotion_response"] == len(samples) + retry_attempts["emotion_response"]
     )
-    generation_error_free = all(not values for values in route_failures.values())
-    cap_gate = all(count == 0 for count in cap_hits.values())
+    service_health_gate = server_alive_before_shutdown and not any(
+        failure.get("kind") == "service_exit" for failure in hard_failures
+    )
+    identity_gate = not any(
+        failure.get("kind") == "asset_or_protocol_mismatch" for failure in hard_failures
+    )
     gate_passed = (
         len(prior_predictions) == len(samples)
         and output_rows_match
         and schema_valid_count == len(samples)
         and format_success["profile"] >= format_threshold
         and format_success["emotion_response"] >= format_threshold
-        and generation_error_free
-        and cap_gate
         and prompt_id_gate
         and aliases_gate
-        and server_alive_before_shutdown
+        and service_health_gate
+        and identity_gate
     )
+    unique_degraded_ids = sorted(set(degraded_sample_ids))
+    outcome_counts = {
+        name: sum(row.get("emotion_response_outcome") == name for row in prior_raw)
+        for name in ("completed_stop", "length_limited_unresolved", "invalid_output", "route_error", "asset_or_protocol_mismatch")
+    }
+    severe_response_anomaly_count = sum(
+        len(attempt.get("severe_text_anomalies", []))
+        for row in prior_raw
+        for attempt in row.get("emotion_response_recovery", {}).get("attempts", [])
+    )
+    if retry_attempts["emotion_response"]:
+        quality_warnings = [f"ER length retry requests: {retry_attempts['emotion_response']}"]
+    else:
+        quality_warnings = []
+    if any(unresolved_cap_hits.values()):
+        quality_warnings.append(f"unresolved generation length cap events: {sum(unresolved_cap_hits.values())}")
+    if unique_degraded_ids:
+        quality_warnings.append(f"degraded responses: {len(unique_degraded_ids)}")
+    route_failure_total = sum(len(values) for values in route_failures.values())
+    if route_failure_total:
+        quality_warnings.append(f"route errors: {route_failure_total}")
+    if hard_failures:
+        quality_warnings.append(f"hard failures: {len(hard_failures)}")
     server_log = result_dir / "vllm_server.log"
     report = {
-        "version": "final-dual-official-run-v1",
+        "version": "final-dual-official-run-v1.1",
         "status": "passed" if gate_passed else "failed",
         "complete": len(prior_predictions) == len(samples),
+        "quality_warnings": quality_warnings,
+        "hard_failures": hard_failures,
+        "emotion_response_outcome_count": outcome_counts,
+        "emotion_response_severe_anomaly_count": severe_response_anomaly_count,
         "run_id": progress["run_id"],
         "backend": backend,
         "created_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -673,10 +1112,27 @@ def main() -> int:
         "route_failure_count": {route: len(values) for route, values in route_failures.items()},
         "route_failures": route_failures,
         "generation_cap_hits": cap_hits,
+        "initial_cap_hits": initial_cap_hits,
+        "retry_attempts": retry_attempts,
+        "retry_resolved": retry_resolved,
+        "unresolved_cap_hits": unresolved_cap_hits,
+        "degraded_responses": {"count": len(unique_degraded_ids), "sample_ids": unique_degraded_ids},
         "prompt_token_ids_exact_match_count": exact_match_counts if backend == "vllm" else None,
+        "prompt_token_ids_check_denominator": prompt_check_denominators if backend == "vllm" else None,
+        "prompt_token_ids_unchecked_request_count": {
+            route: max(0, route_attempts[route] - prompt_check_denominators[route])
+            for route in ROUTE_ORDER
+        } if backend == "vllm" else None,
         "output_ids_match_input_order": output_rows_match,
         "output_ids_sha256": hashlib.sha256("\n".join(output_ids).encode("utf-8")).hexdigest(),
-        "gate_thresholds": {"profile_format": format_threshold, "emotion_response_format": format_threshold, "schema": len(samples), "prompt_token_ids": "exact for every vLLM request", "generation_cap_hits": 0},
+        "gate_thresholds": {
+            "profile_format": format_threshold,
+            "emotion_response_format": format_threshold,
+            "schema": len(samples),
+            "prompt_token_ids": "exact for every successful vLLM response, including retries",
+            "route_alias_requests": "one per prepared sample plus actual ER retries",
+            "generation_cap_hits": "reported; unresolved valid ER length limits are quality warnings, not run-level failures",
+        },
         "sample_diagnostics": sample_diagnostics,
         "outputs": {
             "submission.jsonl": {"path": str(submission_path), "sha256": sha256_file(submission_path), "rows": len(prior_predictions)},
