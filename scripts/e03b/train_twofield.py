@@ -13,7 +13,7 @@ import os
 import torch
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -101,6 +101,7 @@ def main() -> None:
     parser.add_argument("--save-steps", type=int, default=512)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", default=None)
+    parser.add_argument("--init-adapter", default=None)
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
@@ -129,7 +130,10 @@ def main() -> None:
         task_type="CAUSAL_LM",
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
     )
-    model = get_peft_model(model, lora)
+    if args.init_adapter:
+        model = PeftModel.from_pretrained(model, args.init_adapter, is_trainable=True)
+    else:
+        model = get_peft_model(model, lora)
     model.enable_input_require_grads()
     model.config.use_cache = False
     model.print_trainable_parameters()

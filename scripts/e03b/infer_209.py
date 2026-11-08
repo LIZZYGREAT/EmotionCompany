@@ -11,11 +11,17 @@ sys.path.insert(0, "/mnt/c/Users/sumiha/work/match")
 from src.shared.prompting import build_messages, encode_inference_prompt, select_recent_complete_suffix
 
 MODEL = "/home/sumiha/projects/match/participant/model"
-ADAPTER = "/mnt/c/Users/sumiha/work/match/outputs/training/e03b-run1536-4665/checkpoint-4665"
+import argparse
+_ap = argparse.ArgumentParser()
+_ap.add_argument("--adapter", default="/mnt/c/Users/sumiha/work/match/outputs/training/e03b-run1536-4665/checkpoint-4665")
+_ap.add_argument("--out", default="/mnt/c/Users/sumiha/work/match/outputs/training/e03b-run1536-4665/pred_209.jsonl")
+_ap.add_argument("--points", default="/mnt/c/Users/sumiha/work/match/data-incoming/e01-b-209/points_209.jsonl")
+_args, _ = _ap.parse_known_args()
+ADAPTER = _args.adapter
 PROMPT = open("/mnt/c/Users/sumiha/work/match/configs/prompts/p_e03b.txt", encoding="utf-8").read()
 PROMPT_P0 = open("/mnt/c/Users/sumiha/work/match/configs/prompts/p0.txt", encoding="utf-8").read()
-SRC = "/mnt/c/Users/sumiha/work/match/data-incoming/e01-b-209/points_209.jsonl"
-OUT = "/mnt/c/Users/sumiha/work/match/outputs/training/e03b-run1536-4665/pred_209.jsonl"
+SRC = _args.points
+OUT = _args.out
 
 tok = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
 quant = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
