@@ -1,0 +1,77 @@
+{
+  "version": "E03-final-dual-v1",
+  "run_id": "E03-DUAL-20261108-02",
+  "mode": "dual_adapter",
+  "backend": "transformers",
+  "model_id": "Qwen/Qwen3-1.7B",
+  "model_revision": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+  "model_path": "participant/model",
+  "expected_base_weight_sha256": "005d20550c04f4e246e5b434448786b44a0196b47d758d0acc77aba279e5bbc5",
+  "model_lock_path": "outputs/final_delivery/E03-DUAL-20261108-02/model_lock.json",
+  "candidates_root": "outputs/final_candidates",
+  "adapters": {
+    "profile": {
+      "name": "profile",
+      "candidate": "A8-P4504",
+      "path": "outputs/final_candidates/A8-P4504/adapter",
+      "expected_weight_sha256": "4f4bea7c738109b2b90502350abbc8bb37e98de08c62031f497d3516b2aa1787",
+      "expected_config_sha256": "2530a87d84ab3c0ce9555947d573c0bbf24e75dcc23e42b4608ea59f93755835",
+      "server_model_id": "profile"
+    },
+    "emotion_response": {
+      "name": "emotion-response",
+      "candidate": "A8-ER",
+      "path": "outputs/final_candidates/A8-ER/adapter",
+      "checkpoint_path": "outputs/final_candidates/A8-ER/checkpoint-1152",
+      "expected_weight_sha256": "b3db90b9eff9204f3b5717fc52e33481feb4149571c5fdad9238b47642e62b3b",
+      "expected_config_sha256": "477f4418ee14f4c0ad02c98d7cb4d3cd1153f50c4ecc1be2164db052e9f01c29",
+      "server_model_id": "emotion-response"
+    }
+  },
+  "prompts": {
+    "selection": {"path": "configs/prompts/p0.txt", "sha256": "d427e4996d0075a3adfe03ae25881d093687a6565f5b037f605accecc84c70b2"},
+    "profile": {"path": "configs/prompts/p_a8_v2_profile.txt", "sha256": "0cf6e196b5d4ac4005ea2cc2b454ec058ee24592fb8bb0a1c172ca464dba3cdb"},
+    "profile_history_budget": {"path": "configs/prompts/p_a8_v2_emotion_profile.txt", "sha256": "832aa10ad57626b38d45247fd6715a7aac7b0c7c838e817c6a0206d50a498a94"},
+    "emotion_response": {"path": "configs/prompts/p_e03b.txt", "sha256": "630e842b31defc42968110d35154ab20c007041bd8b75583072bdd51e68a9c35"}
+  },
+  "tokenizer": {
+    "model_id": "Qwen/Qwen3-1.7B",
+    "revision": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+    "expected_signature_sha256": "1662c9e99c6185441026a168b2dd6b09af103dc6dc3563b72f598411f14d1913",
+    "expected_template_sha256": "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8",
+    "eos_token_id": 151645,
+    "pad_token_id": 151643,
+    "files_sha256": {
+      "merges.txt": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+      "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+      "tokenizer_config.json": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101",
+      "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+    }
+  },
+  "context": {"max_prompt_tokens": 1280, "serving_context_limit": 2560},
+  "generation": {
+    "profile": {"max_new_tokens": 256, "do_sample": false, "temperature": 0.0, "enable_thinking": false},
+    "emotion_response": {"max_new_tokens": 1200, "do_sample": false, "temperature": 0.0, "enable_thinking": false},
+    "eos_token_id": 151645,
+    "pad_token_id": 151643
+  },
+  "quantization": {"method": "bitsandbytes_nf4", "load_in_4bit": true, "quant_type": "nf4", "compute_dtype": "bfloat16", "use_double_quant": true, "device_map": {"": 0}},
+  "deployment": {
+    "vllm": {
+      "expected_version": "0.11.1",
+      "host": "127.0.0.1",
+      "port": 8000,
+      "base_url": "http://127.0.0.1:8000/v1",
+      "served_model_name": "qwen-base",
+      "dtype": "bfloat16",
+      "max_model_len": 2560,
+      "max_num_seqs": 1,
+      "max_num_batched_tokens": 2560,
+      "max_lora_rank": 8,
+      "max_loras": 1,
+      "max_cpu_loras": 2,
+      "gpu_memory_utilization": 0.8,
+      "request_timeout_seconds": 900
+    }
+  }
+}
