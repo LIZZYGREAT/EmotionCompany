@@ -2,7 +2,7 @@
 
 执行日期：2026-11-08；任务分支：`feat/final-dual-adapter-delivery`。
 
-当前结论：**阶段 A Transformers、阶段 B vLLM 双 LoRA、阶段 C 官方入口验收通过。阶段 D 已构建、导出并回导 Docker 镜像；首次离线 GPU Smoke 通过，但回导后的第二次 Smoke 有 1 条 E03-B 回复命中 1200-token 上限，入口返回失败。整体仍为 `partial`，不得标记为 `ready_for_submission`。**
+当前结论：**阶段 A Transformers、阶段 B vLLM 双 LoRA、阶段 C 官方入口验收通过。Docker v1.0 的回导 Smoke 曾因长度上限失败，该历史保留；v1.1 已完成单次 Build/Save、归档校验、回导身份核验及回导后独立 20 条 GPU Smoke。用户审阅并接受下文记录的 100 条稳定字段差异，阶段 D 状态为 `passed_with_user_accepted_variance`，当前交付状态为 `ready_for_local_submission_review`。完整 Val、官方评分和正式提交未运行。**
 
 ## 阶段状态
 
@@ -11,7 +11,7 @@
 | A. 资产锁定、Transformers 双 Adapter Smoke | `passed` | Base、Tokenizer、Prompt、LoRA 配置与候选文件身份均核验；20 条双路生成、Schema 和两 Adapter 切换等价性通过。 |
 | B. vLLM 0.11.1 双 LoRA Smoke | `passed` | 单服务先跑 10 条、通过后跑同一冻结集 20 条；双别名、Token IDs、格式、Schema、显存及延迟门禁通过。 |
 | C. 官方 `start.sh` 双路入口 | `passed` | 保持两个位置参数；显式选用 vLLM 后真实入口完成 20 条双路生成，两个官方输出文件及报告均验证。 |
-| D. Docker 离线 GPU Smoke、镜像导出/回导 | `not_passed` | 镜像构建、保存、SHA-256、回导和回导后 GPU 执行均已完成；回导后 `test_000005_t0` 的 E03-B 生成达到 1200 tokens，`performance_report.status=failed`。 |
+| D. Docker 离线 GPU Smoke、镜像导出/回导 | `passed_with_user_accepted_variance` | v1.1 单次构建、保存、SHA-256、回导、身份核验和回导后 20 条 GPU Smoke 通过；100 条宿主对照中的稳定字段差异经用户审阅并接受，详见下文。 |
 | 官方评分、完整 Val、提交 | `not_run` | Smoke 不读取 Gold、不计算质量分数，不代表赛事提交就绪。 |
 
 ## 冻结资产与身份
@@ -173,6 +173,26 @@ Gate 0 相关回归为 96 项通过，仓库 `unit-cpu` 集合为 312 项通过�
 
 因此有 5/100 行 Profile 字段不同、1/100 行 Emotion label 不同（`test_000046_t0` 同时在两类差异中），`memory_refs` 为 0 行不同；完整回复文本为 `13/100` 逐字相同。原始记录显示这些行在两边生成的文本不同，但输入 Prompt Token SHA 一致。现有证据排除了模型/Prompt/Tokenizer/代码身份错配；差异与跨冷启动生成变化一致，但不能据此证明根因或语义等价。诊断文件 `outputs/final_delivery/E03-DUAL-20261108-03/docker/stable_field_comparison.json` 保存了逐行差异、原始文本 SHA、身份与性能统计；未使用 Gold 或 References。
 
-由于用户方案要求画像、情绪等稳定字段保持一致并先诊断差异，本次没有放宽比较器，也没有重跑以寻找偶然一致的结果。**没有执行 `docker save`、移除新旧镜像、重新回导或 Docker 清理**；旧 v1 tag 与 tar 保留，新 v1.1 tag 暂留在 E 盘 Docker 数据盘。最终测量 E 盘可用 `42.09 GiB`，VHDX 大小 `81.54 GiB`，Build Cache `36.79 GB`；未执行 prune。100 条对照失败证据和磁盘清单分别见 `stable_field_comparison.json` 与 `disk_preflight.json`。
+在用户复核前，严格比较器因上述稳定字段差异未通过；没有放宽比较器，也没有重跑以寻找偶然一致的结果。当时暂停了 Save 与回导，等待项目决策。其后用户查看了具体差异，并在下节明确接受该观测结果、授权保存并继续；比较器阈值和代码均未为此修改。
 
-当前状态为：代码和单次镜像构建完成，20 条 Smoke 与 100 条自身质量门禁通过，**100 条跨宿主稳定字段门禁未通过**；尚未到 `ready_for_local_submission_review`，也未保存最终交付 tar。是否接受有界的画像/情绪字段变化并另行定义容差，或要求继续处理生成确定性并重新验证，需要项目决策。
+### 用户复核与决策
+
+用户查看上表中的具体行差异及回复示例后回复：“我觉得没问题。可以保存就继续吧。”因此继续保存、回导和最终 Smoke，并在 `stable_field_comparison.json` 中记录 `user_review.status=accepted_for_delivery`。接受范围是本次列明的观测差异：100 条中 5 条 Profile 字段不同、1 条 Emotion label 不同（其中 1 条同时属于两类差异）、`memory_refs` 无差异、回复文本 13/100 条逐字相同。比较器门槛没有放宽，差异记录没有删除；这项决定不声称两种生成在语义上等价。
+
+### 单次 Save、回导与回导后 Smoke
+
+| 项 | 最终结果 |
+|---|---|
+| 镜像 tag / Image ID | `emotionalcompany/final-dual:E03-DUAL-20261108-03` / `sha256:46d1f5710795fc2ba6e0d7be72a00f9fbfa1a5a31a435b880a091d23bfdad95d` |
+| Inspect 虚拟大小 | Build 前后记录 `31,955,863,214` bytes；回导后 `31,955,875,502` bytes，差 `12,288` bytes；ID、RepoDigest、40 个 RootFS layer digest 完全一致，且均低于 `50,000,000,000` bytes 门槛。 |
+| 唯一正式 tar | `outputs/final_delivery/E03-DUAL-20261108-03/docker/image.tar`，`11,768,259,072` bytes；SHA-256 `160705f734852e575e343fb65893c57159aee296398da4d617da62e1858e71bc`。保存后及回导后均通过 SHA-256 核验；tar 结构包含目标 tag 与 40 层。 |
+| 回导后独立 GPU Smoke | vLLM `0.11.1`，20/20 输入、Schema、ID、双路格式及 Prompt Token IDs 通过；两个 Adapter alias 各请求 20 次；cap、retry、unresolved cap、路由错误、OOM/崩溃均为 0；GPU 峰值 `7342/8188 MiB`。状态 `passed_offline_dual_adapter_docker_smoke`。 |
+| Smoke 输出 | `outputs/final_delivery/E03-DUAL-20261108-03/docker/smoke20-after-load/`；机器验证为 `reimport-verification.json`，容器日志为 `docker.log`。提交 SHA-256 `696525b3bbcd93c7d32a48b29e39346be04558476228b29492520b540a37ab38`，raw 输出 SHA-256 `d0859e95acf6a86868b038145b617bd3b49566f92c79922c0dbe598c3ad94505`。 |
+
+回导后的 Inspect 证据为 `image-inspect-after-load.json`，清理后仍在运行的最终镜像 Inspect 为 `image-inspect-final.json`。最终镜像继续保留在 Docker Engine 中；Docker Desktop 数据 VHDX 位于 E 盘 `E:\DockerData\DockerDesktopWSL\disk\docker_data.vhdx`。
+
+### 清理与最终状态
+
+新镜像回导和 Smoke 通过后，删除了旧 v1 tag `E03-DUAL-20261108-02`、对应旧 `image.tar`，以及该交付过程生成的三份旧 Build Context 和一份 v1.1 临时 Build Context。旧 Image ID、旧 tar SHA、文件清单、代码/环境身份及验收报告保留在 `disk_preflight.json` 和旧 tar SHA sidecar 中。未删除原始 Base/Adapter，未运行全局 Docker prune。Docker 项目 tag 目前只保留 v1.1 正式镜像；最终 tar 只保留一份。
+
+清理后 E 盘可用 `42.09 GiB`，Docker Desktop VHDX 为 `81.54 GiB`，工作区可用 `867.55 GiB`；Docker Build Cache 为 `36.79 GB`，未执行缓存清理。清理后的 Docker 镜像列表、`docker system df -v`、Inspect 与空间记录分别在 `image-list-after-cleanup.txt`、`system-df-after-cleanup.txt`、`image-inspect-final.json` 和 `disk_preflight.json`。最终状态：**`ready_for_local_submission_review`**。正式提交入口/输出协议仍按阶段 C 验证；完整 Val、官方评分和赛事提交仍为 `not_run`。
