@@ -185,6 +185,31 @@ def test_runtime_git_identity_falls_back_when_git_executable_is_missing(tmp_path
     assert final_dual._execution_git_head() == "docker-source-commit"
 
 
+def test_v1_1_runtime_code_identity_is_locked_and_mismatch_is_rejected(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "runtime.py"
+    source.write_text("stable runtime\n", encoding="utf-8")
+    monkeypatch.setattr(final_dual, "RUNTIME_CODE_FILES", (Path("runtime.py"),))
+    monkeypatch.setattr(final_dual, "_execution_git_head", lambda: "locked-head")
+    config = {
+        "runtime_behavior": {
+            "version": "E03-v1.1-length-recovery",
+            "max_emotion_response_retries": 1,
+            "retry_only_on_finish_reason": "length",
+        }
+    }
+    hashes = final_dual.runtime_code_hashes(tmp_path)
+    lock = {"runtime_code_identity": {
+        "version": config["runtime_behavior"]["version"],
+        "git_head": "locked-head",
+        "file_sha256": hashes,
+    }}
+
+    assert final_dual._verify_runtime_code_identity(config, lock, root=tmp_path)["file_sha256"] == hashes
+    source.write_text("changed runtime\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="code hashes differ"):
+        final_dual._verify_runtime_code_identity(config, lock, root=tmp_path)
+
+
 def test_stop_at_1200_tokens_is_not_a_confirmed_cap_hit() -> None:
     result = _recover_emotion_response(
         _er_result("stop", tokens=1200),

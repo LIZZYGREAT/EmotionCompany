@@ -37,6 +37,14 @@ from src.inference.final_dual_vllm import (  # noqa: E402
 
 OFFICIAL_ID = re.compile(r"^test_[0-9]{6}_t[0-9]+$")
 ROUTE_ORDER = ("profile", "emotion_response")
+RUNTIME_CODE_FILES = (
+    Path("participant/start.sh"),
+    Path("participant/final_dual_inference.py"),
+    Path("participant/run_inference.py"),
+    Path("src/inference/final_dual_protocol.py"),
+    Path("src/inference/final_dual_runtime.py"),
+    Path("src/inference/final_dual_vllm.py"),
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -45,6 +53,10 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def runtime_code_hashes(root: Path = ROOT) -> dict[str, str]:
+    return {path.as_posix(): sha256_file(root / path) for path in RUNTIME_CODE_FILES}
 
 
 def resolve_path(value: str | Path) -> Path:
@@ -254,6 +266,32 @@ def _resume_identity(
     return completed, submissions[:completed], raw_rows[:completed], progress
 
 
+def _verify_runtime_code_identity(config: dict[str, Any], lock: dict[str, Any], *, root: Path = ROOT) -> dict[str, Any] | None:
+    runtime_behavior = config.get("runtime_behavior")
+    if runtime_behavior is None:
+        return None
+    if (
+        runtime_behavior.get("version") != "E03-v1.1-length-recovery"
+        or runtime_behavior.get("max_emotion_response_retries") != 1
+        or runtime_behavior.get("retry_only_on_finish_reason") != "length"
+    ):
+        raise RuntimeError("v1.1 runtime behavior config must lock exactly one retry on finish_reason=length")
+    actual_code_hashes = runtime_code_hashes(root)
+    locked_code_identity = lock.get("runtime_code_identity", {})
+    if locked_code_identity.get("version") != runtime_behavior["version"]:
+        raise RuntimeError("runtime code identity version differs from the v1.1 behavior config")
+    if locked_code_identity.get("file_sha256") != actual_code_hashes:
+        raise RuntimeError("runtime inference code hashes differ from the v1.1 model lock")
+    execution_head = _execution_git_head()
+    if locked_code_identity.get("git_head") and execution_head and locked_code_identity["git_head"] != execution_head:
+        raise RuntimeError("runtime Git source identity differs from the v1.1 model lock")
+    return {
+        "version": runtime_behavior["version"],
+        "git_head": locked_code_identity.get("git_head"),
+        "file_sha256": actual_code_hashes,
+    }
+
+
 def _verify_assets(config: dict[str, Any], config_path: Path, lock_path: Path) -> tuple[Any, dict[str, Any]]:
     from participant import run_inference as runner
 
@@ -262,6 +300,7 @@ def _verify_assets(config: dict[str, Any], config_path: Path, lock_path: Path) -
         raise RuntimeError("deployment config SHA-256 differs from model_lock.json")
     if lock.get("deployment_config", {}).get("path") != str(config_path.relative_to(ROOT)):
         raise RuntimeError("deployment config path differs from model_lock.json")
+    runtime_code_identity = _verify_runtime_code_identity(config, lock)
     base_path = resolve_path(config["model_path"])
     base_config = {"model_id": config["model_id"], "model_revision": config["model_revision"]}
     base_identity = runner._weight_identity(base_path, base_config)
@@ -310,6 +349,7 @@ def _verify_assets(config: dict[str, Any], config_path: Path, lock_path: Path) -
         "prompts": {name: {"path": config["prompts"][name]["path"], "sha256": config["prompts"][name]["sha256"]} for name in prompts},
         "adapters": adapters,
         "model_lock": {"path": str(lock_path.relative_to(ROOT)), "sha256": sha256_file(lock_path)},
+        "runtime_code_identity": runtime_code_identity,
     }
     return tokenizer, identity
 
@@ -1060,6 +1100,7 @@ def main() -> int:
     server_log = result_dir / "vllm_server.log"
     report = {
         "version": "final-dual-official-run-v1.1",
+        "runtime_behavior_version": config.get("runtime_behavior", {}).get("version", "E03-v1.1-length-recovery"),
         "status": "passed" if gate_passed else "failed",
         "complete": len(prior_predictions) == len(samples),
         "quality_warnings": quality_warnings,
@@ -1078,6 +1119,7 @@ def main() -> int:
         "tokenizer_identity": tokenizer_facts,
         "adapter_identities": asset_identity["adapters"],
         "prompt_identities": asset_identity["prompts"],
+        "runtime_code_identity": asset_identity.get("runtime_code_identity"),
         "initialization_seconds": init_seconds,
         "server": {
             "runtime": service_facts,

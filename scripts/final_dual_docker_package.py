@@ -33,6 +33,14 @@ EXPECTED_MODULES = {
 }
 OFFICIAL_ID = re.compile(r"^test_[0-9]{6}_t[0-9]+$")
 CONTAINER_BASE_PATH = "/root/participant/model"
+RUNTIME_CODE_FILES = (
+    Path("participant/start.sh"),
+    Path("participant/final_dual_inference.py"),
+    Path("participant/run_inference.py"),
+    Path("src/inference/final_dual_protocol.py"),
+    Path("src/inference/final_dual_runtime.py"),
+    Path("src/inference/final_dual_vllm.py"),
+)
 
 COPY_FILES = (
     Path("participant/start.sh"),
@@ -143,6 +151,10 @@ def _sha_code_files(root: Path) -> dict[str, str]:
     return facts
 
 
+def _runtime_code_hashes(root: Path) -> dict[str, str]:
+    return {path.as_posix(): sha256_file(root / path) for path in RUNTIME_CODE_FILES}
+
+
 def _regular_file_bytes(root: Path) -> int:
     return sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
 
@@ -248,6 +260,8 @@ def verify_previous_gates(config: dict[str, Any], repo_root: Path = ROOT) -> dic
                 raise ValueError(f"new v1.1 host report is incomplete or failed: {report_path}")
             if report.get("configuration", {}).get("sha256") != host.get("config_sha256") or report.get("configuration", {}).get("model_lock_sha256") != host.get("model_lock_sha256"):
                 raise ValueError(f"new v1.1 host report config/lock identity differs: {report_path}")
+            if report.get("runtime_code_identity", {}).get("file_sha256") != _runtime_code_hashes(repo_root):
+                raise ValueError(f"new v1.1 host runtime code hashes differ from the frozen source files: {report_path}")
             if report.get("model_weight_identity", {}).get("observed_weight_hash") != expected["base_weight_sha256"]:
                 raise ValueError("new v1.1 host Base identity differs from the immutable asset lock")
             for route, identity_key in (("profile", "profile"), ("emotion_response", "emotion_response")):
@@ -321,6 +335,13 @@ def validate_static_config(config: dict[str, Any], repo_root: Path = ROOT) -> di
         raise ValueError("Docker Prompt paths or hashes differ from the tested deployment config")
     if config.get("context") != source.get("context") or config.get("generation") != source.get("generation"):
         raise ValueError("Docker generation/context protocol differs from the tested deployment config")
+    runtime_behavior = config.get("runtime_behavior", {})
+    if runtime_behavior != {
+        "version": "E03-v1.1-length-recovery",
+        "max_emotion_response_retries": 1,
+        "retry_only_on_finish_reason": "length",
+    }:
+        raise ValueError("Docker config must lock one ER retry on finish_reason=length")
     if config.get("deployment", {}).get("vllm") != source.get("deployment", {}).get("vllm"):
         raise ValueError("Docker vLLM settings differ from the tested deployment config")
     if config.get("quantization", {}).get("load_in_4bit") is not False:
@@ -467,6 +488,7 @@ def _copy_adapter(source: Path, destination: Path, *, rewrite_base: bool) -> dic
 def _container_model_lock(
     *, config: dict[str, Any], config_sha256: str, base_identity: dict[str, Any],
     tokenizer_identity: dict[str, Any], prompt_records: dict[str, Any], adapters: dict[str, Any],
+    runtime_code_identity: dict[str, Any],
 ) -> dict[str, Any]:
     base_observed = {
         key: base_identity[key]
@@ -501,6 +523,7 @@ def _container_model_lock(
         "run_id": config["run_id"],
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "deployment_config": {"path": DOCKER_CONFIG.as_posix(), "sha256": config_sha256},
+        "runtime_code_identity": runtime_code_identity,
         "base": {
             "model_id": config["model_id"],
             "revision": config["model_revision"],
@@ -580,6 +603,15 @@ def prepare_context(*, output_dir: Path, repo_root: Path = ROOT) -> dict[str, An
             name: {"path": record["path"], "sha256": sha256_file(temporary_dir / record["path"])}
             for name, record in config["prompts"].items()
         }
+        source_runtime_hashes = _runtime_code_hashes(repo_root)
+        container_runtime_hashes = _runtime_code_hashes(temporary_dir)
+        if source_runtime_hashes != container_runtime_hashes:
+            raise ValueError("copied runtime code differs from the frozen source code hashes")
+        runtime_code_identity = {
+            "version": config["runtime_behavior"]["version"],
+            "git_head": _git_head(repo_root),
+            "file_sha256": container_runtime_hashes,
+        }
         container_lock = _container_model_lock(
             config=config,
             config_sha256=docker_config_sha,
@@ -587,6 +619,7 @@ def prepare_context(*, output_dir: Path, repo_root: Path = ROOT) -> dict[str, An
             tokenizer_identity=verified["tokenizer"],
             prompt_records=prompt_records,
             adapters=adapters,
+            runtime_code_identity=runtime_code_identity,
         )
         lock_path = temporary_dir / "model_lock.json"
         lock_path.write_text(json.dumps(container_lock, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -611,6 +644,7 @@ def prepare_context(*, output_dir: Path, repo_root: Path = ROOT) -> dict[str, An
             "source_commit": _git_head(repo_root),
             "source_model_lock_sha256": sha256_file(source_lock_path),
             "container_model_lock_sha256": sha256_file(lock_path),
+            "runtime_code_identity": runtime_code_identity,
             "deployment_config": {"path": DOCKER_CONFIG.as_posix(), "sha256": docker_config_sha},
             "input": {
                 "path": "transformers_smoke20/input/smoke20_input.jsonl",
@@ -737,8 +771,27 @@ def compare_reference_outputs(
         row.get("memory_refs") == ref.get("memory_refs")
         for row, ref in zip(predictions, reference_rows)
     )
+    def asset_facts(value: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "base_weight_sha256": value.get("model_weight_identity", {}).get("observed_weight_hash"),
+            "tokenizer_signature_sha256": value.get("tokenizer_identity", {}).get("signature_sha256"),
+            "tokenizer_template_sha256": value.get("tokenizer_identity", {}).get("template_sha256"),
+            "adapter_weight_sha256": {
+                route: value.get("adapter_identities", {}).get(key, {}).get("weight_sha256")
+                for route, key in (("profile", "profile"), ("emotion_response", "emotion_response"))
+            },
+            "prompt_sha256": {
+                name: record.get("sha256")
+                for name, record in value.get("prompt_identities", {}).items()
+            },
+            "runtime_code_sha256": value.get("runtime_code_identity", {}).get("file_sha256"),
+        }
+
+    same_asset_identity = asset_facts(report) == asset_facts(reference_report)
     if not same_ids or not same_profiles or not same_emotion_labels or not same_memory_refs:
         raise ValueError("Docker and host vLLM stable submission fields differ")
+    if not same_asset_identity:
+        raise ValueError("Docker and host Base, Adapter, Tokenizer, Prompt, or runtime-code identities differ")
 
     row_count = len(predictions)
     format_threshold = int(row_count * 0.95 + 0.999999)
@@ -819,6 +872,7 @@ def compare_reference_outputs(
         "same_user_profile": same_profiles,
         "same_emotion_labels": same_emotion_labels,
         "same_memory_refs": same_memory_refs,
+        "same_asset_identity": same_asset_identity,
         "format_success_count_equal": same_format_counts,
         "prompt_token_ids_exact_match_count_equal": same_prompt_counts,
         "route_failure_count_equal": same_route_failures,
@@ -882,6 +936,12 @@ def verify_output(
         raise ValueError("performance_report does not show a passed complete run")
     if package_manifest.get("runtime_behavior_version") == "E03-v1.1-length-recovery" and report.get("version") != "final-dual-official-run-v1.1":
         raise ValueError("v1.1 Docker package was not run with the v1.1 official inference entrypoint")
+    if package_manifest.get("runtime_behavior_version") == "E03-v1.1-length-recovery":
+        runtime_code_identity = package_manifest.get("runtime_code_identity")
+        if not isinstance(runtime_code_identity, dict) or not runtime_code_identity.get("file_sha256"):
+            raise ValueError("prepared v1.1 package manifest lacks runtime code file hashes")
+        if report.get("runtime_code_identity") != runtime_code_identity:
+            raise ValueError("container runtime code identity differs from the prepared v1.1 package manifest")
     if report.get("backend") != "vllm" or report.get("samples") != row_count or report.get("submission_rows") != row_count:
         raise ValueError("performance_report backend/sample count differs from the requested Docker run")
     if report.get("submission_schema_validated_count") != row_count or report.get("submission_schema_validated") is not True:

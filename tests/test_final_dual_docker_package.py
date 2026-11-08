@@ -249,6 +249,11 @@ def test_verify_output_accepts_one_retry_and_one_resolved_cap(tmp_path: Path, mo
         "generation_cap_hits": {"profile": 0, "emotion_response": 1},
         "unresolved_cap_hits": {"profile": 0, "emotion_response": 0},
         "emotion_response_severe_anomaly_count": 0,
+        "runtime_code_identity": {
+            "version": "E03-v1.1-length-recovery",
+            "git_head": "fake-head",
+            "file_sha256": {"participant/final_dual_inference.py": "code-sha"},
+        },
         "adapter_identities": {
             "profile": {"weight_sha256": "profile-sha", "config_sha256": "profile-config"},
             "emotion_response": {"weight_sha256": "er-sha", "config_sha256": "er-config"},
@@ -262,6 +267,7 @@ def test_verify_output_accepts_one_retry_and_one_resolved_cap(tmp_path: Path, mo
     }), encoding="utf-8")
     manifest = {
         "runtime_behavior_version": "E03-v1.1-length-recovery",
+        "runtime_code_identity": report["runtime_code_identity"],
         "input": {"sha256": package.sha256_file(test_file)},
     }
     (context / "package_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")

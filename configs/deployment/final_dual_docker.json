@@ -48,6 +48,11 @@
     }
   },
   "context": {"max_prompt_tokens": 1280, "serving_context_limit": 2560},
+  "runtime_behavior": {
+    "version": "E03-v1.1-length-recovery",
+    "max_emotion_response_retries": 1,
+    "retry_only_on_finish_reason": "length"
+  },
   "generation": {
     "profile": {"max_new_tokens": 256, "do_sample": false, "temperature": 0.0, "enable_thinking": false},
     "emotion_response": {"max_new_tokens": 1200, "do_sample": false, "temperature": 0.0, "enable_thinking": false},
