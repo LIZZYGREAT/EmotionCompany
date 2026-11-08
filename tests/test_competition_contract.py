@@ -108,3 +108,70 @@ def test_start_script_bootstraps_conda_from_declared_executable(tmp_path):
         str(input_path),
         str(result_dir),
     ]
+
+
+def test_start_script_routes_dual_adapter_mode_to_its_runner_with_two_arguments(tmp_path):
+    fake_conda = tmp_path / "conda"
+    fake_conda.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = shell.bash ] && [ \"$2\" = hook ]; then\n"
+        "  cat <<'HOOK'\n"
+        "conda() {\n"
+        "  [ \"$1\" = activate ] && [ \"$2\" = conda_env ] || return 2\n"
+        "  export CONDA_DEFAULT_ENV=conda_env\n"
+        "  export CONDA_PREFIX=/synthetic/conda_env\n"
+        "}\n"
+        "HOOK\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    fake_conda.chmod(0o755)
+    fake_vllm = tmp_path / "vllm"
+    fake_vllm.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_vllm.chmod(0o755)
+    config_path = tmp_path / "dual.json"
+    config_path.write_text(json.dumps({"mode": "dual_adapter", "backend": "transformers"}), encoding="utf-8")
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text("{}\n", encoding="utf-8")
+    capture_path = tmp_path / "runner_args.txt"
+    python_wrapper = tmp_path / "python-wrapper"
+    python_wrapper.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"${1:-}\" == */participant/final_dual_inference.py ]]; then\n"
+        "  printf '%s\\n' \"$@\" > \"$RUNNER_CAPTURE\"\n"
+        "  exit 0\n"
+        "fi\n"
+        f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    python_wrapper.chmod(0o755)
+    environment = {
+        **os.environ,
+        "CONDA_EXE": str(fake_conda),
+        "CONDA_DEFAULT_ENV": "",
+        "CONDA_PREFIX": "",
+        "EVALUATION_INFERENCE_CONFIG": str(config_path),
+        "EVALUATION_BACKEND": "vllm",
+        "VLLM_BIN": str(fake_vllm),
+        "PYTHON_BIN": str(python_wrapper),
+        "RUNNER_CAPTURE": str(capture_path),
+    }
+
+    completed = subprocess.run(
+        ["bash", str(ROOT / "participant/start.sh"), str(input_path), str(tmp_path / "result")],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert capture_path.read_text(encoding="utf-8").splitlines() == [
+        str(ROOT / "participant/final_dual_inference.py"),
+        str(input_path),
+        str(tmp_path / "result"),
+    ]

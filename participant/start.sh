@@ -129,6 +129,33 @@ if [[ -z "$BACKEND" ]]; then
   BACKEND="$CONFIG_BACKEND"
 fi
 
+CONFIG_MODE="$($PYTHON_CMD - "$CONFIG_FILE" <<'PY'
+import json
+import sys
+
+config = json.load(open(sys.argv[1], encoding="utf-8"))
+print(config.get("mode", ""))
+PY
+)"
+
+if [[ "$CONFIG_MODE" == "dual_adapter" ]]; then
+  case "$BACKEND" in
+    transformers|vllm) ;;
+    *) echo "ERROR: dual_adapter backend 必须为 transformers 或 vllm: $BACKEND" >&2; exit 1 ;;
+  esac
+  if [[ "$BACKEND" == "vllm" ]]; then
+    command -v "$VLLM_BIN" >/dev/null 2>&1 || {
+      echo "ERROR: 找不到 vLLM 命令: $VLLM_BIN" >&2
+      exit 1
+    }
+  fi
+  echo "后端: $BACKEND（dual_adapter 官方入口）"
+  export EVALUATION_BACKEND="$BACKEND"
+  export VLLM_BIN
+  export VLLM_START_TIMEOUT="$START_TIMEOUT"
+  exec "$PYTHON_CMD" "$SCRIPT_DIR/final_dual_inference.py" "$TEST_FILE" "$RESULT_DIR"
+fi
+
 if [[ "$BACKEND" == "transformers" ]]; then
   echo "后端: transformers（直接加载本地模型）"
   export EVALUATION_BACKEND="transformers"

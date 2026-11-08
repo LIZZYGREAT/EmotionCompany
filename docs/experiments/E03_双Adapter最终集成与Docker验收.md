@@ -2,7 +2,7 @@
 
 执行日期：2026-11-08；任务分支：`feat/final-dual-adapter-delivery`。
 
-当前结论：**阶段 A Transformers 与阶段 B vLLM 双 LoRA 验收通过；官方入口与 Docker 尚未运行。整体为 `partial`，不得标记为 `ready_for_submission`。**
+当前结论：**阶段 A Transformers、阶段 B vLLM 双 LoRA、阶段 C 官方入口验收通过；阶段 D Docker 未运行。整体为 `partial`，不得标记为 `ready_for_submission`。**
 
 ## 阶段状态
 
@@ -10,7 +10,7 @@
 |---|---|---|
 | A. 资产锁定、Transformers 双 Adapter Smoke | `passed` | Base、Tokenizer、Prompt、LoRA 配置与候选文件身份均核验；20 条双路生成、Schema 和两 Adapter 切换等价性通过。 |
 | B. vLLM 0.11.1 双 LoRA Smoke | `passed` | 单服务先跑 10 条、通过后跑同一冻结集 20 条；双别名、Token IDs、格式、Schema、显存及延迟门禁通过。 |
-| C. 官方 `start.sh` 双路入口 | `not_run` | 双 Adapter 分支正在实现；尚未使用官方入口生成 `submission.jsonl` 和 `performance_report.json`。 |
+| C. 官方 `start.sh` 双路入口 | `passed` | 保持两个位置参数；显式选用 vLLM 后真实入口完成 20 条双路生成，两个官方输出文件及报告均验证。 |
 | D. Docker 离线 GPU Smoke、镜像导出/回导 | `not_run` | 本轮执行边界在 Docker 之前。 |
 | 官方评分、完整 Val、提交 | `not_run` | Smoke 不读取 Gold、不计算质量分数，不代表赛事提交就绪。 |
 
@@ -76,6 +76,23 @@ vLLM 初始化耗时 57.47 秒。GPU 为 NVIDIA GeForce RTX 4060 Laptop，采样
 
 证据位于 `outputs/final_delivery/E03-DUAL-20261108-02/vllm_smoke/`：`smoke10/manifest.json`、`smoke20/manifest.json`、两份预测与原始输出、聚合 `manifest.json` 和 `vllm_server.log`。独立复核确认 10/20 行数、ID 顺序与唯一性、100% Schema、两路 Prompt Token IDs 及报告哈希一致；日志没有 OOM 或崩溃标记。
 
+## 阶段 C：官方 `start.sh` 双路入口
+
+本地入口实现新增于 `participant/final_dual_inference.py`，并在 `participant/start.sh` 中根据独立双 Adapter 配置的 `mode=dual_adapter` 路由；入口原有 Conda `conda_env` 激活和恰好两个位置参数保持不变。运行显式设置 `EVALUATION_BACKEND=vllm`，部署配置原有 `backend=transformers` 保留，未改写已锁定配置或模型身份。实际调用：
+
+```bash
+EVALUATION_INFERENCE_CONFIG=configs/deployment/final_dual.yaml \
+EVALUATION_BACKEND=vllm \
+EVALUATION_RUN_ID=E03-DUAL-20261108-02-OFFICIAL-START-20 \
+bash participant/start.sh \
+  outputs/final_delivery/E03-DUAL-20261108-02/transformers_smoke20/input/smoke20_input.jsonl \
+  outputs/evaluation/final_dual/E03-DUAL-20261108-02-official-start-vllm20
+```
+
+入口退出码为 0；20/20 输入 ID 顺序完整且唯一，官方 Schema 20/20。`profile` 与 `emotion-response` 别名各完成 20 次请求，两路服务端 Prompt Token IDs 各 20/20 精确匹配；两路严格格式均 20/20，路由/生成失败为 0，生成上限命中为 0。性能报告测量范围是逐样本 Prompt 构造、两次串行生成、解析、Schema 校验及输出追加；服务初始化单独计时 38.87 秒。20 条逐样本端到端 P50/P95 为 1.892 / 8.984 秒，GPU 峰值 7664/8188 MiB。输出 `submission.jsonl` SHA-256 为 `807844152a8de8f3750cc247453b5f0112be8b5700e58945db0c2f74ddea90cc`；`raw_outputs.jsonl` SHA-256 为 `9f5c8a91de342394459866ca26621191273cc455c70d0f026070f69b4b9d5169`。完整报告及逐样本原始输出位于 `outputs/evaluation/final_dual/E03-DUAL-20261108-02-official-start-vllm20/`。
+
+官方入口修复了一个锁结构读取错误：锁中的 Base 指纹位于 `base.observed.observed_weight_hash`。首次运行在模型服务启动前停止且结果目录无输出文件；修正后重新核验实际 Base 与冻结 SHA 一致并完整通过阶段 C 门禁。
+
 ## 后续门禁
 
-下一步真实调用 `bash participant/start.sh TEST_FILE RESULT_DIR`，核验 20 条输入的两路路由、Schema、增量输出与 `performance_report.json`。在 Docker 阶段之前停止；Docker 与镜像导出状态保持 `not_run`。
+下一阶段为 Docker 离线 GPU Smoke 和镜像交付；按本轮授权边界到此停止。Docker、镜像构建/导出/回导、完整 Val 及官方评分均保持 `not_run`。

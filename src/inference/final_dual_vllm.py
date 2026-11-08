@@ -239,7 +239,7 @@ class DualLoRAVLLMService:
             raise VLLMServiceError(f"configured vLLM port is already occupied: {self.host}:{self.port}")
         self.command = self.build_command()
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        self._log_handle = self.log_path.open("wb")
+        self._log_handle = self.log_path.open("ab")
         started = time.monotonic()
         self.process = subprocess.Popen(
             self.command,
