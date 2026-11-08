@@ -19,6 +19,8 @@ from typing import Any
 from jsonschema import Draft202012Validator
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 SOURCE_CONFIG = Path("configs/deployment/final_dual.yaml")
 DOCKER_CONFIG = Path("configs/deployment/final_dual_docker.json")
 SCHEMA_PATH = Path("participant/templates/submission_schema.json")
