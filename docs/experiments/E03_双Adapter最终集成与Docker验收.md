@@ -91,6 +91,8 @@ bash participant/start.sh \
 
 入口退出码为 0；20/20 输入 ID 顺序完整且唯一，官方 Schema 20/20。`profile` 与 `emotion-response` 别名各完成 20 次请求，两路服务端 Prompt Token IDs 各 20/20 精确匹配；两路严格格式均 20/20，路由/生成失败为 0，生成上限命中为 0。性能报告测量范围是逐样本 Prompt 构造、两次串行生成、解析、Schema 校验及输出追加；服务初始化单独计时 38.87 秒。20 条逐样本端到端 P50/P95 为 1.892 / 8.984 秒，GPU 峰值 7664/8188 MiB。输出 `submission.jsonl` SHA-256 为 `807844152a8de8f3750cc247453b5f0112be8b5700e58945db0c2f74ddea90cc`；`raw_outputs.jsonl` SHA-256 为 `9f5c8a91de342394459866ca26621191273cc455c70d0f026070f69b4b9d5169`。完整报告及逐样本原始输出位于 `outputs/evaluation/final_dual/E03-DUAL-20261108-02-official-start-vllm20/`。
 
+阶段 C 入口实现及回归提交为 `c955eff`。运行报告保留原始 `git_head=38e2c27`；同目录 `code_identity.json` 记录性能报告 SHA-256 `91beba084680c6fc6b6dd050277b30c249d3036c0449a51d01196fbfe784a754`、提交 `c955eff6269b8bd7dbe96b8c86fccc667879feef` 和对应执行文件哈希，没有重写运行报告。
+
 官方入口修复了一个锁结构读取错误：锁中的 Base 指纹位于 `base.observed.observed_weight_hash`。首次运行在模型服务启动前停止且结果目录无输出文件；修正后重新核验实际 Base 与冻结 SHA 一致并完整通过阶段 C 门禁。
 
 ## 后续门禁
