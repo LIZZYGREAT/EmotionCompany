@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import statistics
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -461,11 +462,26 @@ def run_transformers(args: argparse.Namespace) -> None:
             encoding="utf-8",
         )
     (smoke_root / "equivalence.json").write_text(json.dumps(equivalence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    code_paths = (
+        "scripts/final_dual_smoke.py",
+        "scripts/final_dual_preflight.py",
+        "src/inference/final_dual_protocol.py",
+        "src/inference/final_dual_runtime.py",
+        "tests/test_final_dual_protocol.py",
+        "tests/test_final_dual_runtime.py",
+        "configs/deployment/final_dual.yaml",
+    )
+    execution_git_head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    execution_status = subprocess.check_output(["git", "status", "--porcelain=v1"], cwd=ROOT, text=True).splitlines()
+    execution_code_changes = [line for line in execution_status if any(path in line for path in code_paths)]
     report = {
         "version": "final-dual-transformers-smoke-v1",
         "status": "passed" if gate_passed else "failed",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "git_head": lock["git_head"],
+        "git_head": execution_git_head,
+        "model_lock_git_head": lock["git_head"],
+        "execution_code_changes": execution_code_changes,
+        "code_files_sha256": {path: sha256_file(ROOT / path) for path in code_paths},
         "model_lock": {"path": str(lock_path.relative_to(ROOT)), "sha256": sha256_file(lock_path)},
         "input_sha256": sha256_file(input_path),
         "sample_count": len(predictions),
