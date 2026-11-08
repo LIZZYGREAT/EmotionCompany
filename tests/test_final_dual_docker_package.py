@@ -82,3 +82,61 @@ def test_copy_adapter_rewrites_only_config_and_verifies_both_hashes(tmp_path: Pa
     assert facts["source_config_sha256"] == package.sha256_file(source / "adapter_config.json")
     assert facts["base_path_rewritten"] is True
     assert facts["base_model_name_or_path"] == "/root/participant/model"
+
+
+def test_reference_comparison_reports_online_response_variation() -> None:
+    docker_rows = [
+        {
+            "id": "test_000001_t1",
+            "response_text": "Docker response",
+            "emotion_label": "anxiety",
+            "user_profile": {"personality_traits": [], "interests": [], "style": []},
+            "memory_refs": [],
+        }
+    ]
+    host_rows = [{**docker_rows[0], "response_text": "Host response"}]
+    report = {
+        "format_success_count": {"profile": 1, "emotion_response": 1},
+        "prompt_token_ids_exact_match_count": {"profile": 1, "emotion_response": 1},
+        "route_failure_count": {"profile": 0, "emotion_response": 0},
+        "generation_cap_hits": {"profile": 0, "emotion_response": 0},
+    }
+    host_report = {
+        **report,
+        "status": "passed",
+        "complete": True,
+    }
+
+    result = package.compare_reference_outputs(docker_rows, host_rows, report, host_report)
+
+    assert result["status"] == "stable_fields_and_metrics_match_response_text_varies"
+    assert result["same_user_profile"] is True
+    assert result["same_emotion_labels"] is True
+    assert result["format_success_count_equal"] is True
+    assert result["exact_submission_match"] is False
+    assert result["response_text_exact_match_count"] == 0
+
+
+def test_reference_comparison_rejects_stable_field_or_metric_mismatch() -> None:
+    row = {
+        "id": "test_000001_t1",
+        "response_text": "Same response",
+        "emotion_label": "anxiety",
+        "user_profile": {"personality_traits": [], "interests": [], "style": []},
+        "memory_refs": [],
+    }
+    report = {
+        "format_success_count": {"profile": 1, "emotion_response": 1},
+        "prompt_token_ids_exact_match_count": {"profile": 1, "emotion_response": 1},
+        "route_failure_count": {"profile": 0, "emotion_response": 0},
+        "generation_cap_hits": {"profile": 0, "emotion_response": 0},
+    }
+    host_report = {**report, "status": "passed", "complete": True}
+
+    different_label = {**row, "emotion_label": "sadness"}
+    with pytest.raises(ValueError, match="stable submission fields differ"):
+        package.compare_reference_outputs([row], [different_label], report, host_report)
+
+    different_format_report = {**host_report, "format_success_count": {"profile": 1, "emotion_response": 0}}
+    with pytest.raises(ValueError, match="route or parse metrics differ"):
+        package.compare_reference_outputs([row], [row], report, different_format_report)

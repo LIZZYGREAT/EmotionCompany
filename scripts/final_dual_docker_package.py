@@ -602,6 +602,82 @@ def _container_log_gate(path: Path | None) -> dict[str, Any]:
     return {"checked": True, "status": "passed", "sha256": sha256_file(path), "oom_or_crash_markers": []}
 
 
+def compare_reference_outputs(
+    predictions: list[dict[str, Any]],
+    reference_rows: list[dict[str, Any]],
+    report: dict[str, Any],
+    reference_report: dict[str, Any],
+) -> dict[str, Any]:
+    """Compare stable contract fields while measuring online response-text equality.
+
+    vLLM's online server does not guarantee repeatable generated text. Keep the
+    fixed-input comparison useful by requiring identical IDs, profile fields,
+    emotion labels, memory references, Prompt token checks, and parse metrics;
+    report byte-for-byte response equality as an observation.
+    """
+    if len(predictions) != len(reference_rows):
+        raise ValueError("Docker and host vLLM references have different row counts")
+    if reference_report.get("status") != "passed" or reference_report.get("complete") is not True:
+        raise ValueError("host vLLM reference report is not a passed complete run")
+
+    same_ids = [row.get("id") for row in predictions] == [
+        row.get("id") for row in reference_rows
+    ]
+    same_profiles = all(
+        row.get("user_profile") == ref.get("user_profile")
+        for row, ref in zip(predictions, reference_rows)
+    )
+    same_emotion_labels = all(
+        row.get("emotion_label") == ref.get("emotion_label")
+        for row, ref in zip(predictions, reference_rows)
+    )
+    same_memory_refs = all(
+        row.get("memory_refs") == ref.get("memory_refs")
+        for row, ref in zip(predictions, reference_rows)
+    )
+    if not same_ids or not same_profiles or not same_emotion_labels or not same_memory_refs:
+        raise ValueError("Docker and host vLLM stable submission fields differ")
+
+    same_format_counts = report.get("format_success_count") == reference_report.get("format_success_count")
+    same_prompt_counts = (
+        report.get("prompt_token_ids_exact_match_count")
+        == reference_report.get("prompt_token_ids_exact_match_count")
+    )
+    same_route_failures = report.get("route_failure_count") == reference_report.get("route_failure_count")
+    same_generation_cap_hits = report.get("generation_cap_hits") == reference_report.get("generation_cap_hits")
+    if not (
+        same_format_counts
+        and same_prompt_counts
+        and same_route_failures
+        and same_generation_cap_hits
+    ):
+        raise ValueError("Docker and host vLLM route or parse metrics differ")
+
+    response_text_exact_count = sum(
+        row.get("response_text") == ref.get("response_text")
+        for row, ref in zip(predictions, reference_rows)
+    )
+    exact_submission_match = predictions == reference_rows
+    return {
+        "status": (
+            "exact_submission_and_metrics_match"
+            if exact_submission_match
+            else "stable_fields_and_metrics_match_response_text_varies"
+        ),
+        "same_id_order": same_ids,
+        "same_user_profile": same_profiles,
+        "same_emotion_labels": same_emotion_labels,
+        "same_memory_refs": same_memory_refs,
+        "format_success_count_equal": same_format_counts,
+        "prompt_token_ids_exact_match_count_equal": same_prompt_counts,
+        "route_failure_count_equal": same_route_failures,
+        "generation_cap_hits_equal": same_generation_cap_hits,
+        "exact_submission_match": exact_submission_match,
+        "response_text_exact_match_count": response_text_exact_count,
+        "response_text_rows": len(predictions),
+    }
+
+
 def verify_output(
     *, test_file: Path, result_dir: Path, repo_root: Path = ROOT,
     reference_dir: Path | None = None, container_log: Path | None = None,
@@ -695,17 +771,12 @@ def verify_output(
             raise FileNotFoundError("host reference directory lacks the official outputs")
         reference_rows = _read_jsonl(reference_submission)
         reference_report = load_json(reference_report_path)
-        same_predictions = predictions == reference_rows
-        same_format_counts = report.get("format_success_count") == reference_report.get("format_success_count")
-        if not same_predictions or not same_format_counts:
-            raise ValueError("Docker predictions/format counts differ from the passed host vLLM reference")
-        comparison = {
-            "status": "exact_submission_and_format_match",
-            "reference_submission_sha256": sha256_file(reference_submission),
-            "docker_submission_sha256": sha256_file(submission_path),
-            "submission_sha256_equal": sha256_file(reference_submission) == sha256_file(submission_path),
-            "format_success_count_equal": same_format_counts,
-        }
+        comparison = compare_reference_outputs(predictions, reference_rows, report, reference_report)
+        comparison["reference_submission_sha256"] = sha256_file(reference_submission)
+        comparison["docker_submission_sha256"] = sha256_file(submission_path)
+        comparison["submission_sha256_equal"] = (
+            sha256_file(reference_submission) == sha256_file(submission_path)
+        )
     return {
         "status": "passed_offline_dual_adapter_docker_smoke",
         "input_rows": len(inputs),

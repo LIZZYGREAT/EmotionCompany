@@ -43,9 +43,13 @@ python3 scripts/final_dual_docker_package.py verify-output \
 
 The container receives no network (`--network none`). A successful run must
 load one Base and both named LoRAs, return exact server Prompt Token IDs on
-both routes, produce 20 schema-valid rows, and match the host vLLM submission
-and strict-format counts. The verifier also checks the container log for OOM
-and crash markers.
+both routes, produce 20 schema-valid rows, and match the host vLLM's stable
+submission fields and route metrics with zero route failures or generation-cap
+hits. The verifier records exact
+`response_text` equality as a diagnostic because vLLM's online serving API
+does not guarantee reproducible text across runs, even for the same input and
+sampling settings ([vLLM reproducibility notes](https://docs.vllm.ai/en/v0.11.2/usage/reproducibility/)).
+The verifier also checks the container log for OOM and crash markers.
 
 After the first verified smoke, inspect the image virtual size, save it under
 the same ignored run directory, hash the tar, remove the just-built local tag,

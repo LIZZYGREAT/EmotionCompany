@@ -2,7 +2,7 @@
 
 执行日期：2026-11-08；任务分支：`feat/final-dual-adapter-delivery`。
 
-当前结论：**阶段 A Transformers、阶段 B vLLM 双 LoRA、阶段 C 官方入口验收通过；阶段 D Docker 未运行。整体为 `partial`，不得标记为 `ready_for_submission`。**
+当前结论：**阶段 A Transformers、阶段 B vLLM 双 LoRA、阶段 C 官方入口验收通过。阶段 D 已构建、导出并回导 Docker 镜像；首次离线 GPU Smoke 通过，但回导后的第二次 Smoke 有 1 条 E03-B 回复命中 1200-token 上限，入口返回失败。整体仍为 `partial`，不得标记为 `ready_for_submission`。**
 
 ## 阶段状态
 
@@ -11,7 +11,7 @@
 | A. 资产锁定、Transformers 双 Adapter Smoke | `passed` | Base、Tokenizer、Prompt、LoRA 配置与候选文件身份均核验；20 条双路生成、Schema 和两 Adapter 切换等价性通过。 |
 | B. vLLM 0.11.1 双 LoRA Smoke | `passed` | 单服务先跑 10 条、通过后跑同一冻结集 20 条；双别名、Token IDs、格式、Schema、显存及延迟门禁通过。 |
 | C. 官方 `start.sh` 双路入口 | `passed` | 保持两个位置参数；显式选用 vLLM 后真实入口完成 20 条双路生成，两个官方输出文件及报告均验证。 |
-| D. Docker 离线 GPU Smoke、镜像导出/回导 | `not_run` | 本轮执行边界在 Docker 之前。 |
+| D. Docker 离线 GPU Smoke、镜像导出/回导 | `not_passed` | 镜像构建、保存、SHA-256、回导和回导后 GPU 执行均已完成；回导后 `test_000005_t0` 的 E03-B 生成达到 1200 tokens，`performance_report.status=failed`。 |
 | 官方评分、完整 Val、提交 | `not_run` | Smoke 不读取 Gold、不计算质量分数，不代表赛事提交就绪。 |
 
 ## 冻结资产与身份
@@ -95,6 +95,35 @@ bash participant/start.sh \
 
 官方入口修复了一个锁结构读取错误：锁中的 Base 指纹位于 `base.observed.observed_weight_hash`。首次运行在模型服务启动前停止且结果目录无输出文件；修正后重新核验实际 Base 与冻结 SHA 一致并完整通过阶段 C 门禁。
 
+## 阶段 D：Docker 离线 GPU Smoke、镜像导出与回导
+
+Docker Desktop 的数据根目录仍位于 E 盘数据盘：`E:\DockerData\DockerDesktopWSL\disk\docker_data.vhdx`；Docker Engine 内部报告的数据根目录为 `/var/lib/docker`。镜像 tag 在回导测试前先移除，再由归档重新加载。镜像与 tar 均位于 Git 忽略目录，不提交仓库。
+
+| 项 | 结果 |
+|---|---|
+| 镜像 tag | `emotionalcompany/final-dual:E03-DUAL-20261108-02` |
+| Image ID / RepoDigest | `sha256:42465c1eb5870221d2c224def8492adb9e09ec44152741523831a6777b18e186` |
+| 架构 / 层数 | `linux/amd64` / 40 层 |
+| Inspect 虚拟大小 | 构建后 `31,955,841,193` bytes；回导后 `31,955,808,425` bytes；两者均低于 `50,000,000,000` bytes 门槛 |
+| Save 归档 | `outputs/final_delivery/E03-DUAL-20261108-02/docker/image.tar`，`11,768,250,368` bytes |
+| 归档 SHA-256 | `4bd10c5c00e071212c7c49b9be7a1e579a7da104fe56a3ce11a8b27274575e9d`；回导后复核通过 |
+| 回导身份 | Image ID、RepoDigest、tag 和 40 个 RootFS layer digest 均一致；Inspect `Size` 相差 `32,768` bytes |
+| 构建来源 | Dockerfile SHA-256 `f4b4f1f14ed71c393bfad88e83b3f42502c87baa6d5dae5feb8ad35ba6efe3bf`；镜像代码 commit `a7cfd11b044cccc34aaafffac763bf28e4d4af06` |
+
+### 首次离线 GPU Smoke
+
+首次容器运行使用 `--gpus all --network none --shm-size 1g` 和正式两参数入口。容器 GPU 预检确认 NVIDIA GeForce RTX 4060 Laptop GPU（8188 MiB）；单 Base、`profile` 与 `emotion-response` 三个模型 ID 正确注册，两路 alias 各请求 20 次。输入和输出共 20 条，官方 Schema 20/20，两路 Prompt token IDs 各 20/20 精确匹配，两路严格格式各 20/20，路由失败与生成上限命中均为 0。峰值显存 `7373/8188 MiB`，无 OOM/崩溃。输出验证记录在忽略文件 `docker/docker-smoke-verify.json`，状态 `passed_offline_dual_adapter_docker_smoke`。
+
+宿主官方 vLLM 与 Docker 首次 Smoke 的画像、情绪标签、memory_refs、ID 和解析/格式计数相同；生成回复文本只有 `7/20` 条逐字相同。为区分 Docker 差异与服务端复现差异，宿主官方入口在相同输入上又独立运行一次：宿主两次结果之间也只有 `7/20` 条完整输出相同，画像和情绪标签仍均为 `20/20` 相同，格式均为 `20/20`。vLLM 官方说明在线 `vllm serve` 不保证跨运行的逐字复现；因此复核器要求稳定字段、Prompt token IDs、路由和格式指标一致，并单独记录回复文本相同比例。[vLLM reproducibility notes](https://docs.vllm.ai/en/v0.11.2/usage/reproducibility/)
+
+### 回导后 Smoke 与停止门禁
+
+回导后的容器再次完整生成 20 条、Schema 20/20、两路 Prompt token IDs 各 20/20、格式各 20/20、路由失败为 0；但 `test_000005_t0` 的 E03-B 生成用了 `1200` 个 completion tokens 并以 `finish_reason=length` 结束。性能报告记录 `generation_cap_hits={"profile":0,"emotion_response":1}`、`status=failed`；官方入口最终返回退出码 1。因此阶段 D **不通过**，不能把首次 Smoke 的成功当作回导门禁的替代。
+
+为诊断截断和回复差异，使用 `VLLM_BATCH_INVARIANT=1` 在宿主重复运行两次：两次均零 cap 且格式 20/20，但两次之间仅 6/20 条完整输出相同；vLLM 日志同时记录它将 Attention backend 强制改为 `FLASH_ATTN`。由于这种设置仍未达到重复输出一致且改变了数值执行路径，本轮没有将它纳入镜像。
+
+本阶段保留 `docker/image_info.json`、`docker/image-inspect.json`、`docker/image-inspect-after-load.json`、build/smoke 日志、前后两次 Smoke 输出及 `docker/docker-comparison.json`。锁定的 E03-B 上限为 1200 tokens；继续之前需要针对该上限/停止策略制定新版本并重新评估，不能静默改写冻结配置。完整 Val、官方评分及提交仍未执行。
+
 ## 后续门禁
 
-下一阶段为 Docker 离线 GPU Smoke 和镜像交付；按本轮授权边界到此停止。Docker、镜像构建/导出/回导、完整 Val 及官方评分均保持 `not_run`。
+需要先解决并按新版本复验 E03-B 生成上限门禁，才可将阶段 D 标记为通过。完整 Val、官方评分及提交仍为 `not_run`。
