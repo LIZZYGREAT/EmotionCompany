@@ -1,0 +1,48 @@
+version: E01-B-DEVFT-Final-v1
+experiment_id: E01-B-DEVFT-FINAL
+run_id: E01-B-DEVFT-FINAL-20261108-02-TRAINDEV-1EPOCH
+parent:
+  run_root: outputs/training/E01-B-FULL-20261028-133805
+  checkpoint: outputs/training/E01-B-FULL-20261028-133805/trainer/checkpoint-4048
+  expected_run_manifest_sha256: 9204b7cb374765438fd23054078d28992b240d50c4df8763cae0817f0d7752d7
+  expected_checkpoint_manifest_sha256: 125996b4d00d391dbb32dd3297578a72dfdf7679f44658eff16ae63be94ec1f5
+  optimizer_step: 4048
+a8_candidate:
+  run_root: outputs/training/E03-A8-DEVFT/P/E03-A8-DEVFT-20261108-02-PDEV-1EPOCH
+  checkpoint: outputs/training/E03-A8-DEVFT/P/E03-A8-DEVFT-20261108-02-PDEV-1EPOCH/trainer/checkpoint-0456
+  evaluation_root: outputs/evaluation/e03_a8_devft_v1/E03-A8-DEVFT-20261108-02-PDEV-1EPOCH
+  expected_run_manifest_sha256: 6b5f82b6b5a6ffa40c60548bb6926858ad606f28acf124e935efdf4c73624eb8
+  expected_checkpoint_manifest_sha256: 79f59d95247771160198f7e5dcecfe05ea754f222d3a2236f72f0eeadceb9c79
+  expected_generation_manifest_sha256: b03cec02aaa1dfd87f49fc61de3c1f51860f0ec47567261a1041334aa7ad1d52
+  optimizer_step: 4504
+data:
+  sft_manifest: outputs/sft_data/v1/manifest.json
+  d03_manifest: outputs/data_pipeline/v1/manifest.json
+  d042_manifest: outputs/token_audit/v1/manifest.json
+  sft_dev: data/processed/sft/v1/dev.jsonl
+  normalized_dev: data/processed/v1/dev.jsonl
+  allowed_rows: 1821
+  excluded_rows: 12
+protocol:
+  prompt_path: configs/prompts/p0.txt
+  prompt_sha256: d427e4996d0075a3adfe03ae25881d093687a6565f5b037f605accecc84c70b2
+  format_version: F2
+  history_policy: T1_recent_contiguous_complete_message_suffix
+  max_prompt_tokens: 1280
+  max_sequence_length: 2048
+  thinking: false
+schedule:
+  seed: 42
+  group_size: 4
+  checkpoint_dev_steps: [128, 256, 384, 456]
+optimizer:
+  source: parent_checkpoint_training_args_and_optimizer_state
+  expected_name: AdamW
+  expected_learning_rate: 0.0001
+  expected_weight_decay: 0.0
+  expected_scheduler: constant
+  expected_scheduler_last_epoch: 4048
+  max_training_seconds: 57600
+archive_root: outputs/final_candidates
+output_root: outputs/training/E01-B-DEVFT
+minimum_free_disk_gb: 2

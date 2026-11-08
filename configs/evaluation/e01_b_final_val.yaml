@@ -1,0 +1,28 @@
+version: E01-B-Final-Val-v1
+experiment_id: E01-B-FINAL-VAL
+run_id: E01-B-TRAINDEV-4504-VAL-20261108-01
+sources:
+  training_config: configs/training/e01_b_devft_final.yaml
+  candidate_run_root: outputs/training/E01-B-DEVFT/E01-B-DEVFT-FINAL-20261108-02-TRAINDEV-1EPOCH
+  a8_run_root: outputs/training/E03-A8-DEVFT/P/E03-A8-DEVFT-20261108-02-PDEV-1EPOCH
+  a8_evaluation_root: outputs/evaluation/e03_a8_devft_v1/E03-A8-DEVFT-20261108-02-PDEV-1EPOCH
+  d03_manifest: outputs/data_pipeline/v1/manifest.json
+  normalized_val: data/processed/v1/val.jsonl
+  target_free_input: outputs/evaluation/e03_a8_devft_v1/E03-A8-DEVFT-20261108-02-PDEV-1EPOCH/val_target_free.jsonl
+  id_map: outputs/evaluation/e03_a8_devft_v1/E03-A8-DEVFT-20261108-02-PDEV-1EPOCH/val_id_map.jsonl
+generation:
+  max_prompt_tokens: 1280
+  max_new_tokens: 1200
+  do_sample: false
+  equivalence_count: 32
+  equivalence_seed: 42
+  full_json_count: 160
+  full_json_seed: 42
+  full_json_selection_purpose: e01-b-final-full-json-v1
+  prefix_selection_purpose: e01-b-final-prefix-equivalence-v1
+scoring:
+  profile_dimensions: [personality_traits, interests, style]
+  bootstrap_replicates: 2000
+  bootstrap_seed: 42
+  response_metrics_config: configs/evaluation/e01_b_full.yaml
+output_root: outputs/evaluation/e01_b_final_val
