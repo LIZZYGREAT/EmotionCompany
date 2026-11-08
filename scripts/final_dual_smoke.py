@@ -22,6 +22,7 @@ DEFAULT_VAL_ROOT = ROOT / "outputs/evaluation/e03_a8_devft_v1/E03-A8-DEVFT-20261
 DEFAULT_TARGET_FREE_VAL = DEFAULT_VAL_ROOT / "val_target_free.jsonl"
 DEFAULT_TARGET_FREE_MANIFEST = DEFAULT_VAL_ROOT / "val_input_manifest.json"
 EQUIVALENCE_SAMPLES = 5
+VLLM_SMOKE_COUNTS = (10, 20)
 
 
 def sha256_file(path: Path) -> str:
@@ -510,6 +511,297 @@ def run_transformers(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.write_text(
+        "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+
+def _p95(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return sorted(values)[max(0, int(0.95 * len(values) + 0.999999) - 1)]
+
+
+def _code_identity() -> dict[str, Any]:
+    paths = (
+        "scripts/final_dual_smoke.py",
+        "src/inference/final_dual_protocol.py",
+        "src/inference/final_dual_vllm.py",
+        "tests/test_final_dual_vllm.py",
+        "configs/deployment/final_dual.yaml",
+    )
+    return {
+        "git_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+        "code_files_sha256": {path: sha256_file(ROOT / path) for path in paths if (ROOT / path).is_file()},
+    }
+
+
+def run_vllm(args: argparse.Namespace) -> None:
+    """Run a 10-row gate followed by the same frozen 20-row vLLM gate."""
+    config = json.loads(args.config.read_text(encoding="utf-8"))
+    lock, lock_path = _load_lock(config)
+    smoke_root = lock_path.parent / "vllm_smoke"
+    input_path = lock_path.parent / "transformers_smoke20/input/smoke20_input.jsonl"
+    input_manifest_path = lock_path.parent / "transformers_smoke20/input/manifest.json"
+    aggregate_path = smoke_root / "manifest.json"
+    if aggregate_path.exists():
+        raise FileExistsError(f"vLLM Smoke is already recorded: {aggregate_path}")
+    if not input_path.is_file() or not input_manifest_path.is_file():
+        raise FileNotFoundError("run `prepare` before the vLLM Smoke")
+    samples = read_jsonl_target_free(input_path)
+    input_manifest = json.loads(input_manifest_path.read_text(encoding="utf-8"))
+    if len(samples) != 20 or sha256_file(input_path) != input_manifest.get("input", {}).get("sha256"):
+        raise ValueError("vLLM Smoke requires the unchanged frozen 20-row input")
+
+    from participant import run_inference as runner
+    from src.inference.final_dual_protocol import (
+        assemble_submission,
+        build_emotion_response_prompt,
+        build_profile_prompt,
+    )
+    from src.inference.final_dual_vllm import DualLoRAVLLMService, GpuMemoryMonitor, gpu_snapshot
+
+    tokenizer_config = {**config["tokenizer"], "local_path": "model", "local_files_only": True}
+    tokenizer, tokenizer_facts = runner.load_runtime_tokenizer(
+        {"model_id": config["model_id"], "model_revision": config["model_revision"], "tokenizer": tokenizer_config}
+    )
+    prompts = {key: resolve_path(value["path"]).read_text(encoding="utf-8") for key, value in config["prompts"].items()}
+    schema = json.loads((ROOT / "participant/templates/submission_schema.json").read_text(encoding="utf-8"))
+    routes = (
+        ("profile", "profile", "profile", "profile", config["generation"]["profile"]),
+        ("emotion_response", "emotion-response", "emotion_response", "emotion_response", config["generation"]["emotion_response"]),
+    )
+    service = DualLoRAVLLMService(
+        config=config,
+        model_lock=lock,
+        root=ROOT,
+        log_path=smoke_root / "vllm_server.log",
+        vllm_bin=args.vllm_bin,
+        startup_timeout_seconds=args.startup_timeout,
+    )
+    monitor = GpuMemoryMonitor(interval_seconds=1.0)
+    monitor.start()
+    stages: list[dict[str, Any]] = []
+    service_start: dict[str, Any] | None = None
+    aliases: list[str] = []
+    service_alive_before_stop = False
+    shutdown_returncode: int | None = None
+    failure: str | None = None
+    stage_directories: list[Path] = []
+    try:
+        service_start = service.start()
+        aliases = service.require_adapters()
+        for sample_count in VLLM_SMOKE_COUNTS:
+            stage_name = f"smoke{sample_count}"
+            stage_root = smoke_root / stage_name
+            if stage_root.exists():
+                raise FileExistsError(f"refusing to overwrite vLLM evidence: {stage_root}")
+            stage_root.mkdir(parents=True, exist_ok=False)
+            stage_directories.append(stage_root)
+            stage_samples = samples[:sample_count]
+            predictions: list[dict[str, Any]] = []
+            raw_rows: list[dict[str, Any]] = []
+            end_to_end_seconds: list[float] = []
+            route_seconds: dict[str, list[float]] = {"profile": [], "emotion_response": []}
+            prompt_exact: dict[str, list[bool]] = {"profile": [], "emotion_response": []}
+            format_success = {"profile": 0, "emotion_response": 0}
+            cap_hits = {"profile": 0, "emotion_response": 0}
+            route_attempts = {"profile": 0, "emotion_response": 0}
+            route_errors: dict[str, list[dict[str, str]]] = {"profile": [], "emotion_response": []}
+            schema_success = 0
+            stage_failure: str | None = None
+
+            for sample in stage_samples:
+                sample_id = sample["id"]
+                sample_started = time.monotonic()
+                prepared: dict[str, dict[str, Any] | None] = {"profile": None, "emotion_response": None}
+                generated: dict[str, dict[str, Any] | None] = {"profile": None, "emotion_response": None}
+                preparation_errors: dict[str, str] = {}
+                route_error_facts: dict[str, str] = {}
+                for route, _, prompt_key, _, _ in routes:
+                    try:
+                        if route == "profile":
+                            prepared[route] = build_profile_prompt(
+                                sample, tokenizer,
+                                selection_prompt=prompts["selection"],
+                                profile_prompt=prompts["profile"],
+                                profile_budget_prompt=prompts["profile_history_budget"],
+                                prompt_cap=int(config["context"]["max_prompt_tokens"]),
+                            )
+                        else:
+                            prepared[route] = build_emotion_response_prompt(
+                                sample, tokenizer,
+                                selection_prompt=prompts["selection"],
+                                emotion_response_prompt=prompts["emotion_response"],
+                                prompt_cap=int(config["context"]["max_prompt_tokens"]),
+                            )
+                    except Exception as exc:
+                        preparation_errors[route] = f"{type(exc).__name__}: {exc}"
+
+                for route, alias, _, _, generation in routes:
+                    prompt = prepared[route]
+                    if prompt is None:
+                        route_error_facts[route] = preparation_errors[route]
+                        continue
+                    route_attempts[route] += 1
+                    try:
+                        response = service.chat_completion(
+                            model_alias=alias,
+                            messages=prompt["messages"],
+                            expected_prompt_token_ids=prompt["prompt_ids"],
+                            max_tokens=int(generation["max_new_tokens"]),
+                        )
+                        generated[route] = response
+                        route_seconds[route].append(float(response["generation_seconds"]))
+                        prompt_exact[route].append(bool(response["prompt_token_ids_exact_match"]))
+                        cap_hits[route] += response["finish_reason"] == "length" or response["usage_completion_tokens"] >= int(generation["max_new_tokens"])
+                        if not response["prompt_token_ids_exact_match"]:
+                            route_error_facts[route] = "server_prompt_token_ids_mismatch"
+                        if response["requested_model_alias"] != alias:
+                            route_error_facts[route] = "requested_model_alias_mismatch"
+                    except Exception as exc:
+                        route_error_facts[route] = f"{type(exc).__name__}: {exc}"
+                        route_errors[route].append({"id": sample_id, "error": route_error_facts[route]})
+                        if not service.is_alive():
+                            stage_failure = f"vLLM server exited while generating {sample_id}: {route_error_facts[route]}"
+                            break
+
+                profile_result = generated["profile"]
+                er_result = generated["emotion_response"]
+                submission, diagnostics = assemble_submission(
+                    sample_id,
+                    None if profile_result is None else profile_result["text"],
+                    None if er_result is None else er_result["text"],
+                    schema,
+                )
+                format_success["profile"] += diagnostics["profile_parse_error"] is None
+                format_success["emotion_response"] += all(diagnostics[key] is None for key in (
+                    "emotion_parse_error", "response_parse_error", "emotion_response_format_error"
+                ))
+                schema_success += 1
+                predictions.append(submission)
+                sample_seconds = time.monotonic() - sample_started
+                end_to_end_seconds.append(sample_seconds)
+                raw_rows.append({
+                    "id": sample_id,
+                    "profile_raw": None if profile_result is None else profile_result["text"],
+                    "emotion_response_raw": None if er_result is None else er_result["text"],
+                    "profile_generation": None if profile_result is None else {key: value for key, value in profile_result.items() if key != "text"},
+                    "emotion_response_generation": None if er_result is None else {key: value for key, value in er_result.items() if key != "text"},
+                    "profile_prompt": None if prepared["profile"] is None else {key: prepared["profile"][key] for key in ("prompt_tokens", "prompt_token_ids_sha256", "selected_message_ids", "selected_history_sha256")},
+                    "emotion_response_prompt": None if prepared["emotion_response"] is None else {key: prepared["emotion_response"][key] for key in ("prompt_tokens", "prompt_token_ids_sha256", "selected_message_ids", "selected_history_sha256")},
+                    "preparation_errors": preparation_errors,
+                    "route_errors": route_error_facts,
+                    "sample_end_to_end_seconds": sample_seconds,
+                    "diagnostics": diagnostics,
+                })
+                if stage_failure:
+                    break
+
+            _write_jsonl(stage_root / "predictions.jsonl", predictions)
+            _write_jsonl(stage_root / "raw_outputs.jsonl", raw_rows)
+            route_prompt_gates = {
+                route: len(values) == sample_count and all(values)
+                for route, values in prompt_exact.items()
+            }
+            format_threshold = int(sample_count * 0.95 + 0.999999)
+            stage_gate = (
+                stage_failure is None
+                and len(predictions) == sample_count
+                and schema_success == sample_count
+                and format_success["profile"] >= format_threshold
+                and format_success["emotion_response"] >= format_threshold
+                and all(route_prompt_gates.values())
+                and all(count == sample_count for count in route_attempts.values())
+                and all(count == 0 for count in cap_hits.values())
+                and all(not errors for errors in route_errors.values())
+            )
+            stage_report = {
+                "version": "final-dual-vllm-smoke-v1",
+                "status": "passed" if stage_gate else "failed",
+                "created_at_utc": datetime.now(timezone.utc).isoformat(),
+                "sample_count": len(predictions),
+                "requested_sample_count": sample_count,
+                "input_sha256": sha256_file(input_path),
+                "input_ids": [sample["id"] for sample in stage_samples],
+                "registered_model_ids": aliases,
+                "route_request_count": route_attempts,
+                "format_success_count": format_success,
+                "format_threshold_per_route": format_threshold,
+                "schema_valid_count": schema_success,
+                "prompt_token_ids_exact_match_count": {route: sum(values) for route, values in prompt_exact.items()},
+                "prompt_token_ids_route_gate": route_prompt_gates,
+                "generation_cap_hits": cap_hits,
+                "route_failures": route_errors,
+                "route_generation_seconds": {
+                    route: {"count": len(values), "median": statistics.median(values) if values else None, "p95": _p95(values)}
+                    for route, values in route_seconds.items()
+                },
+                "dual_end_to_end_seconds": {
+                    "count": len(end_to_end_seconds),
+                    "median": statistics.median(end_to_end_seconds) if end_to_end_seconds else None,
+                    "p95": _p95(end_to_end_seconds),
+                    "scope": "from per-sample prompt construction through both serial completions and official output assembly",
+                },
+                "stage_failure": stage_failure,
+                "stage_gate_passed": stage_gate,
+                "outputs": {
+                    "predictions.jsonl": sha256_file(stage_root / "predictions.jsonl"),
+                    "raw_outputs.jsonl": sha256_file(stage_root / "raw_outputs.jsonl"),
+                },
+                "gpu_memory_snapshot_after_batch": gpu_snapshot(),
+            }
+            (stage_root / "manifest.json").write_text(json.dumps(stage_report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            stages.append({"name": stage_name, **stage_report})
+            print(json.dumps({"stage": stage_name, "status": stage_report["status"], "format_success_count": format_success, "schema_valid_count": schema_success, "prompt_token_ids_exact_match_count": stage_report["prompt_token_ids_exact_match_count"]}, ensure_ascii=False))
+            if not stage_gate:
+                break
+
+        service_alive_before_stop = service.is_alive()
+    except Exception as exc:
+        failure = f"{type(exc).__name__}: {exc}"
+        print(json.dumps({"status": "failed", "error": failure}, ensure_ascii=False), file=sys.stderr)
+    finally:
+        shutdown_returncode = service.close()
+        gpu_memory = monitor.stop()
+
+    gate_passed = len(stages) == 2 and all(stage.get("status") == "passed" for stage in stages) and service_alive_before_stop
+    log_path = smoke_root / "vllm_server.log"
+    report = {
+        "version": "final-dual-vllm-smoke-v1",
+        "status": "passed" if gate_passed else "failed",
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "code_identity": _code_identity(),
+        "config": {"path": str(args.config.relative_to(ROOT)), "sha256": sha256_file(args.config)},
+        "model_lock": {"path": str(lock_path.relative_to(ROOT)), "sha256": sha256_file(lock_path)},
+        "input": {"path": str(input_path.relative_to(ROOT)), "sha256": sha256_file(input_path), "sample_count": len(samples)},
+        "tokenizer_identity": tokenizer_facts,
+        "service": service_start,
+        "registered_model_ids": aliases,
+        "service_alive_before_intentional_shutdown": service_alive_before_stop,
+        "intentional_shutdown_returncode": shutdown_returncode,
+        "gpu_memory_monitor": gpu_memory,
+        "server_log": {"path": str(log_path.relative_to(ROOT)), "sha256": sha256_file(log_path) if log_path.is_file() else None},
+        "stages": stages,
+        "failure": failure,
+        "gate_thresholds": {
+            "format": "ceil(95% of each stage row count) per route",
+            "schema": "100%",
+            "prompt_token_ids": "exact equality for both routes on every request",
+            "registered_aliases": ["profile", "emotion-response"],
+            "generation_cap_hits": 0,
+            "one_service_for_10_then_20": True,
+        },
+    }
+    smoke_root.mkdir(parents=True, exist_ok=True)
+    aggregate_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps({"status": report["status"], "stages": [{"name": item["name"], "status": item["status"]} for item in stages], "gpu_memory_monitor": gpu_memory}, ensure_ascii=False))
+    if not gate_passed:
+        raise SystemExit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -522,6 +814,11 @@ def main() -> None:
     run = sub.add_parser("run-transformers")
     run.add_argument("--config", type=Path, default=ROOT / "configs/deployment/final_dual.yaml")
     run.set_defaults(func=run_transformers)
+    run_vllm_parser = sub.add_parser("run-vllm")
+    run_vllm_parser.add_argument("--config", type=Path, default=ROOT / "configs/deployment/final_dual.yaml")
+    run_vllm_parser.add_argument("--vllm-bin", default="vllm")
+    run_vllm_parser.add_argument("--startup-timeout", type=float, default=900.0)
+    run_vllm_parser.set_defaults(func=run_vllm)
     args = parser.parse_args()
     args.config = args.config.resolve()
     if hasattr(args, "test_inference_data"):
