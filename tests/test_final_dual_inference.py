@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import participant.final_dual_inference as final_dual
 from participant.final_dual_inference import _resume_identity, read_test_samples
 
 
@@ -129,3 +130,13 @@ def test_resume_rejects_changed_input_identity(tmp_path: Path) -> None:
             backend="vllm",
             resume_enabled=True,
         )
+
+
+def test_runtime_git_identity_uses_container_manifest_without_git_metadata(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "package_manifest.json").write_text(
+        json.dumps({"source_commit": "docker-source-commit"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(final_dual, "ROOT", tmp_path)
+    monkeypatch.delenv("EVALUATION_GIT_HEAD", raising=False)
+
+    assert final_dual._execution_git_head() == "docker-source-commit"

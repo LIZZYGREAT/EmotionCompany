@@ -58,6 +58,26 @@ def _display_path(path: Path) -> str:
         return str(path.resolve())
 
 
+def _execution_git_head() -> str | None:
+    declared = os.environ.get("EVALUATION_GIT_HEAD", "").strip()
+    if declared:
+        return declared
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=False
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
+    manifest_path = ROOT / "package_manifest.json"
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        value = manifest.get("source_commit")
+        return value if isinstance(value, str) and value else None
+    return None
+
+
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
@@ -607,7 +627,7 @@ def main() -> int:
         "run_id": progress["run_id"],
         "backend": backend,
         "created_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "git_head": os.environ.get("EVALUATION_GIT_HEAD") or subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+        "git_head": _execution_git_head(),
         "runtime_environment": {"python": sys.version.split()[0], "platform": platform.platform()},
         "configuration": {"path": _display_path(config_path), "sha256": sha256_file(config_path), "model_lock_path": _display_path(lock_path), "model_lock_sha256": sha256_file(lock_path)},
         "model_id": config["model_id"],
