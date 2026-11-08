@@ -2,15 +2,15 @@
 
 执行日期：2026-11-08；任务分支：`feat/final-dual-adapter-delivery`。
 
-当前结论：**阶段 A Transformers 验收通过；vLLM、官方入口与 Docker 尚未运行。整体为 `partial`，不得标记为 `ready_for_submission`。**
+当前结论：**阶段 A Transformers 与阶段 B vLLM 双 LoRA 验收通过；官方入口与 Docker 尚未运行。整体为 `partial`，不得标记为 `ready_for_submission`。**
 
 ## 阶段状态
 
 | 阶段 | 状态 | 证据 / 边界 |
 |---|---|---|
 | A. 资产锁定、Transformers 双 Adapter Smoke | `passed` | Base、Tokenizer、Prompt、LoRA 配置与候选文件身份均核验；20 条双路生成、Schema 和两 Adapter 切换等价性通过。 |
-| B. vLLM 0.11.1 双 LoRA Smoke | `ready_for_run` | 服务脚本与请求路由待实现；未启动服务、未生成 vLLM 预测。 |
-| C. 官方 `start.sh` 双路入口 | `not_run` | 尚未修改或调用官方入口；无 `performance_report.json` 验收结果。 |
+| B. vLLM 0.11.1 双 LoRA Smoke | `passed` | 单服务先跑 10 条、通过后跑同一冻结集 20 条；双别名、Token IDs、格式、Schema、显存及延迟门禁通过。 |
+| C. 官方 `start.sh` 双路入口 | `not_run` | 双 Adapter 分支正在实现；尚未使用官方入口生成 `submission.jsonl` 和 `performance_report.json`。 |
 | D. Docker 离线 GPU Smoke、镜像导出/回导 | `not_run` | 本轮执行边界在 Docker 之前。 |
 | 官方评分、完整 Val、提交 | `not_run` | Smoke 不读取 Gold、不计算质量分数，不代表赛事提交就绪。 |
 
@@ -57,6 +57,25 @@ Replay-1152 的 Prompt 和训练配置来自 `origin/chore/e03-b-p2-twofield`，
 
 阶段 A 实现与来源锁定提交为 `f1f29fa`；CUDA 显存统计兼容性修复提交为 `9df4be8`。新增协议/运行时 CPU 回归为 11/11 通过；相关 Python 文件 `compileall` 通过，提交前 `git diff --cached --check` 通过。
 
+## 阶段 B：vLLM 0.11.1 双 LoRA Smoke
+
+实现提交为 `ae5e46c`。服务只启动一次，先完成 `smoke10` 门禁，再使用相同进程完成 `smoke20`；两阶段合计 60 次串行 Chat Completion 请求。vLLM 官方 0.11.1 支持用 `--lora-modules name=path` 注册命名 LoRA，并通过请求的 `model` 名称路由，实际使用的命令与别名已记录在 Smoke Manifest 和服务日志中。[vLLM 0.11.1 LoRA 文档](https://docs.vllm.ai/en/v0.11.1/features/lora/)
+
+实际运行参数：Base `Qwen/Qwen3-1.7B` 本地锁定目录、BF16、`max_model_len=2560`、`max_num_seqs=1`、`max_num_batched_tokens=2560`、`gpu_memory_utilization=0.8`、`max_lora_rank=8`、`max_loras=1`、`max_cpu_loras=2`；注册 `qwen-base`、`profile`、`emotion-response`。两个 Adapter 均由锁定的部署副本加载，原候选资产未修改。
+
+| 门禁 | Smoke 10 | Smoke 20 | 结果 |
+|---|---:|---:|---|
+| Profile 严格解析 | 10/10 | 20/20 | 通过 |
+| E03-B 情绪/回复严格解析 | 10/10 | 20/20 | 通过 |
+| 官方 Schema | 10/10 | 20/20 | 通过 |
+| 服务端 Prompt Token IDs 精确匹配 | 两路各 10/10 | 两路各 20/20 | 通过 |
+| LoRA 注册与调用 | `profile`、`emotion-response` 均注册并各请求 10 次 | 两别名各请求 20 次 | 通过 |
+| 生成上限命中 / 路由失败 / OOM | 0 / 0 / 0 | 0 / 0 / 0 | 通过 |
+
+vLLM 初始化耗时 57.47 秒。GPU 为 NVIDIA GeForce RTX 4060 Laptop，采样峰值占用 7508/8188 MiB，服务退出码为 0。显存峰值约为设备容量的 91.7%；启动日志另有 WSL pin-memory 性能提示及 CPU swap 配置提示，实际 60 次请求均完成且没有 OOM。请求延迟中位数 / P95：Smoke 20 的 Profile 为 0.306 / 0.504 秒，E03-B 为 1.547 / 7.387 秒；每条样本从两路 Prompt 构造开始，串行完成两路生成与官方输出组装的端到端时间为 1.903 / 8.504 秒。Smoke 10 的端到端中位数 / P95 为 2.799 / 10.815 秒。以上为 20 条工程 Smoke，不代表完整 Val 或质量评估。
+
+证据位于 `outputs/final_delivery/E03-DUAL-20261108-02/vllm_smoke/`：`smoke10/manifest.json`、`smoke20/manifest.json`、两份预测与原始输出、聚合 `manifest.json` 和 `vllm_server.log`。独立复核确认 10/20 行数、ID 顺序与唯一性、100% Schema、两路 Prompt Token IDs 及报告哈希一致；日志没有 OOM 或崩溃标记。
+
 ## 后续门禁
 
-下一步按锁定配置启动 vLLM 0.11.1，先 10 条、后 20 条验证双 LoRA 注册、别名路由、服务端 Prompt Token IDs、格式率、Schema、显存和逐路/端到端延迟。通过后再验收 `bash participant/start.sh TEST_FILE RESULT_DIR`。在 Docker 阶段之前停止；Docker 与镜像导出状态保持 `not_run`。
+下一步真实调用 `bash participant/start.sh TEST_FILE RESULT_DIR`，核验 20 条输入的两路路由、Schema、增量输出与 `performance_report.json`。在 Docker 阶段之前停止；Docker 与镜像导出状态保持 `not_run`。
