@@ -140,3 +140,17 @@ def test_runtime_git_identity_uses_container_manifest_without_git_metadata(tmp_p
     monkeypatch.delenv("EVALUATION_GIT_HEAD", raising=False)
 
     assert final_dual._execution_git_head() == "docker-source-commit"
+
+
+def test_runtime_git_identity_falls_back_when_git_executable_is_missing(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "package_manifest.json").write_text(
+        json.dumps({"source_commit": "docker-source-commit"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(final_dual, "ROOT", tmp_path)
+    monkeypatch.delenv("EVALUATION_GIT_HEAD", raising=False)
+
+    def missing_git(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(final_dual.subprocess, "run", missing_git)
+    assert final_dual._execution_git_head() == "docker-source-commit"

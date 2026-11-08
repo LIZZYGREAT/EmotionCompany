@@ -62,10 +62,13 @@ def _execution_git_head() -> str | None:
     declared = os.environ.get("EVALUATION_GIT_HEAD", "").strip()
     if declared:
         return declared
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=False
-    )
-    if result.returncode == 0 and result.stdout.strip():
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=False
+        )
+    except OSError:
+        result = None
+    if result is not None and result.returncode == 0 and result.stdout.strip():
         return result.stdout.strip()
     manifest_path = ROOT / "package_manifest.json"
     if manifest_path.is_file():
