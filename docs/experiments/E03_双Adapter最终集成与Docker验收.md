@@ -127,3 +127,52 @@ Docker Desktop 的数据根目录仍位于 E 盘数据盘：`E:\DockerData\Docke
 ## 后续门禁
 
 需要先解决并按新版本复验 E03-B 生成上限门禁，才可将阶段 D 标记为通过。完整 Val、官方评分及提交仍为 `not_run`。
+
+## v1.1 长度容错与新镜像复核（2026-11-08）
+
+本节追加记录 `E03-DUAL-20261108-03` 的 v1.1 执行结果；上文 v1 镜像回导后因 `finish_reason=length` 失败的事实保持不变。
+
+### 代码版本与冻结身份
+
+- 长度受限恢复及字段级诊断提交：`765dc9c`；v1.1 运行时身份锁提交：`33daf9d`；打包器读取冻结输入 SHA 的层级修复提交：`d71380047e18fe5bd68596d2050381a22f142c07`。
+- Docker 配置 SHA-256：`3c253e9ca0976a744dbcae73521cefc70025b2af1d94942e29d38895d9068b54`；宿主 v1.1 配置 SHA-256：`2bfeb59e338773528ccad16a8d787680521475477fb1d89f6e135970cfcdbb0d`；宿主锁 SHA-256：`2b838ffc4d9ef045204acd4686dce454963302484dd1d89020ca7667e27327a3`。
+- Base SHA-256：`005d20550c04f4e246e5b434448786b44a0196b47d758d0acc77aba279e5bbc5`；A8 Profile Adapter SHA-256：`4f4bea7c738109b2b90502350abbc8bb37e98de08c62031f497d3516b2aa1787`；E03-B Emotion/Response Adapter SHA-256：`b3db90b9eff9204f3b5717fc52e33481feb4149571c5fdad9238b47642e62b3b`。
+- Prompt SHA-256：P0 `d427e4996d0075a3adfe03ae25881d093687a6565f5b037f605accecc84c70b2`；Profile `0cf6e196b5d4ac4005ea2cc2b454ec058ee24592fb8bb0a1c172ca464dba3cdb`；Profile History Budget `832aa10ad57626b38d45247fd6715a7aac7b0c7c838e817c6a0206d50a498a94`；Emotion/Response `630e842b31defc42968110d35154ab20c007041bd8b75583072bdd51e68a9c35`。
+- 容器六个推理运行文件的 SHA-256、Tokenizer/Chat Template 指纹、模型锁及文件清单记录于 `outputs/final_delivery/E03-DUAL-20261108-03/docker/context/package_manifest.json` 与 `model_lock.json`。最终打包 Manifest SHA-256 为 `e1f14d2f639cc87870f705187a3572e14cb09fc12469b62c4f24cd448e43555c`；容器 Model Lock SHA-256 为 `20dc9e302ec3d9bd7542bca61ea2508bf3c6e6f6f04f28e1d20e013ebb196537`。
+
+Gate 0 相关回归为 96 项通过，仓库 `unit-cpu` 集合为 312 项通过；编译、官方入口语法及 `git diff --check` 通过。三次 5 条长度触发样本冷启动没有实际触发 `length`，因此不作为截断分支证明；stop、单次恢复、unresolved、非法回退等分支由确定性 Mock 回归覆盖。
+
+### 宿主 vLLM 与旧镜像代码覆盖
+
+- 宿主使用同一 Base、Adapter、Prompt 和 vLLM 0.11.1；冻结 20 条官方输入独立冷启动 3 次，每次 Schema、ID、双路格式、Prompt Token IDs 和 alias 均 `20/20`，无路由失败、cap、retry 或 OOM。固定 target-free 100 条运行 `100/100` Schema、格式、ID、Prompt Token IDs 和 alias 通过；无 invalid、严重重复、route error、cap 或 retry，GPU 峰值 `7814/8188 MiB`。
+- 5 条长度触发输入的 3 次宿主冷启动均未触发 cap；没有把这点当作容错证明。模拟故障回归覆盖所有指定长度分支。
+- Gate 2 使用旧镜像 `emotionalcompany/final-dual:E03-DUAL-20261108-02`（Image ID `sha256:42465c1eb5870221d2c224def8492adb9e09ec44152741523831a6777b18e186`），只读覆盖 v1.1 `participant/final_dual_inference.py`，覆盖文件 SHA-256 `4e4ac0f56569ec2d32c63a5a2c60de99b107dfe184f61fef84203b5c1ed37751`。两次离线 GPU 20 条运行均通过，双路 Prompt Token IDs `20/20`，无路由错误或 OOM。
+- 运行证据：`outputs/final_delivery/E03-DUAL-20261108-03/host/runtime_validation.json` 与 `outputs/final_delivery/E03-DUAL-20261108-03/prebuild_check.json`；打包检查结果为 `ready_for_asset_packaging`。
+
+### 单次新镜像 Build 与验证
+
+构建前 E 盘有 `85.56 GiB` 可用，Docker Desktop VHDX 位于 `E:\DockerData\DockerDesktopWSL\disk\docker_data.vhdx`。旧白名单 Context 为 `3.86 GiB`；按完整镜像虚拟大小、Context、一份旧 tar 同等大小及 `20 GiB` 安全余量计算，保守预算 `64.59 GiB`，当时余量 `20.98 GiB`。Docker 数据根目录为 Engine 内 `/var/lib/docker`，对应 E 盘 VHDX。
+
+仅执行一次正式 build，tag 为 `emotionalcompany/final-dual:E03-DUAL-20261108-03`。Image ID 为 `sha256:46d1f5710795fc2ba6e0d7be72a00f9fbfa1a5a31a435b880a091d23bfdad95d`，40 个 RootFS 层，虚拟大小 `31,955,863,214` bytes，低于 `50,000,000,000` bytes；镜像内 9 个运行时代码、配置和清单 SHA 与打包清单相符。Build 日志为 `outputs/final_delivery/E03-DUAL-20261108-03/docker/build.log`。
+
+新镜像的离线 GPU 20 条 Smoke 通过：Schema 和 ID `20/20`，Profile 与 Emotion/Response 两路格式和 Prompt Token IDs 各 `20/20`，alias 各请求 20 次，零路由失败、cap 和 retry，GPU 峰值 `7092/8188 MiB`。与宿主 20 条比较时稳定字段和运行指标一致，回复文本 `6/20` 逐字相同。
+
+同一新镜像的固定 100 条官方入口独立验证通过：100/100 Schema、ID、双路格式、Prompt Token IDs 和 alias；route error、invalid、严重异常、initial cap、retry 和 unresolved 均为 0，100 条全部 `completed_stop`，GPU 峰值 `7159/8188 MiB`。端到端延迟 P50/P90/P95 为 `3046.841 / 9567.459 / 11687.623 ms`；Profile 生成延迟为 `438.045 / 590.180 / 641.695 ms`，Emotion/Response 为 `2517.914 / 9078.621 / 11148.053 ms`。Prompt Token 总数为 Profile `90,398`、Emotion/Response `79,026`；completion Token 总数分别为 `1,682` 与 `18,813`。独立自校验结果在 `outputs/final_delivery/E03-DUAL-20261108-03/docker/verify-stress100-self.json`。
+
+### 100 条宿主对照：稳定字段门禁未通过
+
+与宿主固定 100 条运行逐项对照时，严格比较器拒绝通过，**本次 v1.1 不标记为可交付**。两边 ID 顺序相同；Base、两个 Adapter、Tokenizer、Chat Template、四份 Prompt、推理代码文件 SHA、vLLM 0.11.1 及每条输入两路的预期 Prompt Token SHA 均相同。两边生成配置均为 `do_sample=false`、`temperature=0`，格式指标和路由/ cap / retry 指标相同。所有 100 条的输出都各自满足格式门禁，但结构字段仍出现以下差异：
+
+| ID | 字段差异（宿主 → Docker） |
+|---|---|
+| `test_000009_t0` | Profile `style`: `rational` → `detailed` |
+| `test_000032_t0` | Profile 新增 `high_conscientiousness` 与 `study_exam`；宿主对应集合为空 |
+| `test_000046_t0` | Profile `style`: `high_emotional_expression` → `colloquial`；Emotion label `joy` → `relaxed` |
+| `test_000053_t0` | Profile `style`: `brief` → `direct` |
+| `test_000078_t0` | Profile `style`: `rational` → `detailed` |
+
+因此有 5/100 行 Profile 字段不同、1/100 行 Emotion label 不同（`test_000046_t0` 同时在两类差异中），`memory_refs` 为 0 行不同；完整回复文本为 `13/100` 逐字相同。原始记录显示这些行在两边生成的文本不同，但输入 Prompt Token SHA 一致。现有证据排除了模型/Prompt/Tokenizer/代码身份错配；差异与跨冷启动生成变化一致，但不能据此证明根因或语义等价。诊断文件 `outputs/final_delivery/E03-DUAL-20261108-03/docker/stable_field_comparison.json` 保存了逐行差异、原始文本 SHA、身份与性能统计；未使用 Gold 或 References。
+
+由于用户方案要求画像、情绪等稳定字段保持一致并先诊断差异，本次没有放宽比较器，也没有重跑以寻找偶然一致的结果。**没有执行 `docker save`、移除新旧镜像、重新回导或 Docker 清理**；旧 v1 tag 与 tar 保留，新 v1.1 tag 暂留在 E 盘 Docker 数据盘。最终测量 E 盘可用 `42.09 GiB`，VHDX 大小 `81.54 GiB`，Build Cache `36.79 GB`；未执行 prune。100 条对照失败证据和磁盘清单分别见 `stable_field_comparison.json` 与 `disk_preflight.json`。
+
+当前状态为：代码和单次镜像构建完成，20 条 Smoke 与 100 条自身质量门禁通过，**100 条跨宿主稳定字段门禁未通过**；尚未到 `ready_for_local_submission_review`，也未保存最终交付 tar。是否接受有界的画像/情绪字段变化并另行定义容差，或要求继续处理生成确定性并重新验证，需要项目决策。
