@@ -291,7 +291,7 @@ def run_transformers(args: argparse.Namespace) -> None:
         ("emotion_response", "emotion-response", generation["emotion_response"]["max_new_tokens"]),
     ):
         if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats(0)
+            torch.cuda.reset_peak_memory_stats()
         started = time.monotonic()
         runtime = DualAdapterRuntime.load(
             base_model_path=model_path,
@@ -324,7 +324,7 @@ def run_transformers(args: argparse.Namespace) -> None:
             runtime.close()
 
     if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats(0)
+        torch.cuda.reset_peak_memory_stats()
     dual_started = time.monotonic()
     runtime = DualAdapterRuntime.load(
         base_model_path=model_path,

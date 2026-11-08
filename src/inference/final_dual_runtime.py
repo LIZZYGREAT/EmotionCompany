@@ -126,6 +126,6 @@ def cuda_memory_facts(torch_module: Any) -> dict[str, Any]:
     return {
         "available": True,
         "device_name": torch_module.cuda.get_device_name(0),
-        "peak_allocated_bytes": int(torch_module.cuda.max_memory_allocated(0)),
-        "peak_reserved_bytes": int(torch_module.cuda.max_memory_reserved(0)),
+        "peak_allocated_bytes": int(torch_module.cuda.max_memory_allocated()),
+        "peak_reserved_bytes": int(torch_module.cuda.max_memory_reserved()),
     }
