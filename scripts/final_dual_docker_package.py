@@ -155,6 +155,16 @@ def _runtime_code_hashes(root: Path) -> dict[str, str]:
     return {path.as_posix(): sha256_file(root / path) for path in RUNTIME_CODE_FILES}
 
 
+def _frozen_input_sha256(previous_gates: dict[str, Any]) -> str:
+    historical = previous_gates.get("historical_asset_protocol_evidence")
+    if not isinstance(historical, dict):
+        raise ValueError("historical asset/protocol gate evidence is missing")
+    value = historical.get("input_sha256")
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise ValueError("historical gate evidence has no valid frozen input SHA-256")
+    return value
+
+
 def _regular_file_bytes(root: Path) -> int:
     return sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
 
@@ -648,7 +658,7 @@ def prepare_context(*, output_dir: Path, repo_root: Path = ROOT) -> dict[str, An
             "deployment_config": {"path": DOCKER_CONFIG.as_posix(), "sha256": docker_config_sha},
             "input": {
                 "path": "transformers_smoke20/input/smoke20_input.jsonl",
-                "sha256": static["previous_gates"]["input_sha256"],
+                "sha256": _frozen_input_sha256(static["previous_gates"]),
                 "rows": 20,
             },
             "runtime": {"python": "3.10.22", "torch": "2.9.0+cu128", "vllm": "0.11.1", "transformers": "4.57.6", "cuda": "12.8", "conda": "26.1.0"},

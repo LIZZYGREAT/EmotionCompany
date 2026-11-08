@@ -41,6 +41,18 @@ def test_prepare_context_refuses_paths_outside_ignored_outputs(tmp_path: Path) -
         package.prepare_context(output_dir=tmp_path / "context")
 
 
+def test_frozen_input_sha256_reads_historical_gate_evidence() -> None:
+    expected = "a" * 64
+    gates = {"historical_asset_protocol_evidence": {"input_sha256": expected}}
+
+    assert package._frozen_input_sha256(gates) == expected
+
+    with pytest.raises(ValueError, match="historical asset/protocol gate evidence is missing"):
+        package._frozen_input_sha256({"input_sha256": expected})
+    with pytest.raises(ValueError, match="valid frozen input SHA-256"):
+        package._frozen_input_sha256({"historical_asset_protocol_evidence": {"input_sha256": "invalid"}})
+
+
 def test_dockerfile_pins_validated_build_images() -> None:
     dockerfile = (package.ROOT / package.DOCKERFILE).read_text(encoding="utf-8")
 
