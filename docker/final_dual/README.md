@@ -6,6 +6,10 @@ two-argument `participant/start.sh` entrypoint. Runtime inference is offline;
 vLLM binds to container loopback and the container does not use a host model
 cache or Python environment.
 
+The build pins both the CUDA runtime and conda-forge Miniforge 26.1.0-0 by
+digest. It copies only `/opt/conda` from the Miniforge stage, then creates the
+runtime environment from the E02 explicit Conda lock and pinned pip lock.
+
 Build context and model files belong under ignored `outputs/`. The package
 script checks the previous Transformers, vLLM, and official-entry gates before
 copying any weights. It verifies Base, Tokenizer, Prompt, and both Adapter

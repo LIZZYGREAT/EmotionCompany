@@ -58,6 +58,8 @@ COPY_FILES = (
 )
 COPY_DIRS = (Path("src/shared"),)
 MAX_IMAGE_BYTES = 50_000_000_000
+CUDA_IMAGE = "nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04@sha256:17e2934e1fa96152b14f78078bfbafd0f00f391df995dc6c641a720fce1202bb"
+MINIFORGE_IMAGE = "condaforge/miniforge3:26.1.0-0@sha256:507f4365aba4825eb5541e00d57e515389053bcacaa46a83da4efaefce34874d"
 
 
 def sha256_file(path: Path) -> str:
@@ -275,6 +277,7 @@ def validate_static_config(config: dict[str, Any], repo_root: Path = ROOT) -> di
         "model_aliases": ["qwen-base", "profile", "emotion-response"],
         "vllm_version": vllm["expected_version"],
         "runtime": {"python": "3.10.22", "torch": "2.9.0+cu128", "transformers": "4.57.6"},
+        "build_images": {"cuda": CUDA_IMAGE, "miniforge": MINIFORGE_IMAGE},
     }
 
 
@@ -283,8 +286,10 @@ def check_static(repo_root: Path = ROOT) -> dict[str, Any]:
     facts = validate_static_config(config, repo_root)
     dockerfile = (repo_root / DOCKERFILE).read_text(encoding="utf-8")
     entrypoint = (repo_root / ENTRYPOINT).read_text(encoding="utf-8")
-    if "FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04" not in dockerfile:
-        raise ValueError("Dockerfile must use the validated CUDA 12.8 runtime base")
+    if f"FROM {CUDA_IMAGE}" not in dockerfile:
+        raise ValueError("Dockerfile must pin the validated CUDA 12.8 runtime base digest")
+    if f"FROM {MINIFORGE_IMAGE} AS miniforge" not in dockerfile or "COPY --from=miniforge /opt/conda /opt/conda" not in dockerfile:
+        raise ValueError("Dockerfile must use the pinned conda-forge Miniforge 26.1.0-0 image")
     if "ENV CONDA_DEFAULT_ENV=conda_env" not in dockerfile or "ENV VLLM_BIN=/opt/conda/envs/conda_env/bin/vllm" not in dockerfile:
         raise ValueError("Dockerfile does not use the fixed conda_env vLLM runtime")
     if "HF_HUB_OFFLINE=1" not in entrypoint or "TRANSFORMERS_OFFLINE=1" not in entrypoint or "EVALUATION_BACKEND=vllm" not in entrypoint:
@@ -510,7 +515,8 @@ def prepare_context(*, output_dir: Path, repo_root: Path = ROOT) -> dict[str, An
                 "sha256": static["previous_gates"]["input_sha256"],
                 "rows": 20,
             },
-            "runtime": {"python": "3.10.22", "torch": "2.9.0+cu128", "vllm": "0.11.1", "transformers": "4.57.6", "cuda": "12.8"},
+            "runtime": {"python": "3.10.22", "torch": "2.9.0+cu128", "vllm": "0.11.1", "transformers": "4.57.6", "cuda": "12.8", "conda": "26.1.0"},
+            "build_images": {"cuda": CUDA_IMAGE, "miniforge": MINIFORGE_IMAGE},
             "base": {
                 "model_id": config["model_id"],
                 "revision": config["model_revision"],

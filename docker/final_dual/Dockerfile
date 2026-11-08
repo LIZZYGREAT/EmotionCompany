@@ -1,9 +1,9 @@
 # Reuse the environment validated by E02.2-C: CUDA 12.8, Python 3.10.22,
 # PyTorch 2.9.0+cu128, Transformers 4.57.6, and vLLM 0.11.1.
-FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
+FROM condaforge/miniforge3:26.1.0-0@sha256:507f4365aba4825eb5541e00d57e515389053bcacaa46a83da4efaefce34874d AS miniforge
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04@sha256:17e2934e1fa96152b14f78078bfbafd0f00f391df995dc6c641a720fce1202bb
 
-ARG MINIFORGE_VERSION=26.1.0-0
-ARG MINIFORGE_SHA256=127b5e14cfe6c83b787f624487cdc2168645ed82fdca1b0c1937caa086aed6d5
+COPY --from=miniforge /opt/conda /opt/conda
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV CONDA_EXE=/opt/conda/bin/conda
@@ -27,13 +27,6 @@ ENV PYTHONUNBUFFERED=1
 RUN apt-get update \
     && apt-get install -y --no-install-recommends bash ca-certificates curl libgomp1 libnuma1 \
     && rm -rf /var/lib/apt/lists/*
-
-RUN curl --fail --location --silent --show-error \
-      "https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_VERSION}/Miniforge3-${MINIFORGE_VERSION}-Linux-x86_64.sh" \
-      --output /tmp/miniforge.sh \
-    && echo "${MINIFORGE_SHA256}  /tmp/miniforge.sh" | sha256sum --check --status \
-    && bash /tmp/miniforge.sh -b -p /opt/conda \
-    && rm -f /tmp/miniforge.sh
 
 COPY docker/e02/conda-linux-64.explicit.txt /tmp/conda-linux-64.explicit.txt
 COPY docker/e02/requirements-linux-64.lock /tmp/requirements-linux-64.lock

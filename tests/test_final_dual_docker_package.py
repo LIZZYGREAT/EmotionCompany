@@ -41,6 +41,14 @@ def test_prepare_context_refuses_paths_outside_ignored_outputs(tmp_path: Path) -
         package.prepare_context(output_dir=tmp_path / "context")
 
 
+def test_dockerfile_pins_validated_build_images() -> None:
+    dockerfile = (package.ROOT / package.DOCKERFILE).read_text(encoding="utf-8")
+
+    assert f"FROM {package.CUDA_IMAGE}" in dockerfile
+    assert f"FROM {package.MINIFORGE_IMAGE} AS miniforge" in dockerfile
+    assert "COPY --from=miniforge /opt/conda /opt/conda" in dockerfile
+
+
 def test_read_jsonl_requires_exact_official_input_keys_and_ids(tmp_path: Path) -> None:
     path = tmp_path / "input.jsonl"
     path.write_text(
