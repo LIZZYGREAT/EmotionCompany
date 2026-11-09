@@ -37,6 +37,7 @@ from src.inference.final_dual_vllm import (  # noqa: E402
 
 OFFICIAL_ID = re.compile(r"^test_[0-9]{6}_t[0-9]+$")
 ROUTE_ORDER = ("profile", "emotion_response")
+PROGRESS_CHECKPOINT_INTERVAL = 10
 RUNTIME_CODE_FILES = (
     Path("participant/start.sh"),
     Path("participant/final_dual_inference.py"),
@@ -69,6 +70,10 @@ def _display_path(path: Path) -> str:
         return path.resolve().relative_to(ROOT).as_posix()
     except ValueError:
         return str(path.resolve())
+
+
+def _relative_result_path(path: Path, result_dir: Path) -> str:
+    return path.resolve().relative_to(result_dir.resolve()).as_posix()
 
 
 def _execution_git_head() -> str | None:
@@ -114,6 +119,92 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
 
 def _jsonl_line(value: dict[str, Any]) -> bytes:
     return (json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def _sha256_state(path: Path) -> Any:
+    digest = hashlib.sha256()
+    if path.is_file():
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest
+
+
+def _sync_checkpoint(
+    *,
+    progress_path: Path,
+    progress: dict[str, Any],
+    completed: int,
+    last_completed_id: str | None,
+    submission_handle: Any,
+    raw_handle: Any,
+    submission_digest: Any,
+    raw_digest: Any,
+) -> dict[str, Any]:
+    for handle in (submission_handle, raw_handle):
+        handle.flush()
+        os.fsync(handle.fileno())
+    updated = {
+        **progress,
+        "status": "running",
+        "completed_samples": completed,
+        "last_completed_id": last_completed_id,
+        "submission_prefix_sha256": submission_digest.hexdigest(),
+        "raw_prefix_sha256": raw_digest.hexdigest(),
+        "updated_at_epoch_seconds": time.time(),
+    }
+    _atomic_json(progress_path, updated)
+    return updated
+
+
+def _new_transaction_dir(result_dir: Path) -> Path:
+    transaction_root = result_dir / ".emotionalcompany_runs"
+    transaction_root.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix="run-", dir=transaction_root))
+
+
+def _find_resumable_transaction_dir(result_dir: Path, requested_run_id: str) -> Path | None:
+    transaction_root = result_dir / ".emotionalcompany_runs"
+    if not transaction_root.is_dir():
+        return None
+    candidates: list[tuple[Path, dict[str, Any]]] = []
+    for progress_path in transaction_root.glob("*/run_progress.json"):
+        try:
+            progress = json.loads(progress_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if progress.get("status") != "running":
+            continue
+        if requested_run_id and progress.get("run_id") != requested_run_id:
+            continue
+        candidates.append((progress_path.parent, progress))
+    if len(candidates) > 1:
+        raise ValueError("multiple interrupted runs exist; set EVALUATION_RUN_ID to select one")
+    if not candidates:
+        return None
+    run_dir, progress = candidates[0]
+    if not requested_run_id and isinstance(progress.get("run_id"), str):
+        os.environ["EVALUATION_RUN_ID"] = progress["run_id"]
+    return run_dir
+
+
+def _publish_official_outputs(run_dir: Path, result_dir: Path) -> None:
+    """Atomically replace only the two official files after a complete successful run."""
+    result_dir.mkdir(parents=True, exist_ok=True)
+    required = ("submission.jsonl", "performance_report.json")
+    missing = [name for name in required if not (run_dir / name).is_file()]
+    if missing:
+        raise FileNotFoundError(f"cannot publish incomplete official output set: {missing}")
+    for name in required:
+        os.replace(run_dir / name, result_dir / name)
+    try:
+        descriptor = os.open(result_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _read_jsonl_prefix(path: Path) -> tuple[list[dict[str, Any]], list[bytes]]:
@@ -271,20 +362,20 @@ def _verify_runtime_code_identity(config: dict[str, Any], lock: dict[str, Any], 
     if runtime_behavior is None:
         return None
     if (
-        runtime_behavior.get("version") != "E03-v1.1-length-recovery"
+        runtime_behavior.get("version") != "E03-v1.2-readme-v2-contract"
         or runtime_behavior.get("max_emotion_response_retries") != 1
         or runtime_behavior.get("retry_only_on_finish_reason") != "length"
     ):
-        raise RuntimeError("v1.1 runtime behavior config must lock exactly one retry on finish_reason=length")
+        raise RuntimeError("v1.2 runtime behavior config must lock exactly one retry on finish_reason=length")
     actual_code_hashes = runtime_code_hashes(root)
     locked_code_identity = lock.get("runtime_code_identity", {})
     if locked_code_identity.get("version") != runtime_behavior["version"]:
-        raise RuntimeError("runtime code identity version differs from the v1.1 behavior config")
+        raise RuntimeError("runtime code identity version differs from the v1.2 behavior config")
     if locked_code_identity.get("file_sha256") != actual_code_hashes:
-        raise RuntimeError("runtime inference code hashes differ from the v1.1 model lock")
+        raise RuntimeError("runtime inference code hashes differ from the v1.2 model lock")
     execution_head = _execution_git_head()
     if locked_code_identity.get("git_head") and execution_head and locked_code_identity["git_head"] != execution_head:
-        raise RuntimeError("runtime Git source identity differs from the v1.1 model lock")
+        raise RuntimeError("runtime Git source identity differs from the v1.2 model lock")
     return {
         "version": runtime_behavior["version"],
         "git_head": locked_code_identity.get("git_head"),
@@ -613,11 +704,23 @@ def main() -> int:
         raise FileNotFoundError(f"model lock not found: {lock_path}")
     samples = read_test_samples(test_file)
     result_dir.mkdir(parents=True, exist_ok=True)
+    official_result_dir = result_dir
     resume_value = os.environ.get("EVALUATION_RESUME", "").strip().lower()
     if resume_value not in {"", "0", "false", "no", "1", "true", "yes"}:
         raise ValueError("EVALUATION_RESUME must be true or false")
     resume_enabled = resume_value in {"1", "true", "yes"}
     tokenizer, asset_identity = _verify_assets(config, config_path, lock_path)
+    transactional_outputs = True
+    if resume_enabled and (result_dir / "run_progress.json").is_file():
+        # Preserve the original explicit local-resume path for runs created before v1.2.
+        transactional_outputs = False
+    elif resume_enabled:
+        existing_run_dir = _find_resumable_transaction_dir(
+            result_dir, os.environ.get("EVALUATION_RUN_ID", "").strip()
+        )
+        result_dir = existing_run_dir or _new_transaction_dir(result_dir)
+    else:
+        result_dir = _new_transaction_dir(result_dir)
     completed, prior_predictions, prior_raw, progress = _resume_identity(
         result_dir=result_dir,
         test_file=test_file,
@@ -655,6 +758,8 @@ def main() -> int:
     cap_hits = {"profile": 0, "emotion_response": 0}
     route_exact_matches = {"profile": [], "emotion_response": []}
     route_attempts = {"profile": 0, "emotion_response": 0}
+    route_response_counts = {"profile": 0, "emotion_response": 0}
+    prepared_prompt_counts = {"profile": 0, "emotion_response": 0}
     route_latencies = {"profile": [], "emotion_response": []}
     initial_cap_hits = {"profile": 0, "emotion_response": 0}
     retry_attempts = {"profile": 0, "emotion_response": 0}
@@ -671,6 +776,9 @@ def main() -> int:
         if index <= 100 and isinstance(row.get("sample_end_to_end_ms"), (int, float))
     ]
     for index, row in enumerate(prior_raw, 1):
+        for route, prompt_key in (("profile", "profile_prompt"), ("emotion_response", "emotion_response_prompt")):
+            if prompt_key not in row or row.get(prompt_key) is not None:
+                prepared_prompt_counts[route] += 1
         failures = row.get("route_failures", {})
         for route in ROUTE_ORDER:
             route_attempts[route] += int(row.get("route_attempts", {}).get(route, 0))
@@ -679,6 +787,8 @@ def main() -> int:
             attempt_records = row.get("generation_attempts", {}).get(route)
             if isinstance(attempt_records, list):
                 for attempt_record in attempt_records:
+                    if attempt_record.get("attempt_status") == "response":
+                        route_response_counts[route] += 1
                     generation_record = attempt_record.get("generation", {})
                     if generation_record.get("generation_seconds") is not None:
                         route_latencies[route].append(float(generation_record["generation_seconds"]))
@@ -707,6 +817,8 @@ def main() -> int:
                 # v1 compatibility: older raw rows had a single generation record per route.
                 route_result = row.get(f"{route}_generation")
                 if isinstance(route_result, dict):
+                    route_response_counts[route] += 1
+                    prepared_prompt_counts[route] += 1
                     if route_result.get("generation_seconds") is not None:
                         route_latencies[route].append(float(route_result["generation_seconds"]))
                     if backend == "vllm":
@@ -724,6 +836,14 @@ def main() -> int:
         sample_diagnostics.append({"id": row["id"], "resumed": True, "route_failures": failures, "diagnostics": diag, "sample_end_to_end_ms": row.get("sample_end_to_end_ms")})
         schema_valid_count += 1
 
+    submission_digest = _sha256_state(submission_path)
+    raw_digest = _sha256_state(raw_path)
+    submission_handle = submission_path.open("ab")
+    try:
+        raw_handle = raw_path.open("ab")
+    except Exception:
+        submission_handle.close()
+        raise
     try:
         if backend == "vllm":
             service = DualLoRAVLLMService(
@@ -781,6 +901,9 @@ def main() -> int:
                         )
                 except Exception as exc:
                     generation_failures[route] = f"prompt:{type(exc).__name__}: {exc}"
+            for route in ROUTE_ORDER:
+                if prepared[route] is not None:
+                    prepared_prompt_counts[route] += 1
 
             for route in ROUTE_ORDER:
                 prompt = prepared[route]
@@ -844,6 +967,7 @@ def main() -> int:
                             "raw_text": text_value,
                             "raw_text_sha256": text_hash,
                         })
+                        route_response_counts[route] += 1
                         if result.get("finish_reason") == "length":
                             cap_hits[route] += 1
                         if result.get("prompt_token_ids_exact_match") is not True:
@@ -921,6 +1045,7 @@ def main() -> int:
                         attempted[route] = result
                         route_latencies[route].append(float(result["generation_seconds"]))
                         generated[route] = result
+                        route_response_counts[route] += 1
                         text_value = result.get("text")
                         generation_attempt_evidence[route].append({
                             "attempt_index": 1,
@@ -947,12 +1072,6 @@ def main() -> int:
                     },
                 }
                 degraded_sample_ids.append(sample["id"])
-            if prepared["profile"] is None:
-                sample_hard_failures.append({
-                    "kind": "asset_or_protocol_mismatch",
-                    "route": "profile",
-                    "error": generation_failures.get("profile", "profile prompt preparation failed"),
-                })
             for route in ROUTE_ORDER:
                 if route in generation_failures:
                     route_failures[route].append({"id": sample["id"], "error": generation_failures[route]})
@@ -1004,28 +1123,40 @@ def main() -> int:
             }
             submission_line = _jsonl_line(submission)
             raw_line = _jsonl_line(raw_row)
-            with submission_path.open("ab") as handle:
-                handle.write(submission_line)
-                handle.flush()
-                os.fsync(handle.fileno())
-            with raw_path.open("ab") as handle:
-                handle.write(raw_line)
-                handle.flush()
-                os.fsync(handle.fileno())
+            submission_handle.write(submission_line)
+            raw_handle.write(raw_line)
+            submission_digest.update(submission_line)
+            raw_digest.update(raw_line)
             prior_predictions.append(submission)
             prior_raw.append(raw_row)
             sample_diagnostics.append({"id": sample["id"], "resumed": False, "route_failures": generation_failures, "diagnostics": diagnostics, "sample_end_to_end_ms": elapsed_ms})
-            _atomic_json(progress_path, {
-                **progress,
-                "status": "running",
-                "completed_samples": index,
-                "last_completed_id": sample["id"],
-                "submission_prefix_sha256": sha256_file(submission_path),
-                "raw_prefix_sha256": sha256_file(raw_path),
-                "updated_at_epoch_seconds": time.time(),
-            })
+            if index % PROGRESS_CHECKPOINT_INTERVAL == 0:
+                _sync_checkpoint(
+                    progress_path=progress_path,
+                    progress=progress,
+                    completed=index,
+                    last_completed_id=sample["id"],
+                    submission_handle=submission_handle,
+                    raw_handle=raw_handle,
+                    submission_digest=submission_digest,
+                    raw_digest=raw_digest,
+                )
             print(f"[{index}/{len(samples)}] {sample['id']}: {elapsed_ms:.3f} ms", flush=True)
+        _sync_checkpoint(
+            progress_path=progress_path,
+            progress=progress,
+            completed=len(prior_predictions),
+            last_completed_id=None if not prior_predictions else str(prior_predictions[-1].get("id")),
+            submission_handle=submission_handle,
+            raw_handle=raw_handle,
+            submission_digest=submission_digest,
+            raw_digest=raw_digest,
+        )
     finally:
+        for handle in (submission_handle, raw_handle):
+            if not handle.closed:
+                handle.flush()
+                handle.close()
         server_alive_before_shutdown = service.is_alive() if service is not None else True
         if backend == "vllm" and not server_alive_before_shutdown and not any(
             failure.get("kind") == "service_exit" for failure in hard_failures
@@ -1054,8 +1185,8 @@ def main() -> int:
     aliases_gate = backend != "vllm" or (
         service_facts is not None
         and {"profile", "emotion-response"}.issubset(set(service_facts.get("registered_model_ids", [])))
-        and route_attempts["profile"] == len(samples)
-        and route_attempts["emotion_response"] == len(samples) + retry_attempts["emotion_response"]
+        and route_attempts["profile"] == prepared_prompt_counts["profile"]
+        and route_attempts["emotion_response"] == prepared_prompt_counts["emotion_response"] + retry_attempts["emotion_response"]
     )
     service_health_gate = server_alive_before_shutdown and not any(
         failure.get("kind") == "service_exit" for failure in hard_failures
@@ -1063,7 +1194,48 @@ def main() -> int:
     identity_gate = not any(
         failure.get("kind") == "asset_or_protocol_mismatch" for failure in hard_failures
     )
-    gate_passed = (
+    systemic_route_failures = {
+        route: {
+            "prepared_prompts": prepared_prompt_counts[route],
+            "successful_responses": route_response_counts[route],
+        }
+        for route in ROUTE_ORDER
+        if route_response_counts[route] == 0
+    }
+    route_failure_total = sum(len(values) for values in route_failures.values())
+    unique_degraded_ids = sorted(set(degraded_sample_ids))
+    inference_failure_reasons = []
+    if len(prior_predictions) != len(samples):
+        inference_failure_reasons.append("output_row_count_mismatch")
+    if not output_rows_match:
+        inference_failure_reasons.append("output_ids_missing_duplicate_or_out_of_order")
+    if schema_valid_count != len(samples):
+        inference_failure_reasons.append("official_schema_validation_incomplete")
+    if not prompt_id_gate:
+        inference_failure_reasons.append("prompt_token_ids_mismatch")
+    if not aliases_gate:
+        inference_failure_reasons.append("model_alias_registration_or_request_count_mismatch")
+    if not service_health_gate:
+        inference_failure_reasons.append("vllm_service_unhealthy")
+    if not identity_gate:
+        inference_failure_reasons.append("asset_or_protocol_identity_mismatch")
+    if systemic_route_failures:
+        inference_failure_reasons.append("all_prepared_requests_failed_for_route")
+    if hard_failures:
+        inference_failure_reasons.append("hard_runtime_failures")
+    inference_success = not inference_failure_reasons
+    diagnostic_quality_gate = (
+        format_success["profile"] >= format_threshold
+        and format_success["emotion_response"] >= format_threshold
+        and route_failure_total == 0
+        and not any(unresolved_cap_hits.values())
+        and not unique_degraded_ids
+        and prompt_id_gate
+        and aliases_gate
+        and service_health_gate
+        and identity_gate
+    )
+    legacy_gate_passed = (
         len(prior_predictions) == len(samples)
         and output_rows_match
         and schema_valid_count == len(samples)
@@ -1074,7 +1246,6 @@ def main() -> int:
         and service_health_gate
         and identity_gate
     )
-    unique_degraded_ids = sorted(set(degraded_sample_ids))
     outcome_counts = {
         name: sum(row.get("emotion_response_outcome") == name for row in prior_raw)
         for name in ("completed_stop", "length_limited_unresolved", "invalid_output", "route_error", "asset_or_protocol_mismatch")
@@ -1092,16 +1263,32 @@ def main() -> int:
         quality_warnings.append(f"unresolved generation length cap events: {sum(unresolved_cap_hits.values())}")
     if unique_degraded_ids:
         quality_warnings.append(f"degraded responses: {len(unique_degraded_ids)}")
-    route_failure_total = sum(len(values) for values in route_failures.values())
     if route_failure_total:
         quality_warnings.append(f"route errors: {route_failure_total}")
+    for route in ROUTE_ORDER:
+        if format_success[route] < format_threshold:
+            quality_warnings.append(
+                f"{route} format diagnostic below threshold: {format_success[route]}/{len(samples)}"
+            )
     if hard_failures:
         quality_warnings.append(f"hard failures: {len(hard_failures)}")
+    if not diagnostic_quality_gate:
+        quality_warnings.append("diagnostic quality gate not met; inference completeness is reported separately")
     server_log = result_dir / "vllm_server.log"
+    final_submission_sha256 = sha256_file(submission_path)
+    final_raw_sha256 = sha256_file(raw_path)
+    if final_submission_sha256 != submission_digest.hexdigest() or final_raw_sha256 != raw_digest.hexdigest():
+        raise OSError("final output SHA-256 differs from the incrementally written checkpoint identity")
+    published_submission_path = official_result_dir / "submission.jsonl"
+    published_report_path = official_result_dir / "performance_report.json"
     report = {
-        "version": "final-dual-official-run-v1.1",
-        "runtime_behavior_version": config.get("runtime_behavior", {}).get("version", "E03-v1.1-length-recovery"),
-        "status": "passed" if gate_passed else "failed",
+        "version": "final-dual-official-run-v1.2",
+        "runtime_behavior_version": config.get("runtime_behavior", {}).get("version", "E03-v1.2-readme-v2-contract"),
+        "status": "passed" if inference_success else "failed",
+        "inference_success": inference_success,
+        "diagnostic_quality_gate": diagnostic_quality_gate,
+        "legacy_combined_gate_passed": legacy_gate_passed,
+        "inference_failure_reasons": inference_failure_reasons,
         "complete": len(prior_predictions) == len(samples),
         "quality_warnings": quality_warnings,
         "hard_failures": hard_failures,
@@ -1127,7 +1314,7 @@ def main() -> int:
             "requested_alias_count": {"profile": route_attempts["profile"], "emotion-response": route_attempts["emotion_response"]},
             "alive_before_intentional_shutdown": server_alive_before_shutdown,
             "intentional_shutdown_returncode": shutdown_returncode,
-            "log_path": str(server_log) if server_log.is_file() else None,
+            "log_path": _relative_result_path(server_log, official_result_dir) if server_log.is_file() else None,
             "log_sha256": sha256_file(server_log) if server_log.is_file() else None,
         },
         "gpu_memory": gpu_memory,
@@ -1177,10 +1364,18 @@ def main() -> int:
         },
         "sample_diagnostics": sample_diagnostics,
         "outputs": {
-            "submission.jsonl": {"path": str(submission_path), "sha256": sha256_file(submission_path), "rows": len(prior_predictions)},
-            "raw_outputs.jsonl": {"path": str(raw_path), "sha256": sha256_file(raw_path), "rows": len(prior_raw)},
-            "performance_report.json": {"path": str(result_dir / "performance_report.json")},
+            "submission.jsonl": {"path": "submission.jsonl", "sha256": final_submission_sha256, "rows": len(prior_predictions)},
+            "raw_outputs.jsonl": {"path": _relative_result_path(raw_path, official_result_dir), "sha256": final_raw_sha256, "rows": len(prior_raw)},
+            "performance_report.json": {"path": "performance_report.json"},
+            "run_progress.json": {"path": _relative_result_path(progress_path, official_result_dir)},
         },
+        "io_checkpointing": {
+            "checkpoint_interval_samples": PROGRESS_CHECKPOINT_INTERVAL,
+            "prefix_hashing": "incremental during run; full-file SHA-256 verified once before final report",
+        },
+        "prepared_prompt_count": prepared_prompt_counts,
+        "successful_generation_response_count": route_response_counts,
+        "systemic_route_failures": systemic_route_failures,
     }
     report_path = result_dir / "performance_report.json"
     _atomic_json(report_path, report)
@@ -1188,13 +1383,19 @@ def main() -> int:
         **progress,
         "status": "complete" if report["complete"] else "failed",
         "completed_samples": len(prior_predictions),
-        "submission_prefix_sha256": sha256_file(submission_path),
-        "raw_prefix_sha256": sha256_file(raw_path),
+        "submission_prefix_sha256": final_submission_sha256,
+        "raw_prefix_sha256": final_raw_sha256,
         "updated_at_epoch_seconds": time.time(),
     })
-    print(f"{'PASS' if gate_passed else 'FAIL'}: {submission_path}", flush=True)
-    print(f"{'PASS' if gate_passed else 'FAIL'}: {report_path}", flush=True)
-    return 0 if gate_passed else 1
+    if inference_success and transactional_outputs:
+        _publish_official_outputs(result_dir, official_result_dir)
+    result_submission = published_submission_path if inference_success and transactional_outputs else submission_path
+    result_report = published_report_path if inference_success and transactional_outputs else report_path
+    print(f"{'PASS' if inference_success else 'FAIL'}: {result_submission}", flush=True)
+    print(f"{'PASS' if inference_success else 'FAIL'}: {result_report}", flush=True)
+    if inference_success and not diagnostic_quality_gate:
+        print("WARNING: inference completed with prediction-quality warnings", flush=True)
+    return 0 if inference_success else 1
 
 
 if __name__ == "__main__":

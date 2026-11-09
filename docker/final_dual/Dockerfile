@@ -62,6 +62,7 @@ COPY src/inference/final_dual_vllm.py /root/src/inference/final_dual_vllm.py
 COPY scripts/e02_vllm_probe.py /root/scripts/e02_vllm_probe.py
 COPY package_manifest.json /root/package_manifest.json
 COPY docker/final_dual/entrypoint.sh /usr/local/bin/emotionalcompany-final-dual-entrypoint
+COPY docker/final_dual/entrypoint_args.sh /usr/local/bin/entrypoint_args.sh
 
 RUN chmod 0755 /usr/local/bin/emotionalcompany-final-dual-entrypoint \
     && test -x /opt/conda/envs/conda_env/bin/vllm \

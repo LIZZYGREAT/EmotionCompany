@@ -192,7 +192,7 @@ def test_v1_1_runtime_code_identity_is_locked_and_mismatch_is_rejected(tmp_path:
     monkeypatch.setattr(final_dual, "_execution_git_head", lambda: "locked-head")
     config = {
         "runtime_behavior": {
-            "version": "E03-v1.1-length-recovery",
+            "version": "E03-v1.2-readme-v2-contract",
             "max_emotion_response_retries": 1,
             "retry_only_on_finish_reason": "length",
         }
@@ -348,8 +348,14 @@ def _run_mocked_official_run(
     *,
     scenario: str,
     sample_count: int,
+    preexisting_results: bool = False,
 ) -> tuple[int, Path, list[tuple[str, list[dict], list[int], int]], Path]:
     result_dir = tmp_path / "result"
+    if preexisting_results:
+        result_dir.mkdir()
+        (result_dir / "submission.jsonl").write_bytes(b"old submission\n")
+        (result_dir / "performance_report.json").write_bytes(b"old report\n")
+        (result_dir / "keep.txt").write_bytes(b"keep these exact bytes\x00\xff")
     prompt_paths = {}
     prompt_configs = {}
     for name in ("selection", "profile", "profile_history_budget", "emotion_response"):
@@ -447,6 +453,8 @@ def _run_mocked_official_run(
             if model_alias == "profile":
                 if scenario == "profile_error":
                     raise RuntimeError("A8 route request failed")
+                if scenario == "three_profile_errors" and sum(call[0] == "profile" for call in calls) <= 3:
+                    raise RuntimeError("intermittent A8 route request failed")
                 if scenario == "service_exit":
                     self.alive = False
                 exact = scenario != "prompt_mismatch"
@@ -463,7 +471,11 @@ def _run_mocked_official_run(
                     "prompt_token_ids_observed_sha256": "profile-prompt-sha" if exact else "wrong-sha",
                 }
             er_calls += 1
-            if scenario in {"resolved", "unresolved"} and er_calls == 1:
+            if scenario == "three_format_errors" and er_calls <= 3:
+                finish = "stop"
+                text = "unrecoverable model text"
+                tokens = 8
+            elif scenario in {"resolved", "unresolved"} and er_calls == 1:
                 finish = "length"
                 text = "emotion=anxiety;response=First valid answer."
                 tokens = 1200
@@ -513,7 +525,8 @@ def test_mocked_twenty_row_run_counts_one_retry_and_keeps_one_row_per_input(tmp_
     )
     report = json.loads((result_dir / "performance_report.json").read_text(encoding="utf-8"))
     submission = [json.loads(line) for line in (result_dir / "submission.jsonl").read_text(encoding="utf-8").splitlines()]
-    raw = [json.loads(line) for line in (result_dir / "raw_outputs.jsonl").read_text(encoding="utf-8").splitlines()]
+    raw_path = result_dir / report["outputs"]["raw_outputs.jsonl"]["path"]
+    raw = [json.loads(line) for line in raw_path.read_text(encoding="utf-8").splitlines()]
 
     assert exit_code == 0
     assert report["complete"] is True and report["status"] == "passed"
@@ -534,6 +547,71 @@ def test_mocked_twenty_row_run_counts_one_retry_and_keeps_one_row_per_input(tmp_
     assert er_calls[0][3] == er_calls[1][3] == 1200
     assert raw[0]["emotion_response_recovery"]["attempts"][0]["finish_reason"] == "length"
     assert raw[0]["emotion_response_recovery"]["attempts"][1]["finish_reason"] == "stop"
+
+
+def test_three_bad_model_formats_do_not_fail_complete_schema_valid_run(tmp_path: Path, monkeypatch) -> None:
+    exit_code, result_dir, _, _ = _run_mocked_official_run(
+        tmp_path, monkeypatch, scenario="three_format_errors", sample_count=20
+    )
+    report = json.loads((result_dir / "performance_report.json").read_text(encoding="utf-8"))
+    submissions = [
+        json.loads(line)
+        for line in (result_dir / "submission.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert exit_code == 0
+    assert report["inference_success"] is True
+    assert report["diagnostic_quality_gate"] is False
+    assert report["format_success_count"]["emotion_response"] == 17
+    assert len(submissions) == 20
+    assert report["submission_schema_validated_count"] == 20
+    assert all(row["response_text"] == "" for row in submissions[:3])
+
+
+def test_three_ordinary_route_errors_do_not_fail_other_completed_rows(tmp_path: Path, monkeypatch) -> None:
+    exit_code, result_dir, _, _ = _run_mocked_official_run(
+        tmp_path, monkeypatch, scenario="three_profile_errors", sample_count=20
+    )
+    report = json.loads((result_dir / "performance_report.json").read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert report["inference_success"] is True
+    assert report["diagnostic_quality_gate"] is False
+    assert report["route_failure_count"]["profile"] == 3
+    assert report["submission_schema_validated_count"] == 20
+
+
+def test_official_outputs_overwrite_only_the_two_contract_files(tmp_path: Path, monkeypatch) -> None:
+    exit_code, result_dir, _, _ = _run_mocked_official_run(
+        tmp_path, monkeypatch, scenario="normal", sample_count=2, preexisting_results=True
+    )
+    report = json.loads((result_dir / "performance_report.json").read_text(encoding="utf-8"))
+    keep_path = result_dir / "keep.txt"
+
+    assert exit_code == 0
+    assert (result_dir / "submission.jsonl").read_bytes() != b"old submission\n"
+    assert (result_dir / "performance_report.json").read_bytes() != b"old report\n"
+    assert keep_path.read_bytes() == b"keep these exact bytes\x00\xff"
+    assert (result_dir / report["outputs"]["raw_outputs.jsonl"]["path"]).is_file()
+    assert (result_dir / report["outputs"]["run_progress.json"]["path"]).is_file()
+
+
+@pytest.mark.parametrize("sample_count", [100, 500, 1000])
+def test_mocked_long_runs_keep_all_rows_and_bound_performance_samples(
+    tmp_path: Path, monkeypatch, sample_count: int
+) -> None:
+    exit_code, result_dir, _, _ = _run_mocked_official_run(
+        tmp_path, monkeypatch, scenario="normal", sample_count=sample_count
+    )
+    report = json.loads((result_dir / "performance_report.json").read_text(encoding="utf-8"))
+    submissions = (result_dir / "submission.jsonl").read_text(encoding="utf-8").splitlines()
+    raw_path = result_dir / report["outputs"]["raw_outputs.jsonl"]["path"]
+    raw_rows = raw_path.read_text(encoding="utf-8").splitlines()
+
+    assert exit_code == 0
+    assert len(submissions) == len(raw_rows) == sample_count
+    assert report["performance"]["measured_samples"] == min(100, sample_count)
+    assert report["io_checkpointing"]["checkpoint_interval_samples"] == 10
 
 
 def test_mocked_unresolved_length_cap_does_not_fail_a_complete_schema_valid_run(tmp_path: Path, monkeypatch) -> None:
@@ -559,7 +637,8 @@ def test_mocked_route_protocol_and_service_failures_are_distinguished(
     exit_code, result_dir, _, _ = _run_mocked_official_run(
         tmp_path, monkeypatch, scenario=scenario, sample_count=1
     )
-    report = json.loads((result_dir / "performance_report.json").read_text(encoding="utf-8"))
+    report_path = next((result_dir / ".emotionalcompany_runs").glob("*/performance_report.json"))
+    report = json.loads(report_path.read_text(encoding="utf-8"))
 
     assert exit_code == 1
     assert report["status"] == "failed"

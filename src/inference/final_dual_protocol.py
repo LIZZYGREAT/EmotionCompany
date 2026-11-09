@@ -194,7 +194,7 @@ def build_emotion_response_prompt(
 def parse_emotion_response_output(
     raw_text: str, official_schema: Mapping[str, Any]
 ) -> dict[str, Any]:
-    """Split at the first `;response=` and retain a valid body independently."""
+    """Parse the frozen ER form, with a conservative text-only fallback."""
     empty = {
         "emotion_label": "",
         "response_text": "",
@@ -204,26 +204,58 @@ def parse_emotion_response_output(
     }
     if not isinstance(raw_text, str):
         return {**empty, "format_error": "invalid_type"}
-    if ";response=" not in raw_text:
-        return {**empty, "format_error": "missing_response_separator"}
-
-    prefix, response_text = raw_text.split(";response=", 1)
-    match = re.fullmatch(r"emotion=([a-z_]+)", prefix)
-    parsed = dict(empty)
-    if match is None:
-        parsed["emotion_error"] = "invalid_emotion_prefix"
-    else:
-        label = match.group(1)
-        allowed = set(_specialist_schema(official_schema).get("$defs", {}).get("emotion", {}).get("enum", []))
-        if label not in allowed:
+    allowed = set(_specialist_schema(official_schema).get("$defs", {}).get("emotion", {}).get("enum", []))
+    if ";response=" in raw_text:
+        prefix, response_text = raw_text.split(";response=", 1)
+        match = re.fullmatch(r"emotion=([a-z_]+)", prefix)
+        parsed = dict(empty)
+        if match is None:
+            parsed["emotion_error"] = "invalid_emotion_prefix"
+        elif match.group(1) not in allowed:
             parsed["emotion_error"] = "invalid_emotion_label"
         else:
-            parsed["emotion_label"] = label
+            parsed["emotion_label"] = match.group(1)
 
-    if response_text.strip():
+        if response_text.strip():
+            parsed["response_text"] = response_text
+        else:
+            parsed["response_error"] = "empty_response"
+        return parsed
+
+    cleaned = re.sub(r"<think>.*?</think>", "", raw_text, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"<think>.*\Z", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"</?think>", "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"(?m)^\s*```[^\n]*\s*$", "", cleaned).strip()
+
+    parsed = dict(empty)
+    emotion_match = re.match(r"^\s*emotion\s*=\s*([a-z_]+)(?=$|[;\s])", cleaned, flags=re.IGNORECASE)
+    if emotion_match is None:
+        parsed["emotion_error"] = "invalid_emotion_prefix"
+    elif emotion_match.group(1) not in allowed:
+        parsed["emotion_error"] = "invalid_emotion_label"
+    else:
+        parsed["emotion_label"] = emotion_match.group(1)
+
+    response_marker = re.search(r"(?:^|[;\n])\s*response\s*=\s*", cleaned, flags=re.IGNORECASE)
+    if response_marker is not None:
+        response_text = cleaned[response_marker.end():].strip()
+    else:
+        response_text = cleaned
+        if emotion_match is not None:
+            response_text = response_text[emotion_match.end():].lstrip(" ;:\t\r\n-—")
+
+    response_text = re.sub(r"\s*</?think>\s*", " ", response_text, flags=re.IGNORECASE).strip()
+    instruction_only = re.match(
+        r"^(?:only\s+output|return\s+(?:valid\s+)?json|output\s+(?:format|json)|"
+        r"respond\s+with|use\s+the\s+following\s+format|format\s*:)",
+        response_text,
+        flags=re.IGNORECASE,
+    )
+    if response_text and not instruction_only:
         parsed["response_text"] = response_text
     else:
-        parsed["response_error"] = "empty_response"
+        parsed["response_error"] = "unrecoverable_response"
+    parsed["format_error"] = "missing_response_separator"
     return parsed
 
 

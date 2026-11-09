@@ -1,13 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-  echo "Usage: docker run IMAGE TEST_FILE RESULT_DIR" >&2
-  exit 2
-fi
-
-TEST_FILE="$1"
-RESULT_DIR="$2"
+source "$(dirname "${BASH_SOURCE[0]}")/entrypoint_args.sh"
+final_dual_parse_entrypoint_args "$@" || exit $?
 if [[ ! -f "$TEST_FILE" || "$TEST_FILE" != *.jsonl ]]; then
   echo "ERROR: TEST_FILE must be an existing .jsonl file: $TEST_FILE" >&2
   exit 1
@@ -20,12 +15,6 @@ mkdir -p -- "$RESULT_DIR" || {
   echo "ERROR: cannot create RESULT_DIR: $RESULT_DIR" >&2
   exit 1
 }
-for artifact in submission.jsonl raw_outputs.jsonl performance_report.json run_progress.json; do
-  if [[ -e "$RESULT_DIR/$artifact" ]]; then
-    echo "ERROR: RESULT_DIR already contains $artifact; use a new run directory" >&2
-    exit 1
-  fi
-done
 write_probe="$(mktemp "$RESULT_DIR/.docker-write-test.XXXXXX")" || {
   echo "ERROR: RESULT_DIR is not writable: $RESULT_DIR" >&2
   exit 1

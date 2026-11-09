@@ -21,7 +21,8 @@ from jsonschema import Draft202012Validator
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-SOURCE_CONFIG = Path("configs/deployment/final_dual.yaml")
+SOURCE_CONFIG = Path("configs/deployment/final_dual_v1_2.json")
+HISTORICAL_SOURCE_CONFIG = Path("configs/deployment/final_dual.yaml")
 DOCKER_CONFIG = Path("configs/deployment/final_dual_docker.json")
 SCHEMA_PATH = Path("participant/templates/submission_schema.json")
 CONDA_LOCK = Path("docker/e02/conda-linux-64.explicit.txt")
@@ -63,6 +64,7 @@ COPY_FILES = (
     PIP_LOCK,
     DOCKERFILE,
     ENTRYPOINT,
+    Path("docker/final_dual/entrypoint_args.sh"),
 )
 COPY_DIRS = (Path("src/shared"),)
 MAX_IMAGE_BYTES = 50_000_000_000
@@ -176,32 +178,43 @@ def _git_head(root: Path) -> str | None:
 
 def verify_previous_gates(config: dict[str, Any], repo_root: Path = ROOT) -> dict[str, Any]:
     source_config = load_json(repo_root / SOURCE_CONFIG)
-    paths = _source_run_paths(source_config, repo_root)
+    current_paths = _source_run_paths(source_config, repo_root)
+    historical_config = load_json(repo_root / HISTORICAL_SOURCE_CONFIG)
+    historical_paths = _source_run_paths(historical_config, repo_root)
     required = (
-        paths["model_lock"], paths["transformers_manifest"], paths["input_manifest"],
-        paths["vllm_manifest"], paths["official_report"], paths["official_submission"],
-        paths["official_raw"], paths["official_code_identity"], paths["smoke_input"],
-        paths["official_root"] / "run_progress.json",
+        current_paths["model_lock"], historical_paths["model_lock"],
+        historical_paths["transformers_manifest"], historical_paths["input_manifest"],
+        historical_paths["vllm_manifest"], historical_paths["official_report"],
+        historical_paths["official_submission"], historical_paths["official_raw"],
+        historical_paths["official_code_identity"], historical_paths["smoke_input"],
+        historical_paths["official_root"] / "run_progress.json",
     )
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
-        raise FileNotFoundError(f"prior gate evidence is incomplete: {missing}")
-    source_config_path = repo_root / SOURCE_CONFIG
-    source_lock = load_json(paths["model_lock"])
-    if source_lock.get("deployment_config", {}).get("path") != SOURCE_CONFIG.as_posix():
-        raise ValueError("source model lock points to a different deployment config")
-    if source_lock.get("deployment_config", {}).get("sha256") != sha256_file(source_config_path):
-        raise ValueError("source deployment config changed since asset preflight")
+        raise FileNotFoundError(f"historical or v1.2 asset gate evidence is incomplete: {missing}")
+    current_config_path = repo_root / SOURCE_CONFIG
+    current_lock = load_json(current_paths["model_lock"])
+    if current_lock.get("deployment_config", {}).get("path") != SOURCE_CONFIG.as_posix():
+        raise ValueError("v1.2 model lock points to a different deployment config")
+    if current_lock.get("deployment_config", {}).get("sha256") != sha256_file(current_config_path):
+        raise ValueError("v1.2 deployment config changed since asset preflight")
 
-    input_manifest = load_json(paths["input_manifest"])
+    historical_config_path = repo_root / HISTORICAL_SOURCE_CONFIG
+    historical_lock = load_json(historical_paths["model_lock"])
+    if historical_lock.get("deployment_config", {}).get("path") != HISTORICAL_SOURCE_CONFIG.as_posix():
+        raise ValueError("historical model lock points to a different deployment config")
+    if historical_lock.get("deployment_config", {}).get("sha256") != sha256_file(historical_config_path):
+        raise ValueError("historical deployment config differs from its asset preflight")
+
+    input_manifest = load_json(historical_paths["input_manifest"])
     frozen_input_sha = input_manifest.get("input", {}).get("sha256")
-    if frozen_input_sha != sha256_file(paths["smoke_input"]):
+    if frozen_input_sha != sha256_file(historical_paths["smoke_input"]):
         raise ValueError("frozen 20-row input hash differs from its manifest")
-    transformers = load_json(paths["transformers_manifest"])
-    vllm = load_json(paths["vllm_manifest"])
-    official = load_json(paths["official_report"])
-    official_progress = load_json(paths["official_root"] / "run_progress.json")
-    code_identity = load_json(paths["official_code_identity"])
+    transformers = load_json(historical_paths["transformers_manifest"])
+    vllm = load_json(historical_paths["vllm_manifest"])
+    official = load_json(historical_paths["official_report"])
+    official_progress = load_json(historical_paths["official_root"] / "run_progress.json")
+    code_identity = load_json(historical_paths["official_code_identity"])
     if transformers.get("status") != "passed" or transformers.get("input_sha256") != frozen_input_sha:
         raise ValueError("Transformers gate is not passed for the Docker Smoke input")
     vllm_stages = {stage.get("name"): stage for stage in vllm.get("stages", [])}
@@ -219,14 +232,14 @@ def verify_previous_gates(config: dict[str, Any], repo_root: Path = ROOT) -> dic
     historical_evidence = {
         "status": "passed",
         "scope": "immutable v1 asset and historical prompt/protocol evidence",
-        "runtime_behavior_is_current_v1_1_evidence": False,
-        "run_id": source_config["run_id"],
+        "runtime_behavior_is_current_v1_2_evidence": False,
+        "run_id": historical_config["run_id"],
         "input_sha256": frozen_input_sha,
-        "model_lock_sha256": sha256_file(paths["model_lock"]),
+        "model_lock_sha256": sha256_file(historical_paths["model_lock"]),
         "transformers_status": transformers.get("status"),
         "vllm_status": vllm.get("status"),
         "historical_official_status": official.get("status"),
-        "source_config_sha256": sha256_file(source_config_path),
+        "source_config_sha256": sha256_file(historical_config_path),
         "source_git_head": code_identity.get("execution_code_commit"),
     }
 
@@ -235,72 +248,74 @@ def verify_previous_gates(config: dict[str, Any], repo_root: Path = ROOT) -> dic
     runtime_validation: dict[str, Any] = {
         "status": "pending",
         "manifest_path": runtime_validation_path.relative_to(repo_root).as_posix(),
-        "reason": "new v1.1 host smoke/stress and pre-build container evidence are required",
+        "reason": "v1.2 host smoke/stress evidence is required before the Docker build",
     }
     if runtime_validation_path.is_file():
         evidence = load_json(runtime_validation_path)
         if evidence.get("status") != "passed":
-            raise ValueError("new v1.1 runtime validation manifest is not passed")
+            raise ValueError("v1.2 runtime validation manifest is not passed")
         if evidence.get("container_runtime_file_sha256") != current_runtime_hashes:
-            raise ValueError("new v1.1 evidence code hashes differ from the current Docker runtime files")
+            raise ValueError("v1.2 evidence code hashes differ from the current Docker runtime files")
         if evidence.get("docker_verifier_sha256") != sha256_file(repo_root / "scripts/final_dual_docker_package.py"):
-            raise ValueError("new v1.1 evidence Docker verifier hash differs from the current verifier")
+            raise ValueError("v1.2 evidence Docker verifier hash differs from the current verifier")
         if evidence.get("docker_config_sha256") != sha256_file(repo_root / DOCKER_CONFIG):
-            raise ValueError("new v1.1 evidence Docker config hash differs from the current package config")
+            raise ValueError("v1.2 evidence Docker config hash differs from the current package config")
         host = evidence.get("host_validation", {})
         smoke_runs = host.get("smoke_runs", [])
         stress_run = host.get("stress_run")
         if host.get("status") != "passed" or len(smoke_runs) != 3 or not isinstance(stress_run, dict):
-            raise ValueError("new v1.1 host evidence must include three 20-row runs and one fixed 100-row run")
+            raise ValueError("v1.2 host evidence must include three 20-row runs and one fixed 100-row run")
         expected = validate_static_config(config, repo_root)
         host_config_path = repo_root / host.get("config_path", "")
         host_lock_path = repo_root / host.get("model_lock_path", "")
         if not host_config_path.is_file() or not host_lock_path.is_file():
-            raise FileNotFoundError("new v1.1 host deployment config or model lock is missing")
+            raise FileNotFoundError("v1.2 host deployment config or model lock is missing")
         if sha256_file(host_config_path) != host.get("config_sha256") or sha256_file(host_lock_path) != host.get("model_lock_sha256"):
-            raise ValueError("new v1.1 host deployment config/model lock identity differs from its evidence manifest")
+            raise ValueError("v1.2 host deployment config/model lock identity differs from its evidence manifest")
         for record, expected_rows in [*((item, 20) for item in smoke_runs), (stress_run, 100)]:
             if record.get("samples") != expected_rows or record.get("status") != "passed":
-                raise ValueError(f"new v1.1 host evidence is not passed for its {expected_rows}-row run")
+                raise ValueError(f"v1.2 host evidence is not passed for its {expected_rows}-row run")
             report_path = repo_root / record.get("report_path", "")
             if not report_path.is_file():
-                raise FileNotFoundError(f"new v1.1 host report is missing: {report_path}")
+                raise FileNotFoundError(f"v1.2 host report is missing: {report_path}")
             report = load_json(report_path)
             if report.get("status") != "passed" or report.get("complete") is not True or report.get("samples") != expected_rows:
-                raise ValueError(f"new v1.1 host report is incomplete or failed: {report_path}")
+                raise ValueError(f"v1.2 host report is incomplete or failed: {report_path}")
             if report.get("configuration", {}).get("sha256") != host.get("config_sha256") or report.get("configuration", {}).get("model_lock_sha256") != host.get("model_lock_sha256"):
-                raise ValueError(f"new v1.1 host report config/lock identity differs: {report_path}")
+                raise ValueError(f"v1.2 host report config/lock identity differs: {report_path}")
             if report.get("runtime_code_identity", {}).get("file_sha256") != _runtime_code_hashes(repo_root):
-                raise ValueError(f"new v1.1 host runtime code hashes differ from the frozen source files: {report_path}")
+                raise ValueError(f"v1.2 host runtime code hashes differ from the frozen source files: {report_path}")
             if report.get("model_weight_identity", {}).get("observed_weight_hash") != expected["base_weight_sha256"]:
-                raise ValueError("new v1.1 host Base identity differs from the immutable asset lock")
+                raise ValueError("v1.2 host Base identity differs from the immutable asset lock")
             for route, identity_key in (("profile", "profile"), ("emotion_response", "emotion_response")):
                 if report.get("adapter_identities", {}).get(identity_key, {}).get("weight_sha256") != expected["adapter_weight_sha256"][route]:
-                    raise ValueError(f"new v1.1 host {route} Adapter identity differs from the immutable asset lock")
+                    raise ValueError(f"v1.2 host {route} Adapter identity differs from the immutable asset lock")
             if any(report.get("route_failure_count", {}).get(route, 0) for route in ("profile", "emotion_response")):
-                raise ValueError(f"new v1.1 host report contains route errors: {report_path}")
+                raise ValueError(f"v1.2 host report contains route errors: {report_path}")
             exact = report.get("prompt_token_ids_exact_match_count", {})
             denominator = report.get("prompt_token_ids_check_denominator", {})
             if any(exact.get(route) != denominator.get(route) for route in ("profile", "emotion_response")):
-                raise ValueError(f"new v1.1 host report contains a Prompt Token ID mismatch: {report_path}")
+                raise ValueError(f"v1.2 host report contains a Prompt Token ID mismatch: {report_path}")
             retry_count = report.get("retry_attempts", {}).get("emotion_response", 0)
             if report.get("server", {}).get("requested_alias_count") != {
                 "profile": expected_rows,
                 "emotion-response": expected_rows + retry_count,
             }:
-                raise ValueError(f"new v1.1 host alias counts differ from samples plus retries: {report_path}")
+                raise ValueError(f"v1.2 host alias counts differ from prepared samples plus retries: {report_path}")
         stress_report = load_json(repo_root / stress_run["report_path"])
         if stress_report.get("unresolved_cap_hits", {}).get("emotion_response", 0) > 2:
-            raise ValueError("new v1.1 fixed 100-row host run exceeds the unresolved-cap threshold")
+            raise ValueError("v1.2 fixed 100-row host run exceeds the unresolved-cap threshold")
         if stress_report.get("emotion_response_severe_anomaly_count", 0) != 0 or stress_report.get("emotion_response_outcome_count", {}).get("invalid_output", 0) != 0:
-            raise ValueError("new v1.1 fixed 100-row host run contains invalid or severely repeated responses")
+            raise ValueError("v1.2 fixed 100-row host run contains invalid or severely repeated responses")
         overlay = evidence.get("old_image_code_overlay", {})
         overlay_runs = overlay.get("runs", [])
-        allowed_overlay_statuses = {"passed", "passed_equivalent_host"}
-        if overlay.get("status") not in allowed_overlay_statuses or len(overlay_runs) < 2:
-            raise ValueError("new v1.1 evidence must include two successful old-image code-overlay runs")
-        if overlay.get("status") == "passed_equivalent_host" and not overlay.get("reason"):
-            raise ValueError("host-equivalent Gate 2 evidence must explain why old-image overlay was unavailable")
+        allowed_overlay_statuses = {"passed", "passed_equivalent_host", "not_available"}
+        if overlay.get("status") not in allowed_overlay_statuses:
+            raise ValueError("v1.2 evidence must record whether prebuild image overlay was available")
+        if overlay.get("status") == "passed" and len(overlay_runs) < 2:
+            raise ValueError("passed old-image code overlay requires two successful runs")
+        if overlay.get("status") in {"passed_equivalent_host", "not_available"} and not overlay.get("reason"):
+            raise ValueError("unavailable old-image overlay must include its reason")
         if any(item.get("container_runtime_file_sha256") != current_runtime_hashes for item in overlay_runs):
             raise ValueError("old-image overlay code hashes differ from the new Docker runtime files")
         if overlay.get("status") == "passed":
@@ -318,19 +333,20 @@ def verify_previous_gates(config: dict[str, Any], repo_root: Path = ROOT) -> dic
             "host_smoke_runs": len(smoke_runs),
             "host_stress_rows": 100,
             "old_image_code_overlay_runs": len(overlay_runs),
+            "old_image_code_overlay_status": overlay.get("status"),
             "container_runtime_file_sha256": current_runtime_hashes,
         }
     return {
-        "status": "passed" if runtime_validation["status"] == "passed" else "pending_new_v1_1_runtime_evidence",
+        "status": "passed" if runtime_validation["status"] == "passed" else "pending_new_v1_2_runtime_evidence",
         "historical_asset_protocol_evidence": historical_evidence,
-        "new_v1_1_runtime_validation": runtime_validation,
+        "new_v1_2_runtime_validation": runtime_validation,
     }
 
 
 def validate_static_config(config: dict[str, Any], repo_root: Path = ROOT) -> dict[str, Any]:
     source = load_json(repo_root / SOURCE_CONFIG)
-    if config.get("version") != "E03-final-dual-docker-v1.1":
-        raise ValueError("Docker config must declare the v1.1 bounded length-recovery behavior")
+    if config.get("version") != "E03-final-dual-docker-v1.2":
+        raise ValueError("Docker config must declare the v1.2 README v2 runtime contract")
     if config.get("mode") != "dual_adapter" or config.get("backend") != "vllm":
         raise ValueError("Docker deployment config must use mode=dual_adapter and backend=vllm")
     if config.get("model_id") != source.get("model_id") or config.get("model_revision") != source.get("model_revision"):
@@ -347,7 +363,7 @@ def validate_static_config(config: dict[str, Any], repo_root: Path = ROOT) -> di
         raise ValueError("Docker generation/context protocol differs from the tested deployment config")
     runtime_behavior = config.get("runtime_behavior", {})
     if runtime_behavior != {
-        "version": "E03-v1.1-length-recovery",
+        "version": "E03-v1.2-readme-v2-contract",
         "max_emotion_response_retries": 1,
         "retry_only_on_finish_reason": "length",
     }:
@@ -529,7 +545,7 @@ def _container_model_lock(
         },
     }
     return {
-        "version": "final-dual-container-model-lock-v1.1",
+        "version": "final-dual-container-model-lock-v1.2",
         "run_id": config["run_id"],
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "deployment_config": {"path": DOCKER_CONFIG.as_posix(), "sha256": config_sha256},
@@ -556,7 +572,7 @@ def prepare_context(*, output_dir: Path, repo_root: Path = ROOT) -> dict[str, An
         raise FileExistsError(f"refusing to overwrite Docker context: {output_dir}")
     static = check_static(repo_root)
     if static.get("status") != "ready_for_asset_packaging":
-        raise RuntimeError("refusing Docker packaging until new v1.1 host and old-image overlay gates pass")
+        raise RuntimeError("refusing Docker packaging until v1.2 host runtime validation passes")
     config = load_json(repo_root / DOCKER_CONFIG)
     source_config = load_json(repo_root / SOURCE_CONFIG)
     paths = _source_run_paths(source_config, repo_root)
@@ -647,8 +663,8 @@ def prepare_context(*, output_dir: Path, repo_root: Path = ROOT) -> dict[str, An
                     raise RuntimeError(f"Docker context includes an unexpected checkpoint file: {path.relative_to(temporary_dir)}")
         code_hashes = _sha_code_files(temporary_dir)
         manifest = {
-            "schema_version": "final_dual_docker_package_v1.1",
-            "runtime_behavior_version": "E03-v1.1-length-recovery",
+            "schema_version": "final_dual_docker_package_v1.2",
+            "runtime_behavior_version": "E03-v1.2-readme-v2-contract",
             "status": "prepared_for_image_build",
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
             "source_commit": _git_head(repo_root),
@@ -732,6 +748,22 @@ def _read_jsonl(path: Path, *, exact_input: bool = False) -> list[dict[str, Any]
     if not rows or len({row["id"] for row in rows}) != len(rows):
         raise ValueError(f"{path}: empty rows or duplicate IDs")
     return rows
+
+
+def _report_output_file(report: dict[str, Any], result_dir: Path, name: str) -> Path:
+    record = report.get("outputs", {}).get(name)
+    value = record.get("path") if isinstance(record, dict) else None
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"performance_report does not name {name}")
+    candidate = Path(value)
+    resolved = (result_dir / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+    try:
+        resolved.relative_to(result_dir.resolve())
+    except ValueError as exc:
+        raise ValueError(f"performance_report {name} path escapes RESULT_DIR") from exc
+    if not resolved.is_file():
+        raise FileNotFoundError(f"Docker result missing {name}: {resolved}")
+    return resolved
 
 
 def _container_log_gate(path: Path | None) -> dict[str, Any]:
@@ -919,10 +951,12 @@ def verify_output(
         raise FileNotFoundError("prepared Docker context model_lock.json is missing")
     report_path = result_dir / "performance_report.json"
     submission_path = result_dir / "submission.jsonl"
-    raw_path = result_dir / "raw_outputs.jsonl"
-    for path in (report_path, submission_path, raw_path):
+    for path in (report_path, submission_path):
         if not path.is_file():
             raise FileNotFoundError(f"Docker result missing required output: {path.name}")
+    report = load_json(report_path)
+    raw_path = _report_output_file(report, result_dir, "raw_outputs.jsonl")
+    progress_path = _report_output_file(report, result_dir, "run_progress.json")
     inputs = _read_jsonl(test_file, exact_input=True)
     predictions = _read_jsonl(submission_path)
     raw_rows = _read_jsonl(raw_path)
@@ -937,26 +971,31 @@ def verify_output(
     if errors:
         raise ValueError(f"submission schema failed for rows {errors[:5]}")
 
-    report = load_json(report_path)
-    progress_path = result_dir / "run_progress.json"
-    if not progress_path.is_file():
-        raise FileNotFoundError("Docker result missing run_progress.json")
     progress = load_json(progress_path)
     if report.get("status") != "passed" or report.get("complete") is not True:
         raise ValueError("performance_report does not show a passed complete run")
-    if package_manifest.get("runtime_behavior_version") == "E03-v1.1-length-recovery" and report.get("version") != "final-dual-official-run-v1.1":
-        raise ValueError("v1.1 Docker package was not run with the v1.1 official inference entrypoint")
-    if package_manifest.get("runtime_behavior_version") == "E03-v1.1-length-recovery":
-        runtime_code_identity = package_manifest.get("runtime_code_identity")
-        if not isinstance(runtime_code_identity, dict) or not runtime_code_identity.get("file_sha256"):
-            raise ValueError("prepared v1.1 package manifest lacks runtime code file hashes")
-        if report.get("runtime_code_identity") != runtime_code_identity:
-            raise ValueError("container runtime code identity differs from the prepared v1.1 package manifest")
+    for name, path, rows in (
+        ("submission.jsonl", submission_path, predictions),
+        ("raw_outputs.jsonl", raw_path, raw_rows),
+    ):
+        record = report.get("outputs", {}).get(name, {})
+        if record.get("sha256") != sha256_file(path) or record.get("rows") != len(rows):
+            raise ValueError(f"performance_report {name} hash/row count differs from the published file")
+    if (package_manifest.get("runtime_behavior_version") != "E03-v1.2-readme-v2-contract"
+            or report.get("version") != "final-dual-official-run-v1.2"):
+        raise ValueError("v1.2 Docker package was not run with the v1.2 official inference entrypoint")
+    runtime_code_identity = package_manifest.get("runtime_code_identity")
+    if not isinstance(runtime_code_identity, dict) or not runtime_code_identity.get("file_sha256"):
+        raise ValueError("prepared v1.2 package manifest lacks runtime code file hashes")
+    if report.get("runtime_code_identity") != runtime_code_identity:
+        raise ValueError("container runtime code identity differs from the prepared v1.2 package manifest")
     if report.get("backend") != "vllm" or report.get("samples") != row_count or report.get("submission_rows") != row_count:
         raise ValueError("performance_report backend/sample count differs from the requested Docker run")
     if report.get("submission_schema_validated_count") != row_count or report.get("submission_schema_validated") is not True:
         raise ValueError(f"performance_report does not certify {row_count} Schema-valid submissions")
-    if progress.get("test_file_sha256") != sha256_file(test_file) or progress.get("sample_count") != row_count:
+    if (progress.get("status") != "complete" or progress.get("completed_samples") != row_count
+            or progress.get("test_file_sha256") != sha256_file(test_file)
+            or progress.get("sample_count") != row_count):
         raise ValueError("performance_report input SHA-256 differs from the Docker run input")
     if row_count == 20 and package_manifest.get("input", {}).get("sha256") != sha256_file(test_file):
         raise ValueError("Docker package manifest input SHA-256 differs from the Docker Smoke input")

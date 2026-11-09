@@ -1,6 +1,6 @@
 {
-  "version": "E03-final-dual-docker-v1.1",
-  "run_id": "E03-DUAL-20261108-03",
+  "version": "E03-final-dual-docker-v1.2",
+  "run_id": "E03-DUAL-20261109-01",
   "mode": "dual_adapter",
   "backend": "vllm",
   "model_id": "Qwen/Qwen3-1.7B",
@@ -28,10 +28,22 @@
     }
   },
   "prompts": {
-    "selection": {"path": "configs/prompts/p0.txt", "sha256": "d427e4996d0075a3adfe03ae25881d093687a6565f5b037f605accecc84c70b2"},
-    "profile": {"path": "configs/prompts/p_a8_v2_profile.txt", "sha256": "0cf6e196b5d4ac4005ea2cc2b454ec058ee24592fb8bb0a1c172ca464dba3cdb"},
-    "profile_history_budget": {"path": "configs/prompts/p_a8_v2_emotion_profile.txt", "sha256": "832aa10ad57626b38d45247fd6715a7aac7b0c7c838e817c6a0206d50a498a94"},
-    "emotion_response": {"path": "configs/prompts/p_e03b.txt", "sha256": "630e842b31defc42968110d35154ab20c007041bd8b75583072bdd51e68a9c35"}
+    "selection": {
+      "path": "configs/prompts/p0.txt",
+      "sha256": "d427e4996d0075a3adfe03ae25881d093687a6565f5b037f605accecc84c70b2"
+    },
+    "profile": {
+      "path": "configs/prompts/p_a8_v2_profile.txt",
+      "sha256": "0cf6e196b5d4ac4005ea2cc2b454ec058ee24592fb8bb0a1c172ca464dba3cdb"
+    },
+    "profile_history_budget": {
+      "path": "configs/prompts/p_a8_v2_emotion_profile.txt",
+      "sha256": "832aa10ad57626b38d45247fd6715a7aac7b0c7c838e817c6a0206d50a498a94"
+    },
+    "emotion_response": {
+      "path": "configs/prompts/p_e03b.txt",
+      "sha256": "630e842b31defc42968110d35154ab20c007041bd8b75583072bdd51e68a9c35"
+    }
   },
   "tokenizer": {
     "model_id": "Qwen/Qwen3-1.7B",
@@ -47,19 +59,36 @@
       "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
     }
   },
-  "context": {"max_prompt_tokens": 1280, "serving_context_limit": 2560},
+  "context": {
+    "max_prompt_tokens": 1280,
+    "serving_context_limit": 2560
+  },
   "runtime_behavior": {
-    "version": "E03-v1.1-length-recovery",
+    "version": "E03-v1.2-readme-v2-contract",
     "max_emotion_response_retries": 1,
     "retry_only_on_finish_reason": "length"
   },
   "generation": {
-    "profile": {"max_new_tokens": 256, "do_sample": false, "temperature": 0.0, "enable_thinking": false},
-    "emotion_response": {"max_new_tokens": 1200, "do_sample": false, "temperature": 0.0, "enable_thinking": false},
+    "profile": {
+      "max_new_tokens": 256,
+      "do_sample": false,
+      "temperature": 0.0,
+      "enable_thinking": false
+    },
+    "emotion_response": {
+      "max_new_tokens": 1200,
+      "do_sample": false,
+      "temperature": 0.0,
+      "enable_thinking": false
+    },
     "eos_token_id": 151645,
     "pad_token_id": 151643
   },
-  "quantization": {"method": "none", "load_in_4bit": false, "compute_dtype": "bfloat16"},
+  "quantization": {
+    "method": "none",
+    "load_in_4bit": false,
+    "compute_dtype": "bfloat16"
+  },
   "deployment": {
     "vllm": {
       "expected_version": "0.11.1",

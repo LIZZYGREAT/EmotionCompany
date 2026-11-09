@@ -115,10 +115,28 @@ def test_invalid_emotion_keeps_independently_parseable_response() -> None:
     assert parsed["response_error"] is None
 
 
-def test_missing_e03b_separator_clears_both_response_fields() -> None:
+def test_missing_e03b_separator_recovers_emotion_and_visible_response() -> None:
     parsed = parse_emotion_response_output("emotion=neutral This is not the frozen format", SCHEMA)
-    assert parsed["emotion_label"] == ""
-    assert parsed["response_text"] == ""
+    assert parsed["emotion_label"] == "neutral"
+    assert parsed["response_text"] == "This is not the frozen format"
+    assert parsed["emotion_error"] is None
+    assert parsed["response_error"] is None
+    assert parsed["format_error"] == "missing_response_separator"
+
+
+@pytest.mark.parametrize(
+    ("raw", "emotion", "response"),
+    [
+        ("emotion=joy\nresponse=I am here with you.", "joy", "I am here with you."),
+        ("<think>internal reasoning</think>\n\u0060\u0060\u0060text\nemotion=neutral\nresponse=Take your time.\n\u0060\u0060\u0060", "neutral", "Take your time."),
+        ("emotion=invalid; response=I can listen.", "", "I can listen."),
+    ],
+)
+def test_missing_e03b_separator_recovers_independent_fields(raw: str, emotion: str, response: str) -> None:
+    parsed = parse_emotion_response_output(raw, SCHEMA)
+
+    assert parsed["emotion_label"] == emotion
+    assert parsed["response_text"] == response
     assert parsed["format_error"] == "missing_response_separator"
 
 

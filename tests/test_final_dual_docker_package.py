@@ -231,9 +231,12 @@ def test_verify_output_accepts_one_retry_and_one_resolved_cap(tmp_path: Path, mo
         for row in input_rows
     ]
     _write_jsonl(result_dir / "submission.jsonl", submissions)
-    _write_jsonl(result_dir / "raw_outputs.jsonl", [{"id": row["id"]} for row in input_rows])
+    run_dir = result_dir / ".emotionalcompany_runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    raw_path = run_dir / "raw_outputs.jsonl"
+    _write_jsonl(raw_path, [{"id": row["id"]} for row in input_rows])
     report = {
-        "version": "final-dual-official-run-v1.1",
+        "version": "final-dual-official-run-v1.2",
         "status": "passed",
         "complete": True,
         "backend": "vllm",
@@ -262,7 +265,7 @@ def test_verify_output_accepts_one_retry_and_one_resolved_cap(tmp_path: Path, mo
         "unresolved_cap_hits": {"profile": 0, "emotion_response": 0},
         "emotion_response_severe_anomaly_count": 0,
         "runtime_code_identity": {
-            "version": "E03-v1.1-length-recovery",
+            "version": "E03-v1.2-readme-v2-contract",
             "git_head": "fake-head",
             "file_sha256": {"participant/final_dual_inference.py": "code-sha"},
         },
@@ -271,14 +274,28 @@ def test_verify_output_accepts_one_retry_and_one_resolved_cap(tmp_path: Path, mo
             "emotion_response": {"weight_sha256": "er-sha", "config_sha256": "er-config"},
         },
         "gpu_memory": {"devices": [{"peak_memory_used_mib": 1200}]},
+        "outputs": {
+            "submission.jsonl": {
+                "path": "submission.jsonl",
+                "sha256": package.sha256_file(result_dir / "submission.jsonl"),
+                "rows": 20,
+            },
+            "raw_outputs.jsonl": {
+                "path": ".emotionalcompany_runs/run-1/raw_outputs.jsonl",
+                "sha256": package.sha256_file(raw_path),
+                "rows": 20,
+            },
+            "run_progress.json": {"path": ".emotionalcompany_runs/run-1/run_progress.json"},
+        },
     }
     report_path = result_dir / "performance_report.json"
     report_path.write_text(json.dumps(report), encoding="utf-8")
-    (result_dir / "run_progress.json").write_text(json.dumps({
+    (run_dir / "run_progress.json").write_text(json.dumps({
+        "status": "complete", "completed_samples": 20,
         "test_file_sha256": package.sha256_file(test_file), "sample_count": 20,
     }), encoding="utf-8")
     manifest = {
-        "runtime_behavior_version": "E03-v1.1-length-recovery",
+        "runtime_behavior_version": "E03-v1.2-readme-v2-contract",
         "runtime_code_identity": report["runtime_code_identity"],
         "input": {"sha256": package.sha256_file(test_file)},
     }
