@@ -1,0 +1,233 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="460.8pt" height="136.8pt" viewBox="0 0 460.8 136.8" xmlns="http://www.w3.org/2000/svg" version="1.1">
+ <title>统一 SFT 监督 Token 组成</title>
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:title>统一 SFT 监督 Token 组成</dc:title>
+    <dc:date>2026-11-10T00:10:30.446409</dc:date>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>Matplotlib v3.10.9, https://matplotlib.org/</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 136.8
+L 460.8 136.8
+L 460.8 0
+L 0 0
+z
+" style="fill: #ffffff"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 27.648 93.024
+L 437.76 93.024
+L 437.76 56.088
+L 27.648 56.088
+z
+" style="fill: #ffffff"/>
+   </g>
+   <g id="matplotlib.axis_1">
+    <g id="xtick_1">
+     <g id="line2d_1">
+      <path d="M 27.648 93.024
+L 27.648 56.088
+" clip-path="url(#p5a33717e25)" style="fill: none; stroke: #cbd3da; stroke-width: 0.5; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_2">
+      <defs>
+       <path id="me4f604d7e9" d="M 0 0
+L 0 3.5
+" style="stroke: #5e6974; stroke-width: 0.8"/>
+      </defs>
+      <g>
+       <use xlink:href="#me4f604d7e9" x="27.648" y="93.024" style="fill: #5e6974; stroke: #5e6974; stroke-width: 0.8"/>
+      </g>
+     </g>
+     <g id="text_1">
+      <text style="font-size: 7.8px; font-family: 'Noto Sans CJK SC'; text-anchor: middle; fill: #5e6974" x="27.648" y="106.232312" transform="rotate(-0 27.648 106.232312)">0%</text>
+     </g>
+    </g>
+    <g id="xtick_2">
+     <g id="line2d_3">
+      <path d="M 108.062118 93.024
+L 108.062118 56.088
+" clip-path="url(#p5a33717e25)" style="fill: none; stroke: #cbd3da; stroke-width: 0.5; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_4">
+      <g>
+       <use xlink:href="#me4f604d7e9" x="108.062118" y="93.024" style="fill: #5e6974; stroke: #5e6974; stroke-width: 0.8"/>
+      </g>
+     </g>
+     <g id="text_2">
+      <text style="font-size: 7.8px; font-family: 'Noto Sans CJK SC'; text-anchor: middle; fill: #5e6974" x="108.062118" y="106.232312" transform="rotate(-0 108.062118 106.232312)">20%</text>
+     </g>
+    </g>
+    <g id="xtick_3">
+     <g id="line2d_5">
+      <path d="M 188.476235 93.024
+L 188.476235 56.088
+" clip-path="url(#p5a33717e25)" style="fill: none; stroke: #cbd3da; stroke-width: 0.5; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_6">
+      <g>
+       <use xlink:href="#me4f604d7e9" x="188.476235" y="93.024" style="fill: #5e6974; stroke: #5e6974; stroke-width: 0.8"/>
+      </g>
+     </g>
+     <g id="text_3">
+      <text style="font-size: 7.8px; font-family: 'Noto Sans CJK SC'; text-anchor: middle; fill: #5e6974" x="188.476235" y="106.232312" transform="rotate(-0 188.476235 106.232312)">40%</text>
+     </g>
+    </g>
+    <g id="xtick_4">
+     <g id="line2d_7">
+      <path d="M 268.890353 93.024
+L 268.890353 56.088
+" clip-path="url(#p5a33717e25)" style="fill: none; stroke: #cbd3da; stroke-width: 0.5; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_8">
+      <g>
+       <use xlink:href="#me4f604d7e9" x="268.890353" y="93.024" style="fill: #5e6974; stroke: #5e6974; stroke-width: 0.8"/>
+      </g>
+     </g>
+     <g id="text_4">
+      <text style="font-size: 7.8px; font-family: 'Noto Sans CJK SC'; text-anchor: middle; fill: #5e6974" x="268.890353" y="106.232312" transform="rotate(-0 268.890353 106.232312)">60%</text>
+     </g>
+    </g>
+    <g id="xtick_5">
+     <g id="line2d_9">
+      <path d="M 349.304471 93.024
+L 349.304471 56.088
+" clip-path="url(#p5a33717e25)" style="fill: none; stroke: #cbd3da; stroke-width: 0.5; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_10">
+      <g>
+       <use xlink:href="#me4f604d7e9" x="349.304471" y="93.024" style="fill: #5e6974; stroke: #5e6974; stroke-width: 0.8"/>
+      </g>
+     </g>
+     <g id="text_5">
+      <text style="font-size: 7.8px; font-family: 'Noto Sans CJK SC'; text-anchor: middle; fill: #5e6974" x="349.304471" y="106.232312" transform="rotate(-0 349.304471 106.232312)">80%</text>
+     </g>
+    </g>
+    <g id="xtick_6">
+     <g id="line2d_11">
+      <path d="M 429.718588 93.024
+L 429.718588 56.088
+" clip-path="url(#p5a33717e25)" style="fill: none; stroke: #cbd3da; stroke-width: 0.5; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_12">
+      <g>
+       <use xlink:href="#me4f604d7e9" x="429.718588" y="93.024" style="fill: #5e6974; stroke: #5e6974; stroke-width: 0.8"/>
+      </g>
+     </g>
+     <g id="text_6">
+      <text style="font-size: 7.8px; font-family: 'Noto Sans CJK SC'; text-anchor: middle; fill: #5e6974" x="429.718588" y="106.232312" transform="rotate(-0 429.718588 106.232312)">100%</text>
+     </g>
+    </g>
+    <g id="text_7">
+     <text style="font-size: 8.1px; font-family: 'Noto Sans CJK SC'; text-anchor: middle; fill: #20272e" x="232.704" y="118.635687" transform="rotate(-0 232.704 118.635687)">明确监督 Token 占比（正式 Train 16,192 条；总数 2,851,614）</text>
+    </g>
+   </g>
+   <g id="matplotlib.axis_2"/>
+   <g id="patch_3">
+    <path d="M 27.648 78.61896
+L 346.337592 78.61896
+L 346.337592 66.06072
+L 27.648 66.06072
+z
+" clip-path="url(#p5a33717e25)" style="fill: #1c3b53; stroke: #ffffff; stroke-width: 0.5; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 346.337592 78.61896
+L 382.091317 78.61896
+L 382.091317 66.06072
+L 346.337592 66.06072
+z
+" clip-path="url(#p5a33717e25)" style="fill: #35708d; stroke: #ffffff; stroke-width: 0.5; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 382.091317 78.61896
+L 386.340801 78.61896
+L 386.340801 66.06072
+L 382.091317 66.06072
+z
+" clip-path="url(#p5a33717e25)" style="fill: #548a86; stroke: #ffffff; stroke-width: 0.5; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_6">
+    <path d="M 386.340801 78.61896
+L 429.718186 78.61896
+L 429.718186 66.06072
+L 386.340801 66.06072
+z
+" clip-path="url(#p5a33717e25)" style="fill: #aab5bc; stroke: #ffffff; stroke-width: 0.5; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_7">
+    <path d="M 27.648 93.024
+L 437.76 93.024
+" style="fill: none; stroke: #cbd3da; stroke-width: 0.7; stroke-linejoin: miter; stroke-linecap: square"/>
+   </g>
+   <g id="legend_1">
+    <g id="patch_8">
+     <path d="M 143.261844 15.625125
+L 150.861844 15.625125
+L 150.861844 10.305125
+L 143.261844 10.305125
+z
+" style="fill: #1c3b53"/>
+    </g>
+    <g id="text_8">
+     <text style="font-size: 7.6px; font-family: 'Noto Sans CJK SC'; text-anchor: start; fill: #20272e" x="154.661844" y="15.625125" transform="rotate(-0 154.661844 15.625125)">回复正文 79.26%</text>
+    </g>
+    <g id="patch_9">
+     <path d="M 143.261844 27.215125
+L 150.861844 27.215125
+L 150.861844 21.895125
+L 143.261844 21.895125
+z
+" style="fill: #35708d"/>
+    </g>
+    <g id="text_9">
+     <text style="font-size: 7.6px; font-family: 'Noto Sans CJK SC'; text-anchor: start; fill: #20272e" x="154.661844" y="27.215125" transform="rotate(-0 154.661844 27.215125)">用户画像 8.89%</text>
+    </g>
+    <g id="patch_10">
+     <path d="M 224.148406 15.625125
+L 231.748406 15.625125
+L 231.748406 10.305125
+L 224.148406 10.305125
+z
+" style="fill: #548a86"/>
+    </g>
+    <g id="text_10">
+     <text style="font-size: 7.6px; font-family: 'Noto Sans CJK SC'; text-anchor: start; fill: #20272e" x="235.548406" y="15.625125" transform="rotate(-0 235.548406 15.625125)">情绪标签 1.06%</text>
+    </g>
+    <g id="patch_11">
+     <path d="M 224.148406 27.215125
+L 231.748406 27.215125
+L 231.748406 21.895125
+L 224.148406 21.895125
+z
+" style="fill: #aab5bc"/>
+    </g>
+    <g id="text_11">
+     <text style="font-size: 7.6px; font-family: 'Noto Sans CJK SC'; text-anchor: start; fill: #20272e" x="235.548406" y="27.215125" transform="rotate(-0 235.548406 27.215125)">其他监督 Token 10.79%</text>
+    </g>
+   </g>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="p5a33717e25">
+   <rect x="27.648" y="56.088" width="410.112" height="36.936"/>
+  </clipPath>
+ </defs>
+</svg>

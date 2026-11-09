@@ -1,0 +1,17 @@
+{
+  "nodes": [
+    {"id":"data","label":"原始数据处理\nTrain 18,657\nDev 1,833","xy":[0.02,0.66],"wh":[0.20,0.22],"kind":"neutral"},
+    {"id":"sft","label":"正式 SFT\nTrain 16,192\nDev 1,821","xy":[0.26,0.66],"wh":[0.20,0.22],"kind":"neutral"},
+    {"id":"baseline","label":"E01-B 多任务基线\nQwen3-1.7B\n4,048 Optimizer steps","xy":[0.50,0.66],"wh":[0.20,0.22],"kind":"primary"},
+    {"id":"diagnosis","label":"A0—A7 监督与\n训练诊断","xy":[0.74,0.66],"wh":[0.20,0.22],"kind":"neutral"},
+    {"id":"specialists","label":"两条独立专项路线\nA8 P4504 · 画像\nE03-B Replay-1152 · 情绪回复","xy":[0.48,0.25],"wh":[0.26,0.25],"kind":"secondary"},
+    {"id":"inference","label":"共享 Qwen3-1.7B Base\n切换双 Adapter","xy":[0.78,0.35],"wh":[0.20,0.22],"kind":"primary"},
+    {"id":"delivery","label":"vLLM + Docker\n本地接口与 Schema 验收","xy":[0.78,0.06],"wh":[0.20,0.17],"kind":"neutral"}
+  ],
+  "edges": [
+    ["data","sft"],["sft","baseline"],["baseline","diagnosis"],
+    ["diagnosis","specialists"],["specialists","inference"],
+    ["inference","delivery"]
+  ],
+  "note":"两条专项路线最终共用同一个 Base，推理时按任务切换 Adapter。"
+}

@@ -1,0 +1,16 @@
+{
+  "messages": [
+    {"role":"用户","text":"这周考试压力很大。","turn":"t1"},
+    {"role":"助手","text":"听起来最近要忙不少。","turn":"history"},
+    {"role":"用户","text":"我今晚想先复习数学。","turn":"t2"},
+    {"role":"助手","text":"Gold 回复：可以先定一个小目标。","turn":"target"}
+  ],
+  "prediction_points": ["t1：仅含第一条用户消息","t2：仅含 t2 及之前已出现历史"],
+  "prompt": ["system 指令","选中的完整历史消息","assistant_prefix"],
+  "completion": ["Gold JSON Completion","EOS"],
+  "prompt_budget": 1280,
+  "sequence_budget": 2048,
+  "prompt_label": -100,
+  "completion_supervised": true,
+  "note":"人工编写的示意对话，不含个人信息；未来消息和 Gold 回复不进入当前预测点 Prompt。"
+}

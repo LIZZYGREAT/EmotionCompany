@@ -1,0 +1,156 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="460.8pt" height="183.6pt" viewBox="0 0 460.8 183.6" xmlns="http://www.w3.org/2000/svg" version="1.1">
+ <title>QLoRA 训练结构与参数更新</title>
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:title>QLoRA 训练结构与参数更新</dc:title>
+    <dc:date>2026-11-10T00:10:30.226679</dc:date>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>Matplotlib v3.10.9, https://matplotlib.org/</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 183.6
+L 460.8 183.6
+L 460.8 0
+L 0 0
+z
+" style="fill: #ffffff"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 16.349184 94.649472
+L 92.215296 94.649472
+Q 98.537472 94.649472 98.537472 92.490336
+L 98.537472 58.869504
+Q 98.537472 56.710368 92.215296 56.710368
+L 16.349184 56.710368
+Q 10.027008 56.710368 10.027008 58.869504
+L 10.027008 92.490336
+Q 10.027008 94.649472 16.349184 94.649472
+z
+" clip-path="url(#pcd7c83f03b)" style="fill: #f1f4f6; stroke: #cbd3da; stroke-width: 0.8; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_3">
+    <path d="M 101.43837 75.67992
+Q 117.500909 75.67992 132.445414 75.67992
+" clip-path="url(#pcd7c83f03b)" style="fill: none; stroke: #5e6974; stroke-linecap: round"/>
+    <path d="M 128.765414 73.83992
+L 132.445414 75.67992
+L 128.765414 77.51992
+z
+" clip-path="url(#pcd7c83f03b)" style="fill: #5e6974; stroke: #5e6974; stroke-linecap: round"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 142.792704 102.360672
+L 308.975616 102.360672
+Q 315.297792 102.360672 315.297792 100.201536
+L 315.297792 46.531584
+Q 315.297792 44.372448 308.975616 44.372448
+L 142.792704 44.372448
+Q 136.470528 44.372448 136.470528 46.531584
+L 136.470528 100.201536
+Q 136.470528 102.360672 142.792704 102.360672
+z
+" clip-path="url(#pcd7c83f03b)" style="fill: #1c3b53; stroke: #1c3b53; stroke-width: 0.8; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 178.919424 137.832192
+L 281.880576 137.832192
+Q 288.202752 137.832192 288.202752 135.673056
+L 288.202752 112.847904
+Q 288.202752 110.688768 281.880576 110.688768
+L 178.919424 110.688768
+Q 172.597248 110.688768 172.597248 112.847904
+L 172.597248 135.673056
+Q 172.597248 137.832192 178.919424 137.832192
+z
+" clip-path="url(#pcd7c83f03b)" style="fill: #e8eff3; stroke: #548a86; stroke-width: 0.8; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_6">
+    <path d="M 230.4 108.380981
+Q 230.4 106.524905 230.4 105.786863
+" clip-path="url(#pcd7c83f03b)" style="fill: none; stroke: #548a86; stroke-linecap: round"/>
+    <path d="M 228.56 109.466863
+L 230.4 105.786863
+L 232.24 109.466863
+z
+" clip-path="url(#pcd7c83f03b)" style="fill: #548a86; stroke: #548a86; stroke-linecap: round"/>
+   </g>
+   <g id="patch_7">
+    <path d="M 318.19869 75.67992
+Q 334.261229 75.67992 349.205734 75.67992
+" clip-path="url(#pcd7c83f03b)" style="fill: none; stroke: #5e6974; stroke-linecap: round"/>
+    <path d="M 345.525734 73.83992
+L 349.205734 75.67992
+L 345.525734 77.51992
+z
+" clip-path="url(#pcd7c83f03b)" style="fill: #5e6974; stroke: #5e6974; stroke-linecap: round"/>
+   </g>
+   <g id="patch_8">
+    <path d="M 359.553024 94.649472
+L 444.450816 94.649472
+Q 450.772992 94.649472 450.772992 92.490336
+L 450.772992 58.869504
+Q 450.772992 56.710368 444.450816 56.710368
+L 359.553024 56.710368
+Q 353.230848 56.710368 353.230848 58.869504
+L 353.230848 92.490336
+Q 353.230848 94.649472 359.553024 94.649472
+z
+" clip-path="url(#pcd7c83f03b)" style="fill: #e8eff3; stroke: #35708d; stroke-width: 0.8; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_9">
+    <path d="M 382.234529 96.001883
+Q 333.030607 125.726586 278.568478 111.196304
+" clip-path="url(#pcd7c83f03b)" style="fill: none; stroke-dasharray: 3.7,1.6; stroke-dashoffset: 0; stroke: #a66b32; stroke-linecap: round"/>
+    <path d="M 281.649794 113.922748
+L 278.568478 111.196304
+L 282.598422 110.367118
+z
+" clip-path="url(#pcd7c83f03b)" style="fill: #a66b32; stroke-dasharray: 3.7,1.6; stroke-dashoffset: 0; stroke: #a66b32; stroke-linecap: round"/>
+   </g>
+   <g id="text_1">
+    <text style="font-size: 8.2px; font-family: 'Noto Sans CJK SC'; fill: #20272e" transform="translate(26.598912 73.148939)">Prompt + Gold</text>
+    <text style="font-size: 8.2px; font-family: 'Noto Sans CJK SC'; fill: #20272e" transform="translate(19.735256 82.859276)">Completion + EOS</text>
+   </g>
+   <g id="text_2">
+    <text style="font-size: 8.5px; font-family: 'Noto Sans CJK SC'; fill: #ffffff" transform="translate(191.368848 60.677388)">Qwen3-1.7B Base</text>
+    <text style="font-size: 8.5px; font-family: 'Noto Sans CJK SC'; fill: #ffffff" transform="translate(173.110449 70.742982)">4-bit NF4 · BF16 compute</text>
+    <text style="font-size: 8.5px; font-family: 'Noto Sans CJK SC'; fill: #ffffff" transform="translate(200.38416 80.808576)">基座权重冻结</text>
+    <text style="font-size: 8.5px; font-family: 'Noto Sans CJK SC'; fill: #ffffff" transform="translate(182.171582 90.874169)">Attention / FFN 投影层</text>
+   </g>
+   <g id="text_3">
+    <text style="font-size: 8.1px; font-family: 'Noto Sans CJK SC'; fill: #1c3b53" transform="translate(213.094477 121.760364)">LoRA A/B</text>
+    <text style="font-size: 8.1px; font-family: 'Noto Sans CJK SC'; fill: #1c3b53" transform="translate(183.346594 131.352283)">r=8 · α=16 · dropout=0</text>
+   </g>
+   <g id="text_4">
+    <text style="font-size: 8.1px; font-family: 'Noto Sans CJK SC'; fill: #1c3b53" transform="translate(368.410967 68.299048)">Completion logits</text>
+    <text style="font-size: 8.1px; font-family: 'Noto Sans CJK SC'; fill: #1c3b53" transform="translate(383.476967 78.060561)">Causal CE</text>
+    <text style="font-size: 8.1px; font-family: 'Noto Sans CJK SC'; fill: #1c3b53" transform="translate(389.23999 87.652479)">含 EOS</text>
+   </g>
+   <g id="text_5">
+    <text style="font-size: 7.1px; font-family: 'Noto Sans CJK SC'; fill: #5e6974" transform="translate(18.15552 148.800069)">仅更新 LoRA A/B；Base 与 LM Head 冻结</text>
+    <text style="font-size: 7.1px; font-family: 'Noto Sans CJK SC'; fill: #5e6974" transform="translate(18.15552 157.583213)">目标模块：q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj</text>
+   </g>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="pcd7c83f03b">
+   <rect x="4.608" y="5.508" width="451.584" height="154.224"/>
+  </clipPath>
+ </defs>
+</svg>

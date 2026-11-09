@@ -1,0 +1,202 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="460.8pt" height="194.4pt" viewBox="0 0 460.8 194.4" xmlns="http://www.w3.org/2000/svg" version="1.1">
+ <title>历史展开与 Completion-only SFT 构造</title>
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:title>历史展开与 Completion-only SFT 构造</dc:title>
+    <dc:date>2026-11-10T00:10:29.964332</dc:date>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>Matplotlib v3.10.9, https://matplotlib.org/</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 194.4
+L 460.8 194.4
+L 460.8 0
+L 0 0
+z
+" style="fill: #ffffff"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 16.349184 71.368128
+L 101.246976 71.368128
+Q 107.569152 71.368128 107.569152 68.809824
+L 107.569152 34.455456
+Q 107.569152 31.897152 101.246976 31.897152
+L 16.349184 31.897152
+Q 10.027008 31.897152 10.027008 34.455456
+L 10.027008 68.809824
+Q 10.027008 71.368128 16.349184 71.368128
+z
+" clip-path="url(#pbff65ed281)" style="fill: #e8eff3; stroke: #35708d; stroke-width: 0.8; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_3">
+    <path d="M 120.213504 71.368128
+L 205.111296 71.368128
+Q 211.433472 71.368128 211.433472 68.809824
+L 211.433472 34.455456
+Q 211.433472 31.897152 205.111296 31.897152
+L 120.213504 31.897152
+Q 113.891328 31.897152 113.891328 34.455456
+L 113.891328 68.809824
+Q 113.891328 71.368128 120.213504 71.368128
+z
+" clip-path="url(#pbff65ed281)" style="fill: #f1f4f6; stroke: #cbd3da; stroke-width: 0.8; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 224.077824 71.368128
+L 308.975616 71.368128
+Q 315.297792 71.368128 315.297792 68.809824
+L 315.297792 34.455456
+Q 315.297792 31.897152 308.975616 31.897152
+L 224.077824 31.897152
+Q 217.755648 31.897152 217.755648 34.455456
+L 217.755648 68.809824
+Q 217.755648 71.368128 224.077824 71.368128
+z
+" clip-path="url(#pbff65ed281)" style="fill: #e8eff3; stroke: #35708d; stroke-width: 0.8; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 327.942144 71.368128
+L 435.419136 71.368128
+Q 441.741312 71.368128 441.741312 68.809824
+L 441.741312 34.455456
+Q 441.741312 31.897152 435.419136 31.897152
+L 327.942144 31.897152
+Q 321.619968 31.897152 321.619968 34.455456
+L 321.619968 68.809824
+Q 321.619968 71.368128 327.942144 71.368128
+z
+" clip-path="url(#pbff65ed281)" style="fill: #f1f4f6; stroke: #cbd3da; stroke-width: 0.8; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_6">
+    <path d="M 264.605947 72.286369
+Q 172.428734 98.65458 77.721803 95.593273
+" clip-path="url(#pbff65ed281)" style="fill: none; stroke: #35708d; stroke-linecap: round"/>
+    <path d="M 81.340437 97.551203
+L 77.721803 95.593273
+L 81.459327 93.873124
+z
+" clip-path="url(#pbff65ed281)" style="fill: #35708d; stroke: #35708d; stroke-linecap: round"/>
+   </g>
+   <g id="patch_7">
+    <path d="M 16.349184 140.807808
+L 132.857856 140.807808
+Q 139.180032 140.807808 139.180032 138.249504
+L 139.180032 98.413056
+Q 139.180032 95.854752 132.857856 95.854752
+L 16.349184 95.854752
+Q 10.027008 95.854752 10.027008 98.413056
+L 10.027008 138.249504
+Q 10.027008 140.807808 16.349184 140.807808
+z
+" clip-path="url(#pbff65ed281)" style="fill: #f1f4f6; stroke: #cbd3da; stroke-width: 0.8; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_8">
+    <path d="M 142.081481 118.33128
+Q 151.370781 118.33128 159.542048 118.33128
+" clip-path="url(#pbff65ed281)" style="fill: none; stroke: #35708d; stroke-linecap: round"/>
+    <path d="M 155.862048 116.49128
+L 159.542048 118.33128
+L 155.862048 120.17128
+z
+" clip-path="url(#pbff65ed281)" style="fill: #35708d; stroke: #35708d; stroke-linecap: round"/>
+   </g>
+   <g id="patch_9">
+    <path d="M 169.887744 140.807808
+L 304.459776 140.807808
+Q 310.781952 140.807808 310.781952 138.249504
+L 310.781952 98.413056
+Q 310.781952 95.854752 304.459776 95.854752
+L 169.887744 95.854752
+Q 163.565568 95.854752 163.565568 98.413056
+L 163.565568 138.249504
+Q 163.565568 140.807808 169.887744 140.807808
+z
+" clip-path="url(#pbff65ed281)" style="fill: #e8eff3; stroke: #35708d; stroke-width: 0.8; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_10">
+    <path d="M 313.68285 118.33128
+Q 320.717447 118.33128 326.634009 118.33128
+" clip-path="url(#pbff65ed281)" style="fill: none; stroke: #35708d; stroke-linecap: round"/>
+    <path d="M 322.954009 116.49128
+L 326.634009 118.33128
+L 322.954009 120.17128
+z
+" clip-path="url(#pbff65ed281)" style="fill: #35708d; stroke: #35708d; stroke-linecap: round"/>
+   </g>
+   <g id="patch_11">
+    <path d="M 336.973824 140.807808
+L 444.450816 140.807808
+Q 450.772992 140.807808 450.772992 138.249504
+L 450.772992 98.413056
+Q 450.772992 95.854752 444.450816 95.854752
+L 336.973824 95.854752
+Q 330.651648 95.854752 330.651648 98.413056
+L 330.651648 138.249504
+Q 330.651648 140.807808 336.973824 140.807808
+z
+" clip-path="url(#pbff65ed281)" style="fill: #e8eff3; stroke: #548a86; stroke-width: 0.8; stroke-linejoin: miter"/>
+   </g>
+   <g id="text_1">
+    <text style="font-size: 8.8px; font-family: 'Noto Sans CJK SC'; text-anchor: start; fill: #1c3b53" x="13.63968" y="20.799955" transform="rotate(-0 13.63968 20.799955)">按预测时刻展开历史，再执行 Completion-only SFT</text>
+   </g>
+   <g id="text_2">
+    <text style="font-size: 7.9px; font-family: 'Noto Sans CJK SC'; fill: #1c3b53" transform="translate(34.48151 49.194256)">t1 用户预测点</text>
+    <text style="font-size: 7.9px; font-family: 'Noto Sans CJK SC'; fill: #1c3b53" transform="translate(23.24808 58.549337)">这周考试压力很大。</text>
+   </g>
+   <g id="text_3">
+    <text style="font-size: 7.9px; font-family: 'Noto Sans CJK SC'; fill: #20272e" transform="translate(146.8624 49.194256)">助手历史</text>
+    <text style="font-size: 7.9px; font-family: 'Noto Sans CJK SC'; fill: #20272e" transform="translate(123.1624 58.549337)">听起来最近要忙不少。</text>
+   </g>
+   <g id="text_4">
+    <text style="font-size: 7.9px; font-family: 'Noto Sans CJK SC'; fill: #1c3b53" transform="translate(246.16015 49.194256)">t2 当前用户</text>
+    <text style="font-size: 7.9px; font-family: 'Noto Sans CJK SC'; fill: #1c3b53" transform="translate(227.02672 58.549337)">我今晚想先复习数学。</text>
+   </g>
+   <g id="text_5">
+    <text style="font-size: 7.9px; font-family: 'Noto Sans CJK SC'; fill: #20272e" transform="translate(356.309296 49.194256)">Gold 回复目标</text>
+    <text style="font-size: 7.9px; font-family: 'Noto Sans CJK SC'; fill: #20272e" transform="translate(342.18064 58.549337)">可以先定一个小目标。</text>
+   </g>
+   <g id="text_6">
+    <text style="font-size: 7.5px; font-family: 'Noto Sans CJK SC'; text-anchor: middle; fill: #a66b32" x="325.23264" y="87.200869" transform="rotate(-0 325.23264 87.200869)">不进入 t2 Prompt</text>
+   </g>
+   <g id="text_7">
+    <text style="font-size: 7.6px; font-family: 'Noto Sans CJK SC'; fill: #20272e" transform="translate(54.166645 111.48558)">T1 历史选择</text>
+    <text style="font-size: 7.6px; font-family: 'Noto Sans CJK SC'; fill: #20272e" transform="translate(27.558926 120.485405)">保留截至 t2 的完整消息后缀</text>
+    <text style="font-size: 7.6px; font-family: 'Noto Sans CJK SC'; fill: #20272e" transform="translate(40.40352 129.48523)">从较早消息开始裁剪</text>
+   </g>
+   <g id="text_8">
+    <text style="font-size: 7.5px; font-family: 'Noto Sans CJK SC'; fill: #1c3b53" transform="translate(223.861846 107.057139)">Prompt</text>
+    <text style="font-size: 7.5px; font-family: 'Noto Sans CJK SC'; fill: #1c3b53" transform="translate(193.28294 115.938546)">system + selected history</text>
+    <text style="font-size: 7.5px; font-family: 'Noto Sans CJK SC'; fill: #1c3b53" transform="translate(206.547393 124.975577)">+ assistant_prefix</text>
+    <text style="font-size: 7.5px; font-family: 'Noto Sans CJK SC'; fill: #1c3b53" transform="translate(186.813604 133.856983)">≤1,280 Token · labels=-100</text>
+   </g>
+   <g id="text_9">
+    <text style="font-size: 7.7px; font-family: 'Noto Sans CJK SC'; fill: #1c3b53" transform="translate(348.942828 115.954627)">Gold Completion + EOS</text>
+    <text style="font-size: 7.7px; font-family: 'Noto Sans CJK SC'; fill: #1c3b53" transform="translate(356.142929 125.072871)">参与 causal CE Loss</text>
+   </g>
+   <g id="text_10">
+    <text style="font-size: 7.5px; font-family: 'Noto Sans CJK SC'; text-anchor: start; fill: #5e6974" x="13.63968" y="168.938351" transform="rotate(-0 13.63968 168.938351)">完整训练序列上限：2,048 Token。示例由人工编写，不含个人信息。</text>
+   </g>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="pbff65ed281">
+   <rect x="4.608" y="7.776" width="451.584" height="182.736"/>
+  </clipPath>
+ </defs>
+</svg>

@@ -1,0 +1,525 @@
+% !TeX program = xelatex
+% !TeX encoding = UTF-8
+% 编译：xelatex -interaction=nonstopmode -halt-on-error main.tex （建议运行两次以刷新目录）
+% 配图：将 figures/ 下对应同名的 PDF、PNG 或 JPG 文件放入，图片占位会自动替换。
+\documentclass[UTF8,a4paper,zihao=-4,oneside]{ctexrep}
+\usepackage[margin=2.60cm,top=2.65cm,bottom=2.55cm,headheight=24pt,headsep=0.62cm]{geometry}
+\usepackage{fontspec}
+\usepackage{amsmath,amssymb,bm,mathtools}
+\usepackage{graphicx}
+\usepackage{booktabs,tabularx,longtable,array,multirow}
+\usepackage{float}
+\usepackage{caption,subcaption}
+\usepackage{xcolor}
+\usepackage{fancyhdr}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{setspace}
+\usepackage{needspace}
+\usepackage{fancyvrb}
+\usepackage{etoolbox}
+\usepackage{lastpage}
+\usepackage{microtype}
+\usepackage{url}
+\usepackage{tikz}
+\usetikzlibrary{calc}
+
+\setCJKmainfont{Noto Serif CJK SC}
+\setCJKsansfont{Noto Sans CJK SC}
+\setmainfont{Liberation Serif}
+\setsansfont{Liberation Sans}
+\setmonofont{DejaVu Sans Mono}
+\definecolor{DeepBlue}{HTML}{1C3B53}
+\definecolor{SubBlue}{HTML}{35708D}
+\definecolor{SoftBlue}{HTML}{F1F4F6}
+\definecolor{NoteGray}{HTML}{F1F4F6}
+\definecolor{LineGray}{HTML}{CBD3DA}
+\definecolor{BodyGray}{HTML}{20272E}
+\definecolor{MutedGray}{HTML}{5E6974}
+\hypersetup{colorlinks=true,linkcolor=DeepBlue,urlcolor=SubBlue,citecolor=DeepBlue,bookmarksnumbered=true}
+\captionsetup{font=small,labelfont={bf,color=DeepBlue},labelsep=quad,skip=5pt}
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0.18em}
+\setstretch{1.28}
+\emergencystretch=2em
+\setlist[itemize]{leftmargin=2.1em,topsep=3pt,itemsep=2pt}
+\setlist[enumerate]{leftmargin=2.1em,topsep=4pt,itemsep=2pt}
+\renewcommand{\arraystretch}{1.26}
+\renewcommand{\tabularxcolumn}[1]{m{#1}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}m{#1}}
+\newcommand{\smallnote}[1]{{\footnotesize\color{MutedGray}#1}}
+\newcommand{\textterm}[1]{\textbf{#1}}
+\newcolumntype{P}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcommand{\projectname}{EmotionCompany}
+\newcommand{\reporttitle}{面向情感陪伴对话的轻量化大语言模型专项微调与双 LoRA 协同推理}
+\newcommand{\reportsubtitle}{数字人情感陪伴对话模型竞赛实验研究报告}
+\newcommand{\reportauthorone}{甘文杰}
+\newcommand{\reportauthortwo}{庄振宇}
+\newcommand{\schoolname}{南开大学}
+\newcommand{\reportdate}{2026年11月}
+\ctexset{
+  chapter={format=\sffamily\bfseries\fontsize{20}{25}\selectfont\color{DeepBlue},name={第,章},number=\chinese{chapter},beforeskip=8pt,afterskip=19pt},
+  section={format=\sffamily\bfseries\fontsize{14.5}{18}\selectfont\color{DeepBlue},beforeskip=17pt,afterskip=9pt},
+  subsection={format=\sffamily\bfseries\fontsize{12.5}{16}\selectfont,beforeskip=13pt,afterskip=6pt},
+  subsubsection={format=\bfseries\fontsize{11.5}{14}\selectfont,beforeskip=9pt,afterskip=5pt}
+}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\color{MutedGray}\projectname\ 竞赛实验研究报告}
+\fancyhead[R]{\small\color{MutedGray}\nouppercase{\leftmark}}
+\fancyfoot[C]{\small\thepage}
+\renewcommand{\headrulewidth}{0.35pt}
+\renewcommand{\headrule}{\hbox to\headwidth{\color{LineGray}\leaders\hrule height \headrulewidth\hfill}}
+\renewcommand{\footrulewidth}{0pt}
+\fancypagestyle{plain}{\fancyhf{}\fancyfoot[C]{\small\thepage}\renewcommand{\headrulewidth}{0pt}}
+
+% 正文插图：PDF 矢量图优先；#3 为图表数据来源说明。
+\newcommand{\figureplaceholder}[5][htbp]{%
+ \begin{figure}[#1]\centering
+  \IfFileExists{figures/#2.pdf}{\includegraphics[width=.94\linewidth,height=#5,keepaspectratio]{figures/#2.pdf}}{%
+   \IfFileExists{figures/#2.png}{\includegraphics[width=.94\linewidth,height=#5,keepaspectratio]{figures/#2.png}}{%
+    \IfFileExists{figures/#2.jpg}{\includegraphics[width=.94\linewidth,height=#5,keepaspectratio]{figures/#2.jpg}}{%
+     \fcolorbox{LineGray}{NoteGray}{\begin{minipage}[c][#5][c]{.88\linewidth}\centering
+      {\bfseries\color{DeepBlue}待插图：#3}\par\vspace{0.45em}
+      {\small\color{BodyGray}#4}\par\vspace{0.5em}
+      {\footnotesize\ttfamily\color{SubBlue}figures/#2.pdf}
+     \end{minipage}}%
+    }%
+   }%
+  }%
+  \caption{#3}\label{fig:#2}
+  {\par\begin{minipage}{.94\linewidth}\centering\footnotesize\color{MutedGray}数据来源：#4\end{minipage}\par}
+ \end{figure}
+}
+\newcommand{\codebox}[1]{\begin{center}\fcolorbox{LineGray}{NoteGray}{\begin{minipage}{.93\linewidth}\ttfamily\small\raggedright #1\end{minipage}}\end{center}}
+
+\begin{document}
+\color{BodyGray}
+\begin{titlepage}
+ \thispagestyle{empty}
+ \centering
+ \vspace*{2.1cm}
+ {\sffamily\LARGE\color{SubBlue}\reportsubtitle\par}
+ \vspace{1.25cm}
+ {\sffamily\fontsize{25}{35}\selectfont\bfseries\color{DeepBlue}\reporttitle\par}
+ \vspace{1cm}
+ \rule{.65\linewidth}{0.7pt}\par
+ \vspace{.75cm}
+ {\large 基于 Qwen3-1.7B 的 QLoRA 训练、任务解耦与本地双 Adapter 部署}\par
+ \vfill
+ {\normalsize\bfseries 作者\par}
+ \vspace{0.45em}
+ \begin{tabular}{c@{\hspace{2.2cm}}c}
+  {\large\bfseries\reportauthorone} & {\large\bfseries\reportauthortwo}\\[0.45em]
+  \schoolname & \schoolname
+ \end{tabular}\par
+ \vspace{0.8cm}
+ {\small 报告时间：\reportdate\par}
+ \vspace{1.65cm}
+\end{titlepage}
+\pagenumbering{Roman}
+\chapter*{摘\quad 要}
+\addcontentsline{toc}{chapter}{摘要}
+情感陪伴对话要求语言模型综合当前语句与会话历史，同时完成情绪判断、用户画像提取和自然语言回复生成。由于三类任务分别具有单标签分类、多标签预测和开放式文本生成的特点，统一的自回归训练目标需要兼顾结构化输出与较长的回复文本。在小参数模型与有限显存环境中，如何安排训练监督、提升画像识别能力并完成低成本部署，是本项目的主要研究与实现问题。
+
+本项目选择 Qwen3-1.7B 作为基础模型，构建了涵盖原始数据审计、对话历史裁剪、Chat Template 编码、Completion-only SFT、评测与模型归档的训练流程，利用 4-bit NF4 量化和低秩适配（LoRA）在 RTX 4060 Laptop 8GB GPU 上完成微调。首先建立统一输出情绪、画像和回复的 E01-B 多任务基线；随后通过监督 Token 分布审计、Loss 加权和输出协议探索等实验，分析画像预测的主要困难。在此基础上，形成两条专项训练路线：A8 使用三维画像专用 Prompt 与短文本 Completion，将训练目标集中于 33 个画像标签；E03-B 使用情绪与回复双字段协议，并通过困难情绪样本 Replay 改善类别覆盖。推理阶段共享同一个 Qwen 基座，按任务切换两套 LoRA Adapter，分别生成画像与情绪回复，再由代码转换并组装为完整 JSON。
+
+实验结果表明，E01-B 相比未微调基座在 1,833 条 Dev 预测点上的情绪准确率由 12.82\% 提升至 65.36\%，画像 Micro-F1 由 7.82\% 提升至 42.23\%。在相同的 2,354 条 Val 预测点上，A8 P4504 的画像 Micro-F1 为 46.78\%，E01-B Train+Dev 为 40.14\%；由于两者采用不同的原生 Prompt 与输出协议，该差异用于描述本地候选结果，不作为单因素因果比较。E03-B Replay-1152 在两组本地评测上的情绪准确率为 73.21\%（固定 209 点）与 74.13\%（新增 201 点），相应比较仍受样本范围和统计不确定性限制。最终双 Adapter 系统完成本地 vLLM 与 Docker 离线验证：固定 100 条输入的输出 Schema 合法率为 100\%，端到端延迟 P50/P95 为 3.245/15.237 秒。上述结果均为项目本地代理指标和工程验收结果，不代表官方测试分数。
+
+\noindent\textbf{关键词：} 情感陪伴对话；Qwen3-1.7B；QLoRA；用户画像；多任务微调；困难样本回放；双 Adapter 推理
+\clearpage
+\tableofcontents
+\clearpage
+\pagenumbering{arabic}
+
+\chapter{研究背景与任务分析}
+\section{研究背景}
+情感陪伴对话与一般开放式问答不同。用户的输入往往包含显性情绪、隐含需求和个人表达习惯。例如，“最近准备考试总是睡不好”既可能反映当下的焦虑，也包含考试学习这一兴趣或生活主题；模型在给出回复时，需要结合这类信息回应用户的当前处境。仅生成语法流畅的文本，难以覆盖比赛要求的全部预测维度。
+
+本项目面向数字人情感陪伴对话赛题，研究在一套轻量化语言模型上实现\textterm{情绪识别、用户画像提取和情感回复生成}的联合能力。研究关注三个相互衔接的问题：如何将多轮会话构造为可训练样本，如何提升结构化画像标签的预测效果，以及如何在受限算力下将不同专项能力整合为统一推理系统。
+
+\section{任务定义与输出协议}
+一个预测点包含标识符及截至当前用户消息的合法会话历史。设历史为
+\begin{equation}
+ H_t=\bigl[(r_1,u_1),\ldots,(r_t,u_t)\bigr],
+\end{equation}
+其中 $r_i$ 表示消息角色，$u_i$ 表示消息文本，$t$ 为当前预测位置。系统需要从 $H_t$ 生成情绪标签 $e_t$、用户画像 $\bm p_t$ 和回复 $a_t$。数据还包含历史消息引用字段，最终系统按提交协议组装相应结构。
+
+情绪识别属于 16 类单标签任务，画像由三个维度组成：性格特征（10 类）、兴趣偏好（12 类）和交流风格（11 类），每个维度都允许多个标签。给定 33 维二值标签向量 $\bm y_t\in\{0,1\}^{33}$，某一维度没有被选中的标签时输出空数组；回复则是长度不固定的中文自然语言文本。
+
+\begin{table}[htbp]\centering\caption{项目涉及的核心预测任务及评价目标}\label{tab:tasks}
+\begin{tabularx}{\linewidth}{p{2.7cm}p{3.1cm}Y}
+\toprule
+任务 & 预测形式 & 核心要求\\\midrule
+情绪识别 & 16 类单标签 & 结合当前用户表达判定主要情绪\\
+用户画像 & 33 个多标签，三维分组 & 判断个性特征、兴趣主题与表达风格\\
+情感回复 & 开放式文本生成 & 内容自然、与上下文及情绪相符\\
+结果组装 & JSON 结构 & 字段、合法标签、ID 与输出格式符合提交协议\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+统一模型的完整预测采用如下结构（示例内容仅用于说明协议）：
+\Needspace{11\baselineskip}
+\begin{Verbatim}[fontsize=\small,frame=single]
+{
+  "id": "test_000123_t0",
+  "emotion_label": "anxiety",
+  "user_profile": {
+    "personality_traits": ["sensitive"],
+    "interests": ["study_exam"],
+    "style": ["direct", "rational"]
+  },
+  "response_text": "复习压力比较大时，可以先整理最紧迫的任务。",
+  "memory_refs": []
+}
+\end{Verbatim}
+
+从任务结构可以看到，情绪与画像需要稳定的离散判别，回复则需要连续的自回归生成。后续训练方案正是围绕这一差异展开。
+
+\section{总体技术路线与模型选择}
+项目使用 Qwen3-1.7B 作为统一基座。训练采用 QLoRA：将基座权重量化后冻结，仅更新插入 Transformer 线性层的低秩参数，使训练能在 RTX 4060 Laptop 8GB 显存上运行。项目通过 Python、PyTorch、Transformers/PEFT 完成模型训练与验证，并使用 vLLM 及 Docker 实现本地推理服务交付。
+
+整个研究按照\textterm{数据处理—统一基线—监督诊断—专项训练—双路集成—系统验收}逐步推进。统一基线用于建立任务能力；监督诊断用于确定画像改进重点；专项模型分别处理画像与情绪回复；双 Adapter 推理再将两路结果组合为最终输出。
+
+完整研发主线与最终集成节点如图\ref{fig:01-overall-pipeline}所示。
+
+\figureplaceholder{01-overall-pipeline}{项目研究总体技术路线}{项目当前状态交接文档；全局实验方案与结果总览。}{6.0cm}
+
+\chapter{数据处理与基础模型训练}
+\section{原始数据审计与清洗}
+\subsection{数据规模与预测点组织}
+官方提供的训练集以\textterm{对话}为基本存储单位，每段对话内部包含多条用户与助手消息，并设置一个或多个需要模型预测的时刻。因此，训练数据行数与最终的监督样本数并不相同。原始 Train 包含 8,338 段对话、117,902 条 Turn、18,657 个预测点；Val 包含 900 段对话、11,732 条 Turn、2,354 个预测点。
+
+\begin{table}[htbp]\centering\caption{原始数据规模与正式模型训练样本}\label{tab:dataset-count}
+\begin{tabular}{lrrrr}
+\toprule
+数据范围 & 对话数 & 原始预测点 & 可用 SFT 点 & 用途\\\midrule
+Train & 8,338 & 18,657 & 16,192 & 参数训练\\
+Dev & --- & 1,833 & 1,821 & 开发评测、最终续训\\
+Val & 900 & 2,354 & --- & 本地最终模型比较\\
+\bottomrule
+\end{tabular}
+\end{table}
+\smallnote{说明：Dev 由规范化训练数据划分得到；表中 Train 对话数为原始划分统计，SFT 行数是经过清洗、预算审计及可训练性筛选后的预测点数。Val 2,354 个预测点在最终比较中全部保留为固定评测分母。}
+
+数据审计重点包括：官方 Schema 完整性、对话时序、重复样本、回复引用与目标 Turn 的位置关系，以及标签分布。原始 Train 发现 202 条重复对话 Turn 候选、508 个重复预测点候选和 4 个回复时序异常预测点。这些记录通过确定性规则处理，并保留样本 ID 与审计结果，便于定位训练数据来源。清洗流程同时保存每一阶段 Manifest、哈希和排除原因，避免不同实验采用难以追溯的数据口径。
+
+\subsection{情绪与画像标签分布}
+训练集的情绪分布具有明显差异。例如，原始 Train 中 \texttt{anxiety} 约占 33.98\%，\texttt{relaxed} 约占 15.11\%，而 \texttt{care}、\texttt{surprise} 和 \texttt{disgust} 等类别占比较低。多标签画像也具有较强的稀疏性：在正式有效的 16,192 条 Train 样本中，三维画像均为空的样本为 6,033 条，占 37.26\%。
+
+这意味着训练时既要学习何时输出标签，也要学习何时保留空画像；模型若过度保守，会产生大量漏报，若一味增加标签，则可能增加误报。后续画像研究中的 Recall、Precision 和 FP/FN 分析均由此展开。
+
+图\ref{fig:02-data-distribution}并列展示原始 Train 情绪 Gold 频次和有效 SFT Train 的画像稀疏性；两侧统计分母不同。
+
+\figureplaceholder{02-data-distribution}{Train 情绪分布与画像稀疏性}{D0.1 数据质量审计；D0.4.3 监督数据构建与 Batch 验收。原始 Train 为 18,657 个预测点，有效 SFT Train 为 16,192 条。}{6.45cm}
+
+\section{多轮历史构造与 Token 预算}
+一次预测必须只使用当前时刻已出现的会话历史。因此，我们将每个预测点展开为独立训练样本，再按照对话中的角色和时间顺序构造模型输入。训练与推理使用一致的 Chat Template，以保持系统指令、历史消息及 Assistant 起始位置的编码方式稳定。
+
+项目采用 P0/F2/T1 三项基础约定：P0 定义系统任务指令和合法输出字段；F2 固定完整 JSON Completion 的序列化形式；T1 按 Token 预算保留最近的完整历史消息后缀。具体地，训练 Prompt 上限设置为 $P=1280$ Token，训练完整序列上限为 $S=2048$ Token。对于长度超限的历史，从较早消息开始移除，保留当前用户消息及时间顺序；超过训练预算的目标序列按既定规则排除。
+
+设系统指令为 $s$、所选历史为 $\widetilde H_t$、编码函数为 $\operatorname{ChatTemplate}$，模型输入 Prompt 为
+\begin{equation}
+ x_t=\operatorname{ChatTemplate}(s,\widetilde H_t,\mathrm{assistant\_prefix}).
+\end{equation}
+训练时再拼接标准答案的 Token 序列 $y_t$，得到完整输入 $[x_t;y_t]$。这一处理保证同一对话不同预测点能够按时间逐步展开，也为后续专项任务的独立 Prompt 提供统一的历史输入来源。
+
+图\ref{fig:03-sft-dataflow}以人工编写的短对话示意预测点的可见范围、T1 历史裁剪以及 Prompt 与 Completion 的监督边界。
+
+\figureplaceholder{03-sft-dataflow}{预测点展开、历史截断与 SFT 样本构造}{D0.4.2 Token 长度审计；D0.4.3 监督数据构建与 Batch 验收；对话内容为人工编写示意。}{6.35cm}
+
+\section{QLoRA 与 Completion-only 监督}
+\subsection{低秩参数训练}
+直接更新 1.7B 基座模型的全部参数会增加显存与优化器存储开销。本项目采用 4-bit NormalFloat（NF4）量化基座、BF16 计算和 LoRA 适配器。对于一个原始线性变换 $W\in\mathbb R^{d_{\mathrm{out}}\times d_{\mathrm{in}}}$，LoRA 通过低秩矩阵 $A$ 与 $B$ 引入可学习增量：
+\begin{equation}
+ h=Wx+\frac{\alpha}{r}BAx,
+ \qquad A\in\mathbb R^{r\times d_{\mathrm{in}}},\quad
+ B\in\mathbb R^{d_{\mathrm{out}}\times r}.
+\end{equation}
+其中 $W$ 被量化并保持冻结，训练只更新 $A$、$B$。在正式训练中使用 $r=8$、$\alpha=16$、dropout 为 0，并将 LoRA 应用于注意力投影矩阵（\texttt{q\_proj}、\texttt{k\_proj}、\texttt{v\_proj}、\texttt{o\_proj}）以及前馈网络的 \texttt{gate\_proj}、\texttt{up\_proj}、\texttt{down\_proj}，不设置独立分类头；结构见图\ref{fig:04-qlora-training}。
+
+\figureplaceholder{04-qlora-training}{QLoRA 训练结构与参数更新示意}{E0.1-B 正式 SFT 与 Dev 对照验收报告；NF4、BF16、LoRA r=8、alpha=16、7 个目标模块。}{6.0cm}
+
+\subsection{生成目标与 Loss Mask}
+项目采用自回归监督微调。给定 Prompt $x$ 与目标 Completion $y=(y_1,\dots,y_T)$，使用 Teacher Forcing，训练目标为
+\begin{equation}\label{eq:sft}
+ \mathcal L_{\mathrm{SFT}}(\theta)
+ =-\frac1T\sum_{i=1}^{T}\log P_{\theta}(y_i\mid x,y_{<i}).
+\end{equation}
+为使模型将学习重点放在目标输出上，Prompt 对应的监督标签设为 \texttt{-100}，不直接参与交叉熵计算；Completion Token（含 EOS）参与 Loss。虽然 Prompt 自身不计算 Loss，它仍通过 Attention 为后续目标 Token 提供条件信息。实际实现使用 microbatch 1、梯度累积 4，累积四次反向传播后更新一次 LoRA 参数。
+
+\subsection{训练与预测的区别}
+训练阶段，标准答案 Token 作为后续位置的真实上下文，模型一次前向即可得到 Completion 各位置的预测 Loss。推理阶段没有标准答案，模型依据当前已生成的 Token 自回归预测，直到 EOS 或生成长度上限。因此，每个实验不仅记录训练 Loss，也在固定预测点上执行真正的生成式评价，以检验输出是否满足合法标签和格式要求。
+
+\section{指标与实验管理}
+画像采用 33 个标签的微平均 Precision、Recall 和 F1：
+\begin{equation}
+ P_{\mathrm{micro}}=\frac{TP}{TP+FP},\qquad
+ R_{\mathrm{micro}}=\frac{TP}{TP+FN},\qquad
+ F_{1,\mathrm{micro}}=\frac{2TP}{2TP+FP+FN}.
+\end{equation}
+其中 $TP$ 为正确输出的正标签数，$FP$ 为多输出的错误标签数，$FN$ 为漏掉的 Gold 标签数。Macro-F1 则先求每个标签的 F1，再对 33 类等权平均。情绪使用 Accuracy 和 Macro-F1；回复使用项目实现的字符级 BLEU-4 与 ROUGE-L。评测同时检查格式合法率、EOS 完成率、生成长度和延迟。
+
+各实验使用固定数据快照、配置、种子和 Checkpoint 记录。模型训练、开发评测、最终 Val 对比与部署验收分别保存对应的输入 ID、权重、生成配置和结果摘要，以便解释后续选择的依据。
+
+\chapter{多任务基线与模型优化探索}
+\section{统一多任务基线 E01-B}
+在项目初期，我们以同一套 Qwen3-1.7B + LoRA 参数同时学习情绪、画像及回复。一次生成完成所有字段，最后解析为符合比赛要求的 JSON。该设计能够较快建立完整端到端链路，也便于观察三个任务在共享监督下的基础能力。
+
+正式 E01-B 使用 16,192 条有效 SFT Train，训练 4,048 个 Optimizer Steps，学习率 $10^{-4}$，AdamW 优化器与 constant scheduler。随后在固定 1,833 个 Dev 预测点上，将未微调 Base 与微调后的 Adapter 进行相同协议的对比。
+
+\begin{table}[htbp]\centering\caption{E01-B Full 在相同 Dev 1,833 点上的基线提升}\label{tab:e01-base}
+\begin{tabularx}{\linewidth}{Yrrr}
+\toprule
+指标 & Base & E01-B Full & 变化\\\midrule
+情绪 Accuracy & 12.82\% & \textbf{65.36\%} & +52.54 pp\\
+情绪 Macro-F1 & 0.0690 & \textbf{0.4972} & +0.4282\\
+画像 Micro-F1 & 0.0782 & \textbf{0.4223} & +0.3441\\
+画像 Macro-F1 & 0.0724 & \textbf{0.2700} & +0.1976\\
+字符级 BLEU-4 & 2.3993 & \textbf{12.8212} & +10.4219\\
+ROUGE-L & 0.1188 & \textbf{0.2603} & +0.1415\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+这组结果表明，统一 SFT 能够有效学习领域输出协议，提升情绪判断、画像标签和回复文本的综合质量。与此同时，画像 Micro-F1 仍处于 0.42 左右，成为后续重点改进方向。
+
+\section{监督结构与画像预测诊断}
+\subsection{不同任务的监督 Token 构成}
+完整 JSON Completion 同时包含较长的回复正文与较短的分类标签。为了解不同任务在训练目标中的相对规模，我们对 16,192 条正式 Train 的监督 Token 做了字段归属统计。回复正文占约 79.26\%，画像对象占约 8.89\%，情绪标签值占约 1.06\%，其余属于公共结构、EOS 与字段边界。
+
+各字段实际监督 Token 份额见图\ref{fig:05-supervision-share}。公共 JSON 结构、边界混合和 EOS 合并为“其他监督 Token”，避免把 Token 份额误读为各字段的 Loss 贡献。
+
+\figureplaceholder{05-supervision-share}{统一 SFT 监督 Token 的字段组成}{E0.3-A0 监督结构诊断报告；16,192 条正式 Train，共 2,851,614 个明确监督 Token。}{4.45cm}
+
+该统计说明，不同输出字段在整体监督序列中占据的 Token 数量差异明显。随后，在固定 128 条 Train 样本上进一步计算 Teacher-forced CE，观察到回复正文的 CE 总和在该子样本中同样占较高比例。结合 33 标签分布及空画像现象，我们确定了两个值得继续尝试的方向：一是调整结构化字段的训练关注度，二是使分类目标与长回复目标分别学习。
+
+\subsection{画像输出的误报与漏报}
+画像属于多标签任务，评分同时受到误报与漏报影响。分析 E01-B 在不同历史长度下的结果发现，部分用户画像虽然在 Gold 中存在，模型却输出空维度；另一方面，直接放宽标签输出又可能产生额外 FP。因此，我们在探索阶段同时记录 TP、FP、FN、Precision 和 Recall，而不单独追求更高的非空预测比例。
+
+在概率探针、短历史分层与低学习率续训等探索中，模型对于某些标签能够产生更多预测，但误报数量也会随之变化。上述观察促使后续方案采用更明确的任务目标，而不将增加标签输出量作为唯一优化手段。
+
+\section{优化方向与代表性探索}
+\begin{table}[htbp]\centering\caption{主要优化探索及其对最终方案的作用}\label{tab:explorations}
+\small
+\begin{tabularx}{\linewidth}{P{2.55cm}P{4.0cm}Y}
+\toprule
+方向 & 实验思路 & 形成的经验\\\midrule
+字段损失加权（A1） & 增强画像字段或标签值的 Token CE 权重 & 加强局部监督能够改变预测倾向，同时需观察总体 F1 与误报\\
+概率与错误诊断（A2--A4） & 冻结模型标签概率、短历史分层、低 LR 续训 & 更明确地观察漏报、误报与标签边界问题\\
+辅助分类监督（A5、A7） & 33 标签 BCE 与独立分类头设计 & 拓展了专项学习思路与分类评估工具\\
+文本协议简化（A6） & 将 JSON 转为固定的字段文本 & 为后续短 Completion 和确定性解析提供实现基础\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+A1 在 1,833 条 Dev 上的画像 Micro-F1 为 0.3839，低于统一 SFT 的 0.4223；短程续训虽提高 Recall，也增加 FP，后续因此转向\textterm{任务分工与 Completion 监督范围调整}。
+
+\chapter{任务专项微调方法}
+\section{面向画像的生成式专项模型 A8}
+\subsection{独立 Prompt 与短 Completion}
+A8 专项模型仍使用 Qwen3-1.7B 自回归生成机制，保留通用 Base 与 LoRA，但独立设计画像任务指令，并只监督三个画像维度：
+\begin{Verbatim}[fontsize=\small,frame=single]
+Personality=sensitive
+Interests=study_exam|reading_writing
+Style=direct|rational
+\end{Verbatim}
+多标签使用竖线 \texttt{|} 连接，空维度输出 \texttt{-}。模型只生成三行，随后由确定性解析器转换为官方 Schema 的三个数组。与完整多任务输出相比，专项 Completion 不包含情绪标签、长回复正文及记忆字段，使本轮 SFT 的监督位置全部集中在画像输出及其字段结构上。
+
+\subsection{训练样本调度与逐步扩展}
+训练使用相同的 16,192 条有效 Train，采用从 Base 新建 LoRA 的方式。在优化后的 A8-V2 训练中，首批 2,048 条样本安排为 1,536 条画像非空样本与 512 条全空样本，通过初期更充分的正标签曝光帮助模型学习非空画像的生成。其余样本以不重复、不遗漏的顺序完成整个 Train。样本选择还关注三维标签覆盖、会话多样性与历史长度。
+
+训练采用 512、1,024、2,048 和 4,048 个累计优化步的阶段式推进，每个阶段保存 Checkpoint，使用固定 Pilot160 与 Dev224 观察生成结果。模型从起初主要输出空画像，逐步学会输出具有实际命中效果的标签；完整 Train 训练结束后，再使用 1,821 条有效 Dev 继续训练 456 步，得到 P4504。
+
+\begin{table}[htbp]\centering\caption{A8 画像模型在固定 Dev224 上的分阶段变化}\label{tab:a8-trend}
+\begin{tabular}{lrrrr}
+\toprule
+阶段 & 训练样本累计 & TP & FP & Micro-F1\\\midrule
+P512 & 2,048 & 6 & 23 & 0.0299\\
+P1024 & 4,096 & 36 & 48 & 0.1576\\
+P2048 & 8,192 & 105 & 61 & 0.3896\\
+P4048 & 16,192 & 137 & 112 & \textbf{0.4405}\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Pilot160 和 Dev224 是两个独立固定评测集合，图\ref{fig:06-a8-learning-curve}分别连接各自四个实际观测节点，不将两组结果拼成同一曲线。
+
+\figureplaceholder{06-a8-learning-curve}{A8 画像专项训练的分阶段 Micro-F1 变化}{E0.3-A8 V2 分阶段训练观察报告；固定 Pilot160 与 Dev224，累计 Optimizer Step 为 512、1,024、2,048、4,048。}{5.9cm}
+
+\subsection{Selective Completion Logits 加速}
+在生成式 SFT 中，完整 Prompt 需要参与 Transformer 前向计算以形成上下文表示，但 Prompt 位置不参与 Completion Loss。标准 Causal LM 前向会对更多序列位置计算整个词表的 logits。针对这一特点，我们实现了 Selective Completion Logits：先计算 Transformer 的隐藏状态，再提取负责预测 Completion Token 的位置，仅在这些位置通过 LM Head 计算交叉熵。
+
+设完整序列长度为 $L$、Prompt 长度为 $p$，隐藏状态为 $h_0,\dots,h_{L-1}$，则参与目标预测的隐藏状态是
+\begin{equation}
+ \bigl(h_{p-1},h_p,\ldots,h_{L-2}\bigr),
+\end{equation}
+它们对应的目标 Token 是位置 $p$ 到 $L-1$ 的 Completion（包括 EOS）。这一优化保持 Token 的因果预测关系，减少了无需监督位置的词表映射计算。项目在同样输入和模型条件下比对了新旧 Loss 与 LoRA 梯度，并完成一致性检查。
+
+在 RTX 4060 Laptop 上，A8 P 的配对性能测试由每步 5.396 秒降低到 4.041 秒（约 $1.34\times$ 加速），峰值分配显存由 4.635 GB 降到 2.852 GB。优化后完整 4,048 步的总训练耗时约 16,877 秒。该优化使专项生成式训练能够在较小显存下持续运行。
+
+\section{面向情绪与回复的 E03-B 专项模型}
+\subsection{双字段输出协议}
+情绪与回复之间存在直接的语义联系：情绪判断用于识别用户当前表达的状态，回复生成则需要围绕该状态产生恰当内容。因此我们将这两个任务放在同一个专项 Adapter 中训练，并使用紧凑的输出协议：
+\begin{Verbatim}[fontsize=\small,frame=single]
+emotion=anxiety;response=最近准备考试压力不小，可以先安排好今天的复习重点。
+\end{Verbatim}
+该协议保留单标签情绪和自由文本回复，不再监督画像数组。模型保持 Qwen3-1.7B + QLoRA 的训练方式，使用原有的对话历史处理规则，训练答案由情绪标签与回复正文构成。推理阶段解析第一个 \texttt{;response=} 分隔位置，得到情绪和原始回复正文。
+
+\subsection{训练档位与质量变化}
+E03-B 使用分阶段 Checkpoint 观察模型收敛过程。在固定 209 个预测点上，Step 512 时情绪准确率为 59.81\%，到 Step 2,048 提升至 71.77\%，到 Step 4,665 达到 72.25\%。与此同时，文本生成长度逐步趋于稳定，BLEU-4 与 ROUGE-L 等本地指标也得到改善。
+
+\begin{table}[htbp]\centering\caption{E03-B 在固定 209 点上的阶段表现}\label{tab:e03b-training}
+\begin{tabular}{lrrrr}
+\toprule
+模型档位 & 情绪 Accuracy & BLEU-4 & ROUGE-L & 回复长度比\\\midrule
+Step 512 & 0.5981 & 0.0827 & 0.2812 & 1.3720\\
+Step 2048 & 0.7177 & 0.1206 & 0.2939 & 1.0556\\
+Step 4665 & 0.7225 & \textbf{0.1270} & \textbf{0.3018} & 1.0262\\
+Replay 1152 & \textbf{0.7321} & 0.1192 & 0.2981 & 1.0930\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{困难情绪样本 Replay}
+在 Step 4665 的错误分析中，\texttt{mixed}、\texttt{sadness}、\texttt{care} 等类别存在明显的漏判。为了加强模型对这些类别的学习，我们从原训练数据中构建困难样本回放集合，提高目标类别的训练曝光频率，同时保留普通类别样本维持整体分布。训练保持原 Adapter 起点、Prompt、学习率及 LoRA 配置，仅改变样本构成。
+
+固定 209 点上的类别命中数见图\ref{fig:07-emotion-replay}；柱顶同时给出该类 Gold 数。anxiety 单独标注，不纳入困难类柱图。
+
+\figureplaceholder[H]{07-emotion-replay}{E03-B Replay 前后困难情绪类别的正确识别数量}{E03-B replay 难例回放实验报告；Step 4665 与 Replay-1152 的固定 Val 209 点类别命中统计。}{7.4cm}
+
+回放集合中，\texttt{care} 和 \texttt{disgust} 样本重复四次，\texttt{mixed} 与 \texttt{sadness} 重复两次，另保留 4,000 条普通样本。总计 6,234 个唯一训练点、8,876 次样本曝光。训练后比较多个 Replay Checkpoint，根据格式合法率、情绪指标和文本指标选择 Replay-1152 作为最终情绪回复 Adapter。
+
+\section{专项方案的模型归档与选择}
+最终选择 A8 P4504 作为画像 Adapter，选择 E03-B Replay-1152 作为情绪回复 Adapter。两者均在同一 Qwen3-1.7B Base 上训练，各自保留 Prompt 与生成协议。训练配置、Adapter 权重、Checkpoint 和评测结果按阶段归档，便于回溯训练节点。推理阶段共享一份基础模型，加载两个可切换的增量 Adapter。
+
+\chapter{双 Adapter 协同推理系统}
+\section{共享基座与串行推理架构}
+最终系统以一份 Qwen3-1.7B Base 为主干，加载两个 LoRA Adapter。对于每个待预测对话，首先构造 A8 画像专用 Prompt，激活画像 Adapter 并生成三维标签；随后激活 E03-B 情绪回复 Adapter，使用其原生 Prompt 生成情绪及回复。两路预测在同一 GPU 上串行完成，最后将独立结果组合为统一 JSON。
+
+执行顺序与同一 Base 的复用关系如图\ref{fig:08-dual-adapter-architecture}所示：两种任务分别构造 Prompt，并按序切换 Adapter。
+
+\figureplaceholder{08-dual-adapter-architecture}{最终共享 Base 双 Adapter 串行推理架构}{E03 双 Adapter 最终集成与 Docker 验收；participant/README.md。运行输出为 submission.jsonl 与 performance\_report.json。}{6.7cm}
+
+两个 Adapter 在启动时加载完成，推理过程中仅切换激活状态，不需要对每个样本重复读取权重。共享 Base 可以避免同时驻留两个完整模型实例，更符合 8GB 显存条件。项目同时保留每个模型各自的 Prompt 处理逻辑，保证预测输入与相应的训练过程相匹配。
+
+\section{结果解析与 JSON 组装}
+两路原生生成协议不同。A8 输出三行画像字段，多个标签用 \texttt{|} 分隔；E03-B 输出 \texttt{emotion=...;response=...}。组装模块首先校验标签是否属于合法枚举，然后将 A8 的三行文本转换为三维数组、将 E03-B 的输出解析为情绪和回复，最后填充统一 JSON 结构。
+
+\begin{equation}
+ \mathrm{Output}(H_t)=\operatorname{Assemble}\bigl(
+ \operatorname{Parse}_{P}(f_{\theta_P}(H_t)),\,
+ \operatorname{Parse}_{ER}(f_{\theta_{ER}}(H_t))\bigr).
+\end{equation}
+其中 $f_{\theta_P}$ 与 $f_{\theta_{ER}}$ 共用 Base，但分别激活独立 LoRA。解析模块还负责字段缺失、非法标签和长度上限等情况的确定性处理，使最终输出始终保持可检查的数据结构。记忆引用字段按最终提交协议填充空数组。
+
+\section{vLLM 服务与 Docker 离线部署}
+工程部署采用 vLLM 0.11.1 的多 LoRA 能力，将两个 Adapter 注册为不同别名；对每条样本顺序发送两路生成请求，收集结果并组装 JSON。系统保留固定的官方调用入口 \texttt{start.sh}（两个参数：输入文件与输出目录），接收输入文件与输出目录，生成 \texttt{submission.jsonl} 和 \texttt{performance\_report.json}。
+
+在运行工程上，我们完成了显存预算、离线模型打包、容器内入口适配、推理异常处理、模型权重身份核验与镜像回导测试。最终镜像同时包含 Base、两个 Adapter、Tokenizer、Prompt、推理代码和必要的运行环境，便于脱离训练环境进行评测。
+
+\chapter{实验结果与性能分析}
+\section{画像专项训练的总体效果}
+为比较最终画像候选，我们将统一多任务 E01-B 与专项 A8 都训练至 Train+Dev，并在同一组 2,354 个 Val 预测点上评价 33 标签画像。E01-B 采用完整 JSON 生成目标，A8 则使用三行画像专项输出。两者使用相同 Val ID 与指标定义，但原生 Prompt 和输出协议不同，因此结果用于候选比较，不构成单因素消融。
+
+\begin{table}[htbp]\centering\caption{相同 Val 2,354 点上的最终画像性能比较}\label{tab:final-profile}
+\begin{tabularx}{\linewidth}{Yrr}
+\toprule
+指标 & E01-B Train+Dev4504 & A8 P4504\\\midrule
+画像 Micro-F1 & 0.4014 & \textbf{0.4678}\\
+画像 Macro-F1 & 0.2532 & \textbf{0.3128}\\
+Precision & 0.3451 & \textbf{0.5156}\\
+Recall & \textbf{0.4796} & 0.4280\\
+TP / FP / FN & 1496 / 2839 / 1623 & 1335 / 1254 / 1784\\
+三维 Exact Match & 19.50\% & \textbf{37.72\%}\\
+Personality Micro-F1 & 0.3770 & \textbf{0.4479}\\
+Interests Micro-F1 & 0.5099 & \textbf{0.6736}\\
+Style Micro-F1 & 0.3790 & \textbf{0.3894}\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+由表\ref{tab:final-profile}可见，A8 的画像 Micro-F1 测得值高 0.0664，三维完全匹配率也更高。E01-B 识别出的正确标签数略多，但同时输出更多不属于 Gold 的标签；A8 的 Precision 测得值较高，FP 从 2,839 降至 1,254。逐维度看，A8 在三个维度上的测得 F1 均较高，其中 Interests 的差值最大。鉴于两种方法使用不同的生成协议，这些差值不能单独归因于训练目标。
+
+各维度与总体结果如图\ref{fig:09-final-profile-compare}所示；分母均为相同的 2,354 个 Val 预测点。
+
+\figureplaceholder{09-final-profile-compare}{E01-B 与 A8 的三维画像 F1 对比}{E01-B TrainDev Val 最终对照；E0.3-A8 DevFT 至 Val 评测；同一冻结 Val ID 集合，共 2,354 点。}{6.2cm}
+
+从项目需求看，画像预测既需要一定覆盖率，也要尽量减少无依据的标签。当前结果支持将 A8 作为最终画像模块，并继续保留 E01-B 作为完整任务的独立候选与对照。
+
+\section{情绪识别与回复生成效果}
+E03-B 在固定 209 点和与之零重叠的新增 201 点上比较 Step 4665 与 Replay-1152。Replay-1152 的情绪 Accuracy 分别为 73.21\% 与 74.13\%，对应 Step 4665 的 72.25\% 与 67.66\%。209 点上净增 2 条，McNemar 检验 $p=0.892$，配对 bootstrap 95\% 区间为 $[-0.057,0.077]$；新增 201 点上净增 13 条，$p=0.066$，区间为 $[0.000,0.129]$。合并 410 点后净增 15 条，$p=0.155$。两批差值方向一致，但均未达到稳健显著证据；类别命中变化是局部切片观察，不能据此宣称 Replay 确定带来泛化提升。BLEU-4、ROUGE-L 和长度比用于补充观察回复质量。
+
+\begin{table}[htbp]\centering\caption{E03-B Replay 1152 的两组情绪回复结果}\label{tab:e03b-replay}
+\small
+\begin{tabular}{p{1.9cm}p{2.8cm}rrrr}
+\toprule
+评测集 & 模型 & 情绪 Accuracy & BLEU-4 & ROUGE-L & 长度比\\\midrule
+209 点 & 4665 & 0.7225 & 0.1270 & 0.3018 & 1.0262\\
+209 点 & Replay1152 & \textbf{0.7321} & 0.1192 & 0.2981 & 1.0930\\
+201 点 & 4665 & 0.6766 & 0.1267 & 0.3058 & 0.9311\\
+201 点 & Replay1152 & \textbf{0.7413} & 0.1338 & 0.3144 & 0.9893\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+这组结果显示 Replay-1152 在两批本地切片上的 Accuracy 差值方向一致，但配对检验与区间仍保留较大不确定性。训练前冻结的档位规则在格式门槛通过者中优先选择 Accuracy 较高的 Checkpoint，因此最终集成采用 Replay-1152；这一工程选择不等同于统计上确认其普遍优于 Step 4665。
+
+\section{画像困难样本 Replay 的补充比较}
+在画像训练完成后，我们也测试了基于当前模型错误进行困难样本 Replay 的方案。该试验从已经训练好的 P4504 出发，在固定 \texttt{val\_gate} 528 个预测点上比较了原模型与增加 128 步训练的 Replay 候选。原 P4504 的画像 Micro-F1 为 0.4914，Replay128 为 0.4133。根据预设的阶段门槛，实验在 Pilot 后停止，并继续保留原始 P4504。
+
+这一结果帮助我们明确最终模型选择：在现有训练预算下，A8 的完整专项训练结果已经形成稳定的画像候选，继续增加困难样本曝光未必能够同时改善漏报与误报；因此最终采用已经完成 Train+Dev 训练的 P4504，并将 Replay Pilot 作为训练策略探索记录。
+
+\section{系统推理与部署性能}
+最终双 Adapter 系统在本地 vLLM 和 Docker 环境中完成了测试。本文采用最终 Docker Run 03（E03-DUAL-20261109-03）的固定 100 条 target-free 输入：Schema、ID、双路格式、Prompt Token 身份与 Adapter 路由均通过 100/100 检查，未解决错误、OOM 与未处理截断均为 0。该结果是本地工程验收，不是官方隐藏测试的评分结果。
+
+\begin{table}[htbp]\centering\caption{最终 Docker 双 Adapter 固定 100 条本地压力测试}\label{tab:docker-perf}
+\begin{tabularx}{\linewidth}{Yl}
+\toprule
+检查内容 & 结果\\\midrule
+基础模型／部署方案 & Qwen3-1.7B + 两套 LoRA，vLLM 0.11.1\\
+有效输出及 Schema & 100/100\\
+两路 Prompt／Adapter 路由 & 100/100\\
+端到端 P50 / P90 / P95 & 3.245 / 10.206 / 15.237 秒\\
+GPU 峰值显存 & 7,756 / 8,188 MiB\\
+推理错误 / 未解决截断 / OOM & 0 / 0 / 0\\
+离线镜像大小 & 约 31.96 GB（镜像虚拟大小）\\
+\bottomrule
+\end{tabularx}
+\end{table}
+\smallnote{来源：Docker Run 03 原始性能记录。P50 与 P95 为记录值；P90 由保存的 100 条样本延迟按最近秩法计算。}
+
+图\ref{fig:10-deployment-performance}展示 Run 03 的延迟分位数、Schema 合法率和 GPU 峰值分配。
+
+\figureplaceholder{10-deployment-performance}{最终双 Adapter 推理延迟与系统验收}{E03-DUAL-20261109-03 的 performance\_report.json 与 verify-output.json；固定 100 条本地输入；P90 按原始延迟最近秩法计算。}{6.0cm}
+
+最终 Docker 镜像经过保存、回导和离线 GPU 验证，固定 20 条与 100 条输入均满足本地运行契约。由此，项目完成了从训练模型、整合两套 Adapter 到独立环境可执行推理的完整工程流程。
+
+\chapter{总结与展望}
+本项目围绕情感陪伴对话中的情绪识别、结构化用户画像和自然语言回复生成，在 Qwen3-1.7B 基础上完成了从数据处理到最终部署的全流程实践。首先构建统一多任务 QLoRA 基线，在 Dev 上明显提升三项任务的基础能力；随后通过监督 Token 分析、Loss 与输出协议探索，确定画像预测的进一步优化重点。A8 采用画像专项 Prompt 与短 Completion 训练后，在最终 Val 上取得 46.78\% 的画像 Micro-F1；该结果与 E01-B 的本地比较采用相同 Val ID，但生成协议不同。E03-B Replay-1152 在固定切片上改善了部分目标类别的命中数，配对统计仍不足以确认稳定的总体提升。
+
+在系统层面，我们采用共享 Base 的双 LoRA 方案，实现两种任务模型的串行调用、字段解析与 JSON 组装，并完成 vLLM、Docker 的本地离线推理验证。项目的主要收获是：对于同时包含短标签分类和长文本生成的应用场景，可以围绕任务特点设计不同的训练目标，再在推理阶段完成轻量化协同。这样既保留了语言模型的表达能力，也为结构化任务提供更直接的优化空间。
+
+后续可以从三个方向继续完善：进一步规范画像标签的判定边界，提升细粒度风格和性格标签的识别；围绕长对话设计更细致的历史信息选择与用户特征维护策略；在现有双 Adapter 架构上优化请求调度与缓存管理，进一步降低端到端延迟。这些方向均可延续当前的训练、评分和模型归档流程，为轻量化情感陪伴系统提供进一步的工程基础。
+
+\appendix
+\chapter{实验数据来源与版本说明}
+报告数值依据项目保存的实验文档和用户提供的资料包整理，采用本地代理指标口径；表中每个关键数值均附有对应数据范围，以便复核。正文中的训练与评测结果分别来自以下项目记录：
+\begin{longtable}{p{3.15cm}p{9.35cm}}
+\toprule
+研究内容 & 对应项目记录（详见资料包内同名前缀文档）\\\midrule\endhead
+数据审计 & D0.1 数据质量审计报告；D0.3 数据构建报告\\
+数据预算与 SFT 构造 & D0.4.2 Token 长度审计；D0.4.3 监督数据与 Batch 验收\\
+统一基线 & E0.1-B 正式 SFT 与 Dev 对照；E0.1-B Full 深度诊断\\
+监督诊断 & E0.3-A0 监督结构诊断；E0.3-A0.1 画像标签与细粒度监督诊断\\
+画像专项训练 & E0.3-A8 V2 分阶段训练观察；E0.3-A8 DevFT 至 Val 评测\\
+画像模型对比 & E01-B TrainDev Val 最终对照与收尾\\
+情绪回复专项训练 & E03-B 稠密半四档汇总；E03-B replay 难例回放实验报告\\
+最终部署 & E03 双 Adapter 最终集成与 Docker 验收\\
+\bottomrule
+\end{longtable}
+
+\end{document}

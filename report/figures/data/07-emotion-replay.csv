@@ -1,0 +1,6 @@
+emotion,gold_count,checkpoint_4665_hits,replay_1152_hits,cohort
+mixed,20,1,12,fixed Val slice: 209 prediction points
+sadness,12,2,11,fixed Val slice: 209 prediction points
+care,5,0,1,fixed Val slice: 209 prediction points
+disgust,2,0,2,fixed Val slice: 209 prediction points
+anxiety,64,58,49,fixed Val slice: 209 prediction points

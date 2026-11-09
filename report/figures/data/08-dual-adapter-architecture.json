@@ -1,0 +1,12 @@
+{
+  "title":"单样本按序生成：画像 → 情绪与回复；两次调用复用同一基座",
+  "input":"输入\nid + history",
+  "profile_prompt":"① A8 P4504\n画像 Prompt · 独立选史",
+  "emotion_prompt":"② Replay-1152\n情绪/回复 Prompt · 独立选史",
+  "base":"唯一共享 Base\nQwen3-1.7B\n分时激活两套 Adapter\n不复制、不合并权重",
+  "profile_parser":"画像解析器\nPersonality\nInterests · Style",
+  "emotion_parser":"情绪回复解析器\nemotion_label\nresponse_text",
+  "assembler":"JSON Assembler\nid + profile\nemotion_label\nresponse_text\nmemory_refs=[]",
+  "output":"JSONL +\n性能报告",
+  "file_note":"输出文件：submission.jsonl\nperformance_report.json。"
+}

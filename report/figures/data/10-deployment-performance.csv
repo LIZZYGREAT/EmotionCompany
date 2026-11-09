@@ -1,0 +1,7 @@
+metric,value,unit,cohort,source
+P50,3.244649054,seconds,final Docker Run 03 · n=100,performance_report.json
+P90,10.206098722,seconds,final Docker Run 03 · n=100; nearest-rank derived from raw latencies,performance_report.json
+P95,15.237110405,seconds,final Docker Run 03 · n=100,performance_report.json
+GPU peak,7756,MiB,RTX 4060 Laptop GPU · total 8188 MiB,verify-output.json
+Schema valid,100,rows,100 fixed target-free inputs,verify-output.json
+Unresolved errors,0,count,100 fixed target-free inputs,verify-output.json

@@ -1,0 +1,5 @@
+dimension,e01b_train_dev_4504,a8_p4504,cohort,n
+Personality,0.3770,0.4479,same Val IDs,2354
+Interests,0.5099,0.6736,same Val IDs,2354
+Style,0.3790,0.3894,same Val IDs,2354
+Overall Micro-F1,0.4014,0.4678,same Val IDs,2354

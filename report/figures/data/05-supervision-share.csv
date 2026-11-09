@@ -1,0 +1,7 @@
+region,tokens,share_percent,denominator,unit
+response_text,2260250,79.2621,2851614,supervised tokens
+user_profile,253576,8.8924,2851614,supervised tokens
+emotion_label,30140,1.0569,2851614,supervised tokens
+public_json_structure,178112,6.2460,2851614,supervised tokens
+eos,16192,0.5678,2851614,supervised tokens
+boundary_mixed,113344,3.9747,2851614,supervised tokens

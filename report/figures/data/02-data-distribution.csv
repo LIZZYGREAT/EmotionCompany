@@ -1,0 +1,19 @@
+group,label,count,denominator,unit
+emotion,anxiety,6340,18657,raw Train prediction points
+emotion,relaxed,2819,18657,raw Train prediction points
+emotion,helplessness,1575,18657,raw Train prediction points
+emotion,fear,1388,18657,raw Train prediction points
+emotion,sadness,1085,18657,raw Train prediction points
+emotion,mixed,945,18657,raw Train prediction points
+emotion,loneliness,876,18657,raw Train prediction points
+emotion,anger,855,18657,raw Train prediction points
+emotion,shame,752,18657,raw Train prediction points
+emotion,gratitude,695,18657,raw Train prediction points
+emotion,neutral,654,18657,raw Train prediction points
+emotion,pride,234,18657,raw Train prediction points
+emotion,joy,171,18657,raw Train prediction points
+emotion,disgust,125,18657,raw Train prediction points
+emotion,care,79,18657,raw Train prediction points
+emotion,surprise,64,18657,raw Train prediction points
+profile,SFT Train: all three dimensions empty,6033,16192,SFT samples
+profile,SFT Train: at least one dimension non-empty,10159,16192,SFT samples

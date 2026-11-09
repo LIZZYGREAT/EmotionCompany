@@ -1,0 +1,13 @@
+{
+  "base_model":"Qwen3-1.7B",
+  "quantization":"4-bit NF4 + double quantization",
+  "compute_dtype":"BF16",
+  "base_trainable":false,
+  "lora_rank":8,
+  "lora_alpha":16,
+  "lora_dropout":0,
+  "target_modules":["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"],
+  "loss":"completion-only causal cross entropy, including EOS",
+  "prompt_label":-100,
+  "update":"LoRA A/B only; frozen Base and LM Head are not independent classification heads"
+}
