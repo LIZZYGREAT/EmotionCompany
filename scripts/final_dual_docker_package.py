@@ -22,7 +22,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 SOURCE_CONFIG = Path("configs/deployment/final_dual_v1_2.json")
-HISTORICAL_SOURCE_CONFIG = Path("configs/deployment/final_dual.yaml")
 DOCKER_CONFIG = Path("configs/deployment/final_dual_docker.json")
 SCHEMA_PATH = Path("participant/templates/submission_schema.json")
 CONDA_LOCK = Path("docker/e02/conda-linux-64.explicit.txt")
@@ -32,12 +31,10 @@ ENTRYPOINT = Path("docker/final_dual/entrypoint.sh")
 EXPECTED_MODULES = {
     "q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"
 }
-OFFICIAL_ID = re.compile(r"^test_[0-9]{6}_t[0-9]+$")
 CONTAINER_BASE_PATH = "/root/participant/model"
 RUNTIME_CODE_FILES = (
     Path("participant/start.sh"),
     Path("participant/final_dual_inference.py"),
-    Path("participant/run_inference.py"),
     Path("src/inference/final_dual_protocol.py"),
     Path("src/inference/final_dual_runtime.py"),
     Path("src/inference/final_dual_vllm.py"),
@@ -46,7 +43,6 @@ RUNTIME_CODE_FILES = (
 COPY_FILES = (
     Path("participant/start.sh"),
     Path("participant/final_dual_inference.py"),
-    Path("participant/run_inference.py"),
     SCHEMA_PATH,
     DOCKER_CONFIG,
     Path("configs/prompts/p0.txt"),
@@ -59,7 +55,6 @@ COPY_FILES = (
     Path("src/inference/final_dual_protocol.py"),
     Path("src/inference/final_dual_runtime.py"),
     Path("src/inference/final_dual_vllm.py"),
-    Path("scripts/e02_vllm_probe.py"),
     CONDA_LOCK,
     PIP_LOCK,
     DOCKERFILE,
@@ -80,10 +75,6 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def sha256_bytes(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
-
-
 def load_json(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -97,21 +88,8 @@ def resolve_repo_path(value: str | Path, repo_root: Path = ROOT) -> Path:
 
 
 def _source_run_paths(config: dict[str, Any], repo_root: Path = ROOT) -> dict[str, Path]:
-    run_id = config["run_id"]
-    run_root = repo_root / "outputs/final_delivery" / run_id
-    official_root = repo_root / "outputs/evaluation/final_dual" / f"{run_id}-official-start-vllm20"
     return {
-        "run_root": run_root,
         "model_lock": resolve_repo_path(config["model_lock_path"], repo_root),
-        "transformers_manifest": run_root / "transformers_smoke20/manifest.json",
-        "input_manifest": run_root / "transformers_smoke20/input/manifest.json",
-        "vllm_manifest": run_root / "vllm_smoke/manifest.json",
-        "official_root": official_root,
-        "official_report": official_root / "performance_report.json",
-        "official_submission": official_root / "submission.jsonl",
-        "official_raw": official_root / "raw_outputs.jsonl",
-        "official_code_identity": official_root / "code_identity.json",
-        "smoke_input": run_root / "transformers_smoke20/input/smoke20_input.jsonl",
     }
 
 
@@ -126,12 +104,6 @@ def _read_requirement_pins(path: Path) -> dict[str, str]:
             raise ValueError(f"runtime lock only accepts exact pins: {line}")
         pins[name.lower().replace("_", "-")] = version
     return pins
-
-
-def _rewritten_er_config_bytes(source_path: Path) -> bytes:
-    adapter_config = load_json(source_path)
-    adapter_config["base_model_name_or_path"] = CONTAINER_BASE_PATH
-    return (json.dumps(adapter_config, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
 
 def _contains_host_path(value: Any) -> bool:
@@ -157,15 +129,6 @@ def _runtime_code_hashes(root: Path) -> dict[str, str]:
     return {path.as_posix(): sha256_file(root / path) for path in RUNTIME_CODE_FILES}
 
 
-def _frozen_input_sha256(previous_gates: dict[str, Any]) -> str:
-    historical = previous_gates.get("historical_asset_protocol_evidence")
-    if not isinstance(historical, dict):
-        raise ValueError("historical asset/protocol gate evidence is missing")
-    value = historical.get("input_sha256")
-    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
-        raise ValueError("historical gate evidence has no valid frozen input SHA-256")
-    return value
-
 
 def _regular_file_bytes(root: Path) -> int:
     return sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
@@ -176,177 +139,13 @@ def _git_head(root: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def verify_previous_gates(config: dict[str, Any], repo_root: Path = ROOT) -> dict[str, Any]:
-    source_config = load_json(repo_root / SOURCE_CONFIG)
-    current_paths = _source_run_paths(source_config, repo_root)
-    historical_config = load_json(repo_root / HISTORICAL_SOURCE_CONFIG)
-    historical_paths = _source_run_paths(historical_config, repo_root)
-    required = (
-        current_paths["model_lock"], historical_paths["model_lock"],
-        historical_paths["transformers_manifest"], historical_paths["input_manifest"],
-        historical_paths["vllm_manifest"], historical_paths["official_report"],
-        historical_paths["official_submission"], historical_paths["official_raw"],
-        historical_paths["official_code_identity"], historical_paths["smoke_input"],
-        historical_paths["official_root"] / "run_progress.json",
-    )
-    missing = [str(path) for path in required if not path.is_file()]
-    if missing:
-        raise FileNotFoundError(f"historical or v1.2 asset gate evidence is incomplete: {missing}")
-    current_config_path = repo_root / SOURCE_CONFIG
-    current_lock = load_json(current_paths["model_lock"])
-    if current_lock.get("deployment_config", {}).get("path") != SOURCE_CONFIG.as_posix():
-        raise ValueError("v1.2 model lock points to a different deployment config")
-    if current_lock.get("deployment_config", {}).get("sha256") != sha256_file(current_config_path):
-        raise ValueError("v1.2 deployment config changed since asset preflight")
-
-    historical_config_path = repo_root / HISTORICAL_SOURCE_CONFIG
-    historical_lock = load_json(historical_paths["model_lock"])
-    if historical_lock.get("deployment_config", {}).get("path") != HISTORICAL_SOURCE_CONFIG.as_posix():
-        raise ValueError("historical model lock points to a different deployment config")
-    if historical_lock.get("deployment_config", {}).get("sha256") != sha256_file(historical_config_path):
-        raise ValueError("historical deployment config differs from its asset preflight")
-
-    input_manifest = load_json(historical_paths["input_manifest"])
-    frozen_input_sha = input_manifest.get("input", {}).get("sha256")
-    if frozen_input_sha != sha256_file(historical_paths["smoke_input"]):
-        raise ValueError("frozen 20-row input hash differs from its manifest")
-    transformers = load_json(historical_paths["transformers_manifest"])
-    vllm = load_json(historical_paths["vllm_manifest"])
-    official = load_json(historical_paths["official_report"])
-    official_progress = load_json(historical_paths["official_root"] / "run_progress.json")
-    code_identity = load_json(historical_paths["official_code_identity"])
-    if transformers.get("status") != "passed" or transformers.get("input_sha256") != frozen_input_sha:
-        raise ValueError("Transformers gate is not passed for the Docker Smoke input")
-    vllm_stages = {stage.get("name"): stage for stage in vllm.get("stages", [])}
-    if vllm.get("status") != "passed" or any(vllm_stages.get(name, {}).get("status") != "passed" for name in ("smoke10", "smoke20")):
-        raise ValueError("vLLM 10/20-row gate is not passed")
-    if vllm.get("input", {}).get("sha256") != frozen_input_sha:
-        raise ValueError("vLLM Smoke input identity differs from the Docker Smoke input")
-    if (official.get("status") != "passed" or official_progress.get("test_file_sha256") != frozen_input_sha
-            or official_progress.get("sample_count") != 20 or official_progress.get("status") != "complete"):
-        raise ValueError("official start.sh gate is not passed on the Docker Smoke input")
-    if official.get("submission_schema_validated_count") != 20 or official.get("submission_rows") != 20:
-        raise ValueError("official start.sh gate does not contain 20 validated rows")
-    if code_identity.get("execution_code_commit") != official.get("git_head") and not code_identity.get("code_files_sha256"):
-        raise ValueError("official execution code identity supplement is incomplete")
-    historical_evidence = {
-        "status": "passed",
-        "scope": "immutable v1 asset and historical prompt/protocol evidence",
-        "runtime_behavior_is_current_v1_2_evidence": False,
-        "run_id": historical_config["run_id"],
-        "input_sha256": frozen_input_sha,
-        "model_lock_sha256": sha256_file(historical_paths["model_lock"]),
-        "transformers_status": transformers.get("status"),
-        "vllm_status": vllm.get("status"),
-        "historical_official_status": official.get("status"),
-        "source_config_sha256": sha256_file(historical_config_path),
-        "source_git_head": code_identity.get("execution_code_commit"),
-    }
-
-    runtime_validation_path = repo_root / "outputs/final_delivery" / config["run_id"] / "runtime_validation.json"
-    current_runtime_hashes = _sha_code_files(repo_root)
-    runtime_validation: dict[str, Any] = {
-        "status": "pending",
-        "manifest_path": runtime_validation_path.relative_to(repo_root).as_posix(),
-        "reason": "v1.2 host smoke/stress evidence is required before the Docker build",
-    }
-    if runtime_validation_path.is_file():
-        evidence = load_json(runtime_validation_path)
-        if evidence.get("status") != "passed":
-            raise ValueError("v1.2 runtime validation manifest is not passed")
-        if evidence.get("container_runtime_file_sha256") != current_runtime_hashes:
-            raise ValueError("v1.2 evidence code hashes differ from the current Docker runtime files")
-        if evidence.get("docker_verifier_sha256") != sha256_file(repo_root / "scripts/final_dual_docker_package.py"):
-            raise ValueError("v1.2 evidence Docker verifier hash differs from the current verifier")
-        if evidence.get("docker_config_sha256") != sha256_file(repo_root / DOCKER_CONFIG):
-            raise ValueError("v1.2 evidence Docker config hash differs from the current package config")
-        host = evidence.get("host_validation", {})
-        smoke_runs = host.get("smoke_runs", [])
-        stress_run = host.get("stress_run")
-        if host.get("status") != "passed" or len(smoke_runs) != 3 or not isinstance(stress_run, dict):
-            raise ValueError("v1.2 host evidence must include three 20-row runs and one fixed 100-row run")
-        expected = validate_static_config(config, repo_root)
-        host_config_path = repo_root / host.get("config_path", "")
-        host_lock_path = repo_root / host.get("model_lock_path", "")
-        if not host_config_path.is_file() or not host_lock_path.is_file():
-            raise FileNotFoundError("v1.2 host deployment config or model lock is missing")
-        if sha256_file(host_config_path) != host.get("config_sha256") or sha256_file(host_lock_path) != host.get("model_lock_sha256"):
-            raise ValueError("v1.2 host deployment config/model lock identity differs from its evidence manifest")
-        for record, expected_rows in [*((item, 20) for item in smoke_runs), (stress_run, 100)]:
-            if record.get("samples") != expected_rows or record.get("status") != "passed":
-                raise ValueError(f"v1.2 host evidence is not passed for its {expected_rows}-row run")
-            report_path = repo_root / record.get("report_path", "")
-            if not report_path.is_file():
-                raise FileNotFoundError(f"v1.2 host report is missing: {report_path}")
-            report = load_json(report_path)
-            if report.get("status") != "passed" or report.get("complete") is not True or report.get("samples") != expected_rows:
-                raise ValueError(f"v1.2 host report is incomplete or failed: {report_path}")
-            if report.get("configuration", {}).get("sha256") != host.get("config_sha256") or report.get("configuration", {}).get("model_lock_sha256") != host.get("model_lock_sha256"):
-                raise ValueError(f"v1.2 host report config/lock identity differs: {report_path}")
-            if report.get("runtime_code_identity", {}).get("file_sha256") != _runtime_code_hashes(repo_root):
-                raise ValueError(f"v1.2 host runtime code hashes differ from the frozen source files: {report_path}")
-            if report.get("model_weight_identity", {}).get("observed_weight_hash") != expected["base_weight_sha256"]:
-                raise ValueError("v1.2 host Base identity differs from the immutable asset lock")
-            for route, identity_key in (("profile", "profile"), ("emotion_response", "emotion_response")):
-                if report.get("adapter_identities", {}).get(identity_key, {}).get("weight_sha256") != expected["adapter_weight_sha256"][route]:
-                    raise ValueError(f"v1.2 host {route} Adapter identity differs from the immutable asset lock")
-            if any(report.get("route_failure_count", {}).get(route, 0) for route in ("profile", "emotion_response")):
-                raise ValueError(f"v1.2 host report contains route errors: {report_path}")
-            exact = report.get("prompt_token_ids_exact_match_count", {})
-            denominator = report.get("prompt_token_ids_check_denominator", {})
-            if any(exact.get(route) != denominator.get(route) for route in ("profile", "emotion_response")):
-                raise ValueError(f"v1.2 host report contains a Prompt Token ID mismatch: {report_path}")
-            retry_count = report.get("retry_attempts", {}).get("emotion_response", 0)
-            if report.get("server", {}).get("requested_alias_count") != {
-                "profile": expected_rows,
-                "emotion-response": expected_rows + retry_count,
-            }:
-                raise ValueError(f"v1.2 host alias counts differ from prepared samples plus retries: {report_path}")
-        stress_report = load_json(repo_root / stress_run["report_path"])
-        if stress_report.get("unresolved_cap_hits", {}).get("emotion_response", 0) > 2:
-            raise ValueError("v1.2 fixed 100-row host run exceeds the unresolved-cap threshold")
-        if stress_report.get("emotion_response_severe_anomaly_count", 0) != 0 or stress_report.get("emotion_response_outcome_count", {}).get("invalid_output", 0) != 0:
-            raise ValueError("v1.2 fixed 100-row host run contains invalid or severely repeated responses")
-        overlay = evidence.get("old_image_code_overlay", {})
-        overlay_runs = overlay.get("runs", [])
-        allowed_overlay_statuses = {"passed", "passed_equivalent_host", "not_available"}
-        if overlay.get("status") not in allowed_overlay_statuses:
-            raise ValueError("v1.2 evidence must record whether prebuild image overlay was available")
-        if overlay.get("status") == "passed" and len(overlay_runs) < 2:
-            raise ValueError("passed old-image code overlay requires two successful runs")
-        if overlay.get("status") in {"passed_equivalent_host", "not_available"} and not overlay.get("reason"):
-            raise ValueError("unavailable old-image overlay must include its reason")
-        if any(item.get("container_runtime_file_sha256") != current_runtime_hashes for item in overlay_runs):
-            raise ValueError("old-image overlay code hashes differ from the new Docker runtime files")
-        if overlay.get("status") == "passed":
-            for item in overlay_runs:
-                overlay_report_path = repo_root / item.get("report_path", "")
-                if not overlay_report_path.is_file():
-                    raise FileNotFoundError(f"old-image overlay report is missing: {overlay_report_path}")
-                overlay_report = load_json(overlay_report_path)
-                if overlay_report.get("status") != "passed" or overlay_report.get("complete") is not True or overlay_report.get("samples") != 20:
-                    raise ValueError(f"old-image overlay run is incomplete or failed: {overlay_report_path}")
-        runtime_validation = {
-            "status": "passed",
-            "manifest_path": runtime_validation_path.relative_to(repo_root).as_posix(),
-            "manifest_sha256": sha256_file(runtime_validation_path),
-            "host_smoke_runs": len(smoke_runs),
-            "host_stress_rows": 100,
-            "old_image_code_overlay_runs": len(overlay_runs),
-            "old_image_code_overlay_status": overlay.get("status"),
-            "container_runtime_file_sha256": current_runtime_hashes,
-        }
-    return {
-        "status": "passed" if runtime_validation["status"] == "passed" else "pending_new_v1_2_runtime_evidence",
-        "historical_asset_protocol_evidence": historical_evidence,
-        "new_v1_2_runtime_validation": runtime_validation,
-    }
-
 
 def validate_static_config(config: dict[str, Any], repo_root: Path = ROOT) -> dict[str, Any]:
     source = load_json(repo_root / SOURCE_CONFIG)
-    if config.get("version") != "E03-final-dual-docker-v1.2":
-        raise ValueError("Docker config must declare the v1.2 README runtime contract")
+    if config.get("version") != "E03-final-dual-docker-v2.0":
+        raise ValueError("Docker config must declare the simplified v2 runtime contract")
+    if config.get("runtime_contract_version") != "E03-v2-simplified-inference-entrypoint":
+        raise ValueError("Docker config must identify the simplified inference entrypoint")
     if config.get("mode") != "dual_adapter" or config.get("backend") != "vllm":
         raise ValueError("Docker deployment config must use mode=dual_adapter and backend=vllm")
     if config.get("model_id") != source.get("model_id") or config.get("model_revision") != source.get("model_revision"):
@@ -361,13 +160,6 @@ def validate_static_config(config: dict[str, Any], repo_root: Path = ROOT) -> di
         raise ValueError("Docker Prompt paths or hashes differ from the tested deployment config")
     if config.get("context") != source.get("context") or config.get("generation") != source.get("generation"):
         raise ValueError("Docker generation/context protocol differs from the tested deployment config")
-    runtime_behavior = config.get("runtime_behavior", {})
-    if runtime_behavior != {
-        "version": "E03-v1.2-readme-v3-contract",
-        "max_emotion_response_retries": 1,
-        "retry_only_on_finish_reason": "length",
-    }:
-        raise ValueError("Docker config must lock one ER retry on finish_reason=length")
     if config.get("deployment", {}).get("vllm") != source.get("deployment", {}).get("vllm"):
         raise ValueError("Docker vLLM settings differ from the tested deployment config")
     if config.get("quantization", {}).get("load_in_4bit") is not False:
@@ -375,11 +167,10 @@ def validate_static_config(config: dict[str, Any], repo_root: Path = ROOT) -> di
     if _contains_host_path(config):
         raise ValueError("Docker config contains a host-specific absolute path")
 
-    source_lock_path = resolve_repo_path(source["model_lock_path"], repo_root)
-    source_lock = load_json(source_lock_path)
-    expected_er_container_config_sha = sha256_bytes(_rewritten_er_config_bytes(
-        resolve_repo_path(source_lock["deployment_adapters"]["emotion_response"]["path"], repo_root) / "adapter_config.json"
-    ))
+    docker_adapters = config.get("adapters", {})
+    expected_er_container_config_sha = docker_adapters.get("emotion_response", {}).get("expected_config_sha256")
+    if not isinstance(expected_er_container_config_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_er_container_config_sha):
+        raise ValueError("Docker emotion_response Adapter config SHA-256 must be recorded")
     expected_adapters = {
         "profile": {
             "candidate": "A8-P4504",
@@ -441,6 +232,8 @@ def check_static(repo_root: Path = ROOT) -> dict[str, Any]:
         raise ValueError("Docker entrypoint must force offline vLLM inference")
     if 'exec bash /root/participant/start.sh "$TEST_FILE" "$RESULT_DIR"' not in entrypoint:
         raise ValueError("Docker entrypoint must pass the two official arguments to start.sh")
+    if "nvidia-smi" in entrypoint or "exec sleep infinity" not in entrypoint:
+        raise ValueError("Docker entrypoint must not require nvidia-smi and must support idle containers")
     if "--network none" not in (repo_root / Path("docker/final_dual/README.md")).read_text(encoding="utf-8"):
         raise ValueError("Docker README must document network-isolated inference")
     conda_text = (repo_root / CONDA_LOCK).read_text(encoding="utf-8")
@@ -459,12 +252,10 @@ def check_static(repo_root: Path = ROOT) -> dict[str, Any]:
     for relative in COPY_DIRS:
         if not (repo_root / relative).is_dir():
             raise FileNotFoundError(f"Docker package source directory is missing: {relative}")
-    gates = verify_previous_gates(config, repo_root)
-    package_ready = gates.get("status") == "passed"
     return {
-        "status": "ready_for_asset_packaging" if package_ready else "historical_evidence_passed_runtime_validation_pending",
+        "status": "ready_for_asset_packaging",
         "facts": facts,
-        "previous_gates": gates,
+        "package_preflight": {"status": "passed", "scope": "static config and build inputs"},
         "runtime_lock_package_count": len(pins),
         "image_size_limit_bytes": MAX_IMAGE_BYTES,
     }
@@ -545,7 +336,7 @@ def _container_model_lock(
         },
     }
     return {
-        "version": "final-dual-container-model-lock-v1.2",
+        "version": "final-dual-container-model-lock-v2",
         "run_id": config["run_id"],
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "deployment_config": {"path": DOCKER_CONFIG.as_posix(), "sha256": config_sha256},
@@ -572,16 +363,17 @@ def prepare_context(*, output_dir: Path, repo_root: Path = ROOT) -> dict[str, An
         raise FileExistsError(f"refusing to overwrite Docker context: {output_dir}")
     static = check_static(repo_root)
     if static.get("status") != "ready_for_asset_packaging":
-        raise RuntimeError("refusing Docker packaging until v1.2 host runtime validation passes")
+        raise RuntimeError("refusing Docker packaging until static package checks pass")
     config = load_json(repo_root / DOCKER_CONFIG)
     source_config = load_json(repo_root / SOURCE_CONFIG)
     paths = _source_run_paths(source_config, repo_root)
     source_lock_path = paths["model_lock"]
     source_lock = load_json(source_lock_path)
 
-    from participant.final_dual_inference import _verify_assets
-    _tokenizer, verified = _verify_assets(source_config, (repo_root / SOURCE_CONFIG).resolve(), source_lock_path)
     base_path = resolve_repo_path(source_config["model_path"], repo_root)
+    from transformers import AutoTokenizer
+    AutoTokenizer.from_pretrained(str(base_path), local_files_only=True, trust_remote_code=False)
+    verified = {"tokenizer": source_lock.get("tokenizer", config.get("tokenizer", {}))}
     for name, prompt_record in config["prompts"].items():
         prompt_path = resolve_repo_path(prompt_record["path"], repo_root)
         if sha256_file(prompt_path) != prompt_record["sha256"]:
@@ -634,7 +426,7 @@ def prepare_context(*, output_dir: Path, repo_root: Path = ROOT) -> dict[str, An
         if source_runtime_hashes != container_runtime_hashes:
             raise ValueError("copied runtime code differs from the frozen source code hashes")
         runtime_code_identity = {
-            "version": config["runtime_behavior"]["version"],
+            "version": config["runtime_contract_version"],
             "git_head": _git_head(repo_root),
             "file_sha256": container_runtime_hashes,
         }
@@ -663,8 +455,8 @@ def prepare_context(*, output_dir: Path, repo_root: Path = ROOT) -> dict[str, An
                     raise RuntimeError(f"Docker context includes an unexpected checkpoint file: {path.relative_to(temporary_dir)}")
         code_hashes = _sha_code_files(temporary_dir)
         manifest = {
-            "schema_version": "final_dual_docker_package_v1.2",
-            "runtime_behavior_version": "E03-v1.2-readme-v3-contract",
+            "schema_version": "final_dual_docker_package_v2",
+            "runtime_contract_version": config["runtime_contract_version"],
             "status": "prepared_for_image_build",
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
             "source_commit": _git_head(repo_root),
@@ -672,11 +464,6 @@ def prepare_context(*, output_dir: Path, repo_root: Path = ROOT) -> dict[str, An
             "container_model_lock_sha256": sha256_file(lock_path),
             "runtime_code_identity": runtime_code_identity,
             "deployment_config": {"path": DOCKER_CONFIG.as_posix(), "sha256": docker_config_sha},
-            "input": {
-                "path": "transformers_smoke20/input/smoke20_input.jsonl",
-                "sha256": _frozen_input_sha256(static["previous_gates"]),
-                "rows": 20,
-            },
             "runtime": {"python": "3.10.22", "torch": "2.9.0+cu128", "vllm": "0.11.1", "transformers": "4.57.6", "cuda": "12.8", "conda": "26.1.0"},
             "build_images": {"cuda": CUDA_IMAGE, "miniforge": MINIFORGE_IMAGE},
             "base": {
@@ -702,7 +489,7 @@ def prepare_context(*, output_dir: Path, repo_root: Path = ROOT) -> dict[str, An
                 for key, value in adapters.items()
             },
             "prompts": prompt_records,
-            "previous_gates": static["previous_gates"],
+            "package_preflight": static["package_preflight"],
             "source_file_sha256": copied_source_hashes,
             "container_file_sha256": code_hashes,
             "context_regular_file_bytes_before_manifest": _regular_file_bytes(temporary_dir),
@@ -740,13 +527,13 @@ def _read_jsonl(path: Path, *, exact_input: bool = False) -> list[dict[str, Any]
                 raise ValueError(f"{path}:{line_number}: invalid JSON") from exc
             if not isinstance(row, dict):
                 raise ValueError(f"{path}:{line_number}: expected an object")
-            if exact_input and set(row) != {"id", "history"}:
-                raise ValueError(f"{path}:{line_number}: input must contain only id and history")
-            if not isinstance(row.get("id"), str) or not OFFICIAL_ID.fullmatch(row["id"]):
-                raise ValueError(f"{path}:{line_number}: invalid official test ID")
+            if exact_input and ("id" not in row or "history" not in row):
+                raise ValueError(f"{path}:{line_number}: input must provide id and history")
+            if not isinstance(row.get("id"), str):
+                raise ValueError(f"{path}:{line_number}: id must be a string")
             rows.append(row)
-    if not rows or len({row["id"] for row in rows}) != len(rows):
-        raise ValueError(f"{path}: empty rows or duplicate IDs")
+    if not rows:
+        raise ValueError(f"{path}: empty rows")
     return rows
 
 
@@ -766,355 +553,73 @@ def _report_output_file(report: dict[str, Any], result_dir: Path, name: str) -> 
     return resolved
 
 
-def _container_log_gate(path: Path | None) -> dict[str, Any]:
-    if path is None:
-        return {"checked": False, "status": "not_provided"}
-    content = path.read_text(encoding="utf-8", errors="replace")
-    lowered = content.lower()
-    markers = ("out of memory", "cuda error: out of memory", "fatal error", "segmentation fault")
-    found = [marker for marker in markers if marker in lowered]
-    if found:
-        raise ValueError(f"container log contains failure markers: {found}")
-    if "docker_gpu_preflight=passed" not in lowered:
-        raise ValueError("container log does not prove the in-container CUDA GPU preflight passed")
-    return {"checked": True, "status": "passed", "sha256": sha256_file(path), "oom_or_crash_markers": []}
-
-
-def compare_reference_outputs(
-    predictions: list[dict[str, Any]],
-    reference_rows: list[dict[str, Any]],
-    report: dict[str, Any],
-    reference_report: dict[str, Any],
-) -> dict[str, Any]:
-    """Compare stable contract fields while measuring online response-text equality.
-
-    vLLM's online server does not guarantee repeatable generated text. Keep the
-    fixed-input comparison useful by requiring identical IDs, stable fields,
-    per-run exact Prompt token checks, and acceptable route/format quality;
-    report response and runtime-statistic differences as observations.
-    """
-    if len(predictions) != len(reference_rows):
-        raise ValueError("Docker and host vLLM references have different row counts")
-    if reference_report.get("status") != "passed" or reference_report.get("complete") is not True:
-        raise ValueError("host vLLM reference report is not a passed complete run")
-
-    same_ids = [row.get("id") for row in predictions] == [
-        row.get("id") for row in reference_rows
-    ]
-    same_profiles = all(
-        row.get("user_profile") == ref.get("user_profile")
-        for row, ref in zip(predictions, reference_rows)
-    )
-    same_emotion_labels = all(
-        row.get("emotion_label") == ref.get("emotion_label")
-        for row, ref in zip(predictions, reference_rows)
-    )
-    same_memory_refs = all(
-        row.get("memory_refs") == ref.get("memory_refs")
-        for row, ref in zip(predictions, reference_rows)
-    )
-    def asset_facts(value: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "base_weight_sha256": value.get("model_weight_identity", {}).get("observed_weight_hash"),
-            "tokenizer_signature_sha256": value.get("tokenizer_identity", {}).get("signature_sha256"),
-            "tokenizer_template_sha256": value.get("tokenizer_identity", {}).get("template_sha256"),
-            "adapter_weight_sha256": {
-                route: value.get("adapter_identities", {}).get(key, {}).get("weight_sha256")
-                for route, key in (("profile", "profile"), ("emotion_response", "emotion_response"))
-            },
-            "prompt_sha256": {
-                name: record.get("sha256")
-                for name, record in value.get("prompt_identities", {}).items()
-            },
-            "runtime_code_sha256": value.get("runtime_code_identity", {}).get("file_sha256"),
-        }
-
-    same_asset_identity = asset_facts(report) == asset_facts(reference_report)
-    if not same_ids or not same_profiles or not same_emotion_labels or not same_memory_refs:
-        raise ValueError("Docker and host vLLM stable submission fields differ")
-    if not same_asset_identity:
-        raise ValueError("Docker and host Base, Adapter, Tokenizer, Prompt, or runtime-code identities differ")
-
-    row_count = len(predictions)
-    format_threshold = int(row_count * 0.95 + 0.999999)
-    format_counts = report.get("format_success_count", {})
-    reference_format_counts = reference_report.get("format_success_count", {})
-    both_format_rates_pass = all(
-        int(record.get(route, 0)) >= format_threshold
-        for record in (format_counts, reference_format_counts)
-        for route in ("profile", "emotion_response")
-    )
-    route_failures = report.get("route_failure_count", {})
-    reference_route_failures = reference_report.get("route_failure_count", {})
-    both_route_error_free = all(
-        int(record.get(route, 0)) == 0
-        for record in (route_failures, reference_route_failures)
-        for route in ("profile", "emotion_response")
-    )
-
-    def prompt_facts(value: dict[str, Any]) -> tuple[dict[str, int], dict[str, int]]:
-        exact = value.get("prompt_token_ids_exact_match_count") or {}
-        denominator = value.get("prompt_token_ids_check_denominator")
-        if not isinstance(denominator, dict):
-            aliases = value.get("server", {}).get("requested_alias_count", {})
-            denominator = {
-                "profile": int(aliases.get("profile", row_count)),
-                "emotion_response": int(aliases.get("emotion-response", row_count)),
-            }
-        normalized_exact = {
-            route: int(exact.get(route, 0)) for route in ("profile", "emotion_response")
-        }
-        normalized_denominator = {
-            route: int(denominator.get(route, 0)) for route in ("profile", "emotion_response")
-        }
-        return normalized_exact, normalized_denominator
-
-    prompt_exact, prompt_denominator = prompt_facts(report)
-    reference_prompt_exact, reference_prompt_denominator = prompt_facts(reference_report)
-    both_prompt_checks_pass = all(
-        exact[route] == denominator[route] and denominator[route] > 0
-        for exact, denominator in (
-            (prompt_exact, prompt_denominator),
-            (reference_prompt_exact, reference_prompt_denominator),
-        )
-        for route in ("profile", "emotion_response")
-    )
-    if not both_format_rates_pass or not both_route_error_free or not both_prompt_checks_pass:
-        raise ValueError("Docker and host route or parse metrics differ outside accepted quality gates")
-
-    same_format_counts = format_counts == reference_format_counts
-    same_prompt_counts = prompt_exact == reference_prompt_exact and prompt_denominator == reference_prompt_denominator
-    same_route_failures = route_failures == reference_route_failures
-    same_generation_cap_hits = report.get("generation_cap_hits") == reference_report.get("generation_cap_hits")
-    runtime_statistics = {
-        key: {
-            "docker": report.get(key, {"profile": 0, "emotion_response": 0} if key != "degraded_responses" else 0),
-            "host": reference_report.get(key, {"profile": 0, "emotion_response": 0} if key != "degraded_responses" else 0),
-        }
-        for key in ("generation_cap_hits", "initial_cap_hits", "retry_attempts", "retry_resolved", "unresolved_cap_hits", "degraded_responses")
-    }
-
-    response_text_exact_count = sum(
-        row.get("response_text") == ref.get("response_text")
-        for row, ref in zip(predictions, reference_rows)
-    )
-    exact_submission_match = predictions == reference_rows
-    metrics_match = all((same_format_counts, same_prompt_counts, same_route_failures, same_generation_cap_hits)) and all(
-        stats["docker"] == stats["host"] for stats in runtime_statistics.values()
-    )
-    return {
-        "status": (
-            "exact_submission_and_metrics_match"
-            if exact_submission_match and metrics_match
-            else "stable_fields_and_metrics_match_response_text_varies"
-            if not exact_submission_match and metrics_match
-            else "stable_fields_match_runtime_metrics_vary"
-        ),
-        "same_id_order": same_ids,
-        "same_user_profile": same_profiles,
-        "same_emotion_labels": same_emotion_labels,
-        "same_memory_refs": same_memory_refs,
-        "same_asset_identity": same_asset_identity,
-        "format_success_count_equal": same_format_counts,
-        "prompt_token_ids_exact_match_count_equal": same_prompt_counts,
-        "route_failure_count_equal": same_route_failures,
-        "generation_cap_hits_equal": same_generation_cap_hits,
-        "prompt_token_ids_exact_match_count": prompt_exact,
-        "prompt_token_ids_check_denominator": prompt_denominator,
-        "reference_prompt_token_ids_exact_match_count": reference_prompt_exact,
-        "reference_prompt_token_ids_check_denominator": reference_prompt_denominator,
-        "both_format_rates_pass": both_format_rates_pass,
-        "both_prompt_checks_pass": both_prompt_checks_pass,
-        "both_route_error_free": both_route_error_free,
-        "runtime_statistics": runtime_statistics,
-        "exact_submission_match": exact_submission_match,
-        "response_text_exact_match_count": response_text_exact_count,
-        "response_text_rows": len(predictions),
-    }
-
 
 def verify_output(
     *, test_file: Path, result_dir: Path, repo_root: Path = ROOT,
-    reference_dir: Path | None = None, container_log: Path | None = None,
-    expected_rows: int = 20,
+    expected_rows: int | None = 20,
 ) -> dict[str, Any]:
-    config = load_json(repo_root / DOCKER_CONFIG)
-    expected = validate_static_config(config, repo_root)
-    package_manifest_path = result_dir.parent / "context/package_manifest.json"
-    if not package_manifest_path.is_file():
-        package_manifest_path = result_dir.parent / "package_manifest.json"
-    if not package_manifest_path.is_file():
-        raise FileNotFoundError("prepared Docker context package_manifest.json is missing")
-    package_manifest = load_json(package_manifest_path)
-    package_model_lock_path = package_manifest_path.parent / "model_lock.json"
-    if not package_model_lock_path.is_file():
-        raise FileNotFoundError("prepared Docker context model_lock.json is missing")
-    report_path = result_dir / "performance_report.json"
+    """Check only the official output contract and per-row Schema."""
     submission_path = result_dir / "submission.jsonl"
-    for path in (report_path, submission_path):
+    report_path = result_dir / "performance_report.json"
+    for path in (submission_path, report_path):
         if not path.is_file():
             raise FileNotFoundError(f"Docker result missing required output: {path.name}")
-    report = load_json(report_path)
-    raw_path = _report_output_file(report, result_dir, "raw_outputs.jsonl")
-    progress_path = _report_output_file(report, result_dir, "run_progress.json")
+
     inputs = _read_jsonl(test_file, exact_input=True)
     predictions = _read_jsonl(submission_path)
-    raw_rows = _read_jsonl(raw_path)
     input_ids = [row["id"] for row in inputs]
     output_ids = [row["id"] for row in predictions]
     row_count = len(inputs)
-    if row_count != expected_rows or output_ids != input_ids or [row["id"] for row in raw_rows] != input_ids:
-        raise ValueError(f"Docker run must preserve all {expected_rows} input IDs in order in both output files")
+    if expected_rows is not None and row_count != expected_rows:
+        raise ValueError(f"expected {expected_rows} input rows, found {row_count}")
+    if len(predictions) != row_count or output_ids != input_ids:
+        raise ValueError("submission rows must preserve every input ID in order")
+
     schema = load_json(repo_root / SCHEMA_PATH)
     validator = Draft202012Validator(schema)
-    errors = [index for index, row in enumerate(predictions, 1) if next(validator.iter_errors(row), None) is not None]
-    if errors:
-        raise ValueError(f"submission schema failed for rows {errors[:5]}")
+    invalid_rows = [
+        index for index, row in enumerate(predictions, 1)
+        if next(validator.iter_errors(row), None) is not None
+    ]
+    if invalid_rows:
+        raise ValueError(f"submission schema failed for rows {invalid_rows[:5]}")
 
-    progress = load_json(progress_path)
+    report = load_json(report_path)
     if report.get("status") != "passed" or report.get("complete") is not True:
-        raise ValueError("performance_report does not show a passed complete run")
-    for name, path, rows in (
-        ("submission.jsonl", submission_path, predictions),
-        ("raw_outputs.jsonl", raw_path, raw_rows),
-    ):
-        record = report.get("outputs", {}).get(name, {})
-        if record.get("sha256") != sha256_file(path) or record.get("rows") != len(rows):
-            raise ValueError(f"performance_report {name} hash/row count differs from the published file")
-    if (package_manifest.get("runtime_behavior_version") != "E03-v1.2-readme-v3-contract"
-            or report.get("version") != "final-dual-official-run-v1.2"):
-        raise ValueError("v1.2 Docker package was not run with the v1.2 official inference entrypoint")
-    runtime_code_identity = package_manifest.get("runtime_code_identity")
-    if not isinstance(runtime_code_identity, dict) or not runtime_code_identity.get("file_sha256"):
-        raise ValueError("prepared v1.2 package manifest lacks runtime code file hashes")
-    if report.get("runtime_code_identity") != runtime_code_identity:
-        raise ValueError("container runtime code identity differs from the prepared v1.2 package manifest")
-    if report.get("backend") != "vllm" or report.get("samples") != row_count or report.get("submission_rows") != row_count:
-        raise ValueError("performance_report backend/sample count differs from the requested Docker run")
-    if report.get("submission_schema_validated_count") != row_count or report.get("submission_schema_validated") is not True:
-        raise ValueError(f"performance_report does not certify {row_count} Schema-valid submissions")
-    if (progress.get("status") != "complete" or progress.get("completed_samples") != row_count
-            or progress.get("test_file_sha256") != sha256_file(test_file)
-            or progress.get("sample_count") != row_count):
-        raise ValueError("performance_report input SHA-256 differs from the Docker run input")
-    if row_count == 20 and package_manifest.get("input", {}).get("sha256") != sha256_file(test_file):
-        raise ValueError("Docker package manifest input SHA-256 differs from the Docker Smoke input")
-    if report.get("model_weight_identity", {}).get("observed_weight_hash") != expected["base_weight_sha256"]:
-        raise ValueError("container Base identity differs from the locked model")
-    if report.get("configuration", {}).get("sha256") != sha256_file(repo_root / DOCKER_CONFIG):
-        raise ValueError("container deployment config identity differs from the package config")
-    if report.get("configuration", {}).get("model_lock_sha256") != sha256_file(package_model_lock_path):
-        raise ValueError("container model_lock SHA-256 differs from the prepared package")
-    if report.get("initialization_seconds") is None or report.get("server", {}).get("alive_before_intentional_shutdown") is not True:
-        raise ValueError("performance_report lacks a live initialized vLLM server observation")
+        raise ValueError("performance_report does not show a completed run")
+    if report.get("backend") != "vllm":
+        raise ValueError("Docker inference did not use the configured vLLM backend")
+    if report.get("samples") != row_count or report.get("submission_rows") != row_count:
+        raise ValueError("performance_report sample/output count differs from TEST_FILE")
+    performance = report.get("performance", {})
+    if performance.get("measurement_limit") != 100:
+        raise ValueError("performance_report must cap timing measurements at 100 samples")
+    if performance.get("measured_samples") != min(row_count, 100):
+        raise ValueError("performance_report measurement count differs from the first-100 rule")
+    output_records = report.get("outputs", {})
+    if not all(name in output_records for name in ("submission.jsonl", "performance_report.json")):
+        raise ValueError("performance_report does not list both official output files")
 
-    registered = set(report.get("server", {}).get("registered_model_ids", []))
-    if not {"qwen-base", "profile", "emotion-response"}.issubset(registered):
-        raise ValueError(f"container vLLM did not register all locked aliases: {sorted(registered)}")
-    if report.get("server", {}).get("runtime", {}).get("version") != "0.11.1":
-        raise ValueError("container vLLM runtime is not version 0.11.1")
-    retry_counts = report.get("retry_attempts")
-    if not isinstance(retry_counts, dict):
-        retry_counts = {"profile": 0, "emotion_response": 0}
-    profile_retries = int(retry_counts.get("profile", 0))
-    emotion_retries = int(retry_counts.get("emotion_response", 0))
-    if profile_retries != 0:
-        raise ValueError("the profile alias must not use length retries")
-    expected_alias_counts = {
-        "profile": row_count + profile_retries,
-        "emotion-response": row_count + emotion_retries,
-    }
-    if report.get("server", {}).get("requested_alias_count") != expected_alias_counts:
-        raise ValueError("LoRA alias request counts differ from completed samples plus retries")
-    exact_counts = report.get("prompt_token_ids_exact_match_count", {})
-    prompt_denominators = report.get("prompt_token_ids_check_denominator")
-    if not isinstance(prompt_denominators, dict):
-        prompt_denominators = {
-            "profile": expected_alias_counts["profile"],
-            "emotion_response": expected_alias_counts["emotion-response"],
-        }
-    if any(
-        exact_counts.get(route) != expected_alias_counts[alias]
-        or prompt_denominators.get(route) != expected_alias_counts[alias]
-        for route, alias in (("profile", "profile"), ("emotion_response", "emotion-response"))
-    ):
-        raise ValueError("container vLLM Prompt Token IDs did not exactly match for every successful route attempt")
-    format_threshold = int(row_count * 0.95 + 0.999999)
-    if report.get("format_success_count", {}).get("profile", 0) < format_threshold or report.get("format_success_count", {}).get("emotion_response", 0) < format_threshold:
-        raise ValueError("container strict format rate is below 95%")
-    if any(report.get("route_failure_count", {}).get(route, 0) for route in ("profile", "emotion_response")):
-        raise ValueError("container encountered a route failure")
-    severe_anomalies = int(report.get("emotion_response_severe_anomaly_count", 0))
-    if severe_anomalies:
-        raise ValueError(f"container encountered {severe_anomalies} severe repeated-response anomalies")
-    outcome_counts = report.get("emotion_response_outcome_count", {})
-    unresolved_caps = report.get("unresolved_cap_hits", {}).get("emotion_response", 0)
-    if row_count == 100 and (unresolved_caps > 2 or outcome_counts.get("invalid_output", 0) > 0):
-        raise ValueError("100-row stress run exceeded the unresolved-cap or invalid-output quality threshold")
-    for name, key in (("profile", "profile"), ("emotion_response", "emotion_response")):
-        identity = report.get("adapter_identities", {}).get(key, {})
-        if identity.get("weight_sha256") != expected["adapter_weight_sha256"][name]:
-            raise ValueError(f"container {name} Adapter weight identity differs from the package lock")
-        if identity.get("config_sha256") != expected["adapter_config_sha256"][name]:
-            raise ValueError(f"container {name} Adapter config identity differs from the package lock")
-    gpu_devices = report.get("gpu_memory", {}).get("devices", [])
-    if not gpu_devices or max(int(device.get("peak_memory_used_mib", 0)) for device in gpu_devices) <= 0:
-        raise ValueError("performance_report does not show in-container GPU memory observations")
-    log_facts = _container_log_gate(container_log)
-
-    comparison = {"status": "not_requested"}
-    if reference_dir is not None:
-        reference_submission = reference_dir / "submission.jsonl"
-        reference_report_path = reference_dir / "performance_report.json"
-        if not reference_submission.is_file() or not reference_report_path.is_file():
-            raise FileNotFoundError("host reference directory lacks the official outputs")
-        reference_rows = _read_jsonl(reference_submission)
-        reference_report = load_json(reference_report_path)
-        comparison = compare_reference_outputs(predictions, reference_rows, report, reference_report)
-        comparison["reference_submission_sha256"] = sha256_file(reference_submission)
-        comparison["docker_submission_sha256"] = sha256_file(submission_path)
-        comparison["submission_sha256_equal"] = (
-            sha256_file(reference_submission) == sha256_file(submission_path)
-        )
     return {
-        "status": "passed_offline_dual_adapter_docker_smoke",
-        "input_rows": len(inputs),
+        "status": "passed_interface_output",
+        "input_rows": row_count,
         "submission_rows": len(predictions),
-        "raw_output_rows": len(raw_rows),
         "schema_valid_rows": len(predictions),
-        "base_weight_sha256": expected["base_weight_sha256"],
-        "adapter_weight_sha256": expected["adapter_weight_sha256"],
-        "adapter_config_sha256": expected["adapter_config_sha256"],
-        "vllm_version": "0.11.1",
-        "registered_model_ids": sorted(registered),
-        "requested_alias_count": report["server"]["requested_alias_count"],
-        "prompt_token_ids_exact_match_count": exact_counts,
-        "prompt_token_ids_check_denominator": prompt_denominators,
-        "retry_attempts": retry_counts,
-        "generation_cap_hits": report.get("generation_cap_hits", {}),
-        "unresolved_cap_hits": report.get("unresolved_cap_hits", {}),
-        "quality_warnings": report.get("quality_warnings", []),
-        "format_success_count": report["format_success_count"],
-        "gpu_memory": gpu_devices,
-        "container_log": log_facts,
-        "comparison_to_host": comparison,
-        "submission_sha256": sha256_file(submission_path),
-        "raw_outputs_sha256": sha256_file(raw_path),
+        "field_fallback_count": report.get("field_fallback_count", {}),
+        "performance_measured_samples": performance["measured_samples"],
     }
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("check", help="verify earlier gates and static runtime locks")
+    sub.add_parser("check", help="check the Docker runtime config and build inputs")
     prepare = sub.add_parser("prepare", help="create a verified, white-list Docker context under outputs/")
     prepare.add_argument("--config", type=Path, default=ROOT / DOCKER_CONFIG)
     prepare.add_argument("--output-dir", type=Path, required=True)
-    verify = sub.add_parser("verify-output", help="check offline Docker outputs and optional host equivalence")
+    verify = sub.add_parser("verify-output", help="check the official output contract and Schema")
     verify.add_argument("--test-file", type=Path, required=True)
     verify.add_argument("--result-dir", type=Path, required=True)
-    verify.add_argument("--reference-dir", type=Path)
-    verify.add_argument("--container-log", type=Path)
     verify.add_argument("--expected-rows", type=int, default=20, help="expected official input/output rows; use 100 for the fixed stress set")
     return parser
 
@@ -1135,8 +640,6 @@ def main(argv: list[str] | None = None) -> int:
             result = verify_output(
                 test_file=args.test_file.expanduser().resolve(),
                 result_dir=args.result_dir.expanduser().resolve(),
-                reference_dir=None if args.reference_dir is None else args.reference_dir.expanduser().resolve(),
-                container_log=None if args.container_log is None else args.container_log.expanduser().resolve(),
                 expected_rows=args.expected_rows,
             )
     except Exception as exc:

@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 
 final_dual_parse_entrypoint_args() {
+  ENTRYPOINT_IDLE=false
+  if [[ "$#" -eq 0 ]]; then
+    ENTRYPOINT_IDLE=true
+    return 0
+  fi
   local first_arg="${1:-}"
   case "$#:$first_arg" in
     2:*)

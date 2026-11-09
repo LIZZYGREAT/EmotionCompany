@@ -42,7 +42,6 @@ RUN /opt/conda/bin/conda create --yes --name conda_env --file /tmp/conda-linux-6
 WORKDIR /root
 COPY participant/start.sh /root/participant/start.sh
 COPY participant/final_dual_inference.py /root/participant/final_dual_inference.py
-COPY participant/run_inference.py /root/participant/run_inference.py
 COPY participant/templates/submission_schema.json /root/participant/templates/submission_schema.json
 COPY participant/model /root/participant/model
 COPY participant/adapters /root/participant/adapters
@@ -59,18 +58,18 @@ COPY src/inference/__init__.py /root/src/inference/__init__.py
 COPY src/inference/final_dual_protocol.py /root/src/inference/final_dual_protocol.py
 COPY src/inference/final_dual_runtime.py /root/src/inference/final_dual_runtime.py
 COPY src/inference/final_dual_vllm.py /root/src/inference/final_dual_vllm.py
-COPY scripts/e02_vllm_probe.py /root/scripts/e02_vllm_probe.py
 COPY package_manifest.json /root/package_manifest.json
 COPY docker/final_dual/entrypoint.sh /usr/local/bin/emotionalcompany-final-dual-entrypoint
 COPY docker/final_dual/entrypoint_args.sh /usr/local/bin/entrypoint_args.sh
 
 RUN chmod 0755 /usr/local/bin/emotionalcompany-final-dual-entrypoint \
+    && chmod 0644 /root/participant/start.sh \
     && test -x /opt/conda/envs/conda_env/bin/vllm \
     && test -f /root/participant/model/config.json \
     && test -f /root/participant/adapters/profile/adapter_config.json \
     && test -f /root/participant/adapters/emotion-response/adapter_config.json \
-    && test -f /root/model_lock.json \
-    && test -f /root/package_manifest.json
+    && test -f /root/participant/adapters/profile/adapter_model.safetensors \
+    && test -f /root/participant/adapters/emotion-response/adapter_model.safetensors
 
 # vLLM compiles a small number of Triton/PyTorch Inductor kernels on first use.
 RUN apt-get update \

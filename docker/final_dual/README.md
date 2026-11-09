@@ -1,57 +1,68 @@
 # E03 final dual-Adapter Docker delivery
 
-This package contains the validated Qwen3-1.7B Base, A8-P4504 profile LoRA,
-E03-B Replay-1152 emotion-response LoRA, locked Prompts, and the official
-two-argument `participant/start.sh` entrypoint. Runtime inference is offline;
-vLLM binds to container loopback and the container does not use a host model
-cache or Python environment.
+This image contains the Qwen3-1.7B Base, A8-P4504 profile LoRA,
+E03-B Replay-1152 emotion-response LoRA, the four required Prompts, and the
+official two-argument `participant/start.sh` entrypoint. Inference runs offline
+with one local vLLM service and serial requests to `profile` and
+`emotion-response`.
 
-The build pins both the CUDA runtime and conda-forge Miniforge 26.1.0-0 by
-digest. It copies only `/opt/conda` from the Miniforge stage, then creates the
-runtime environment from the E02 explicit Conda lock and pinned pip lock.
+The build pins the CUDA runtime and Miniforge images by digest, then creates the
+fixed `conda_env` from the repository's Linux package locks. Model locks and
+package manifests are packaging records; the official inference path does not
+require their hashes, Git metadata, or a GPU diagnostic command.
 
-Build context and model files belong under ignored `outputs/`. The package
-script checks the previous Transformers, vLLM, and official-entry gates before
-copying any weights. It verifies Base, Tokenizer, Prompt, and both Adapter
-identities, writes a container-relative model lock, and excludes datasets,
-training checkpoints, caches, and Git metadata.
-
-From the repository root:
+From the repository root, create the package context and image:
 
 ```bash
 python3 scripts/final_dual_docker_package.py check
 python3 scripts/final_dual_docker_package.py prepare \
   --config configs/deployment/final_dual_docker.json \
-  --output-dir outputs/final_delivery/E03-DUAL-20261108-02/docker/context
+  --output-dir outputs/final_delivery/E03-DUAL-20261109-04/docker/context
 
 docker build --progress=plain \
   -f docker/final_dual/Dockerfile \
-  -t emotionalcompany/final-dual:E03-DUAL-20261108-02 \
-  outputs/final_delivery/E03-DUAL-20261108-02/docker/context
-
-docker run --rm --gpus all --network none --shm-size 1g \
-  -v "$PWD/outputs/final_delivery/E03-DUAL-20261108-02/transformers_smoke20/input/smoke20_input.jsonl:/input/smoke.jsonl:ro" \
-  -v "$PWD/outputs/final_delivery/E03-DUAL-20261108-02/docker/smoke:/output:rw" \
-  emotionalcompany/final-dual:E03-DUAL-20261108-02 \
-  /input/smoke.jsonl /output
-
-python3 scripts/final_dual_docker_package.py verify-output \
-  --test-file outputs/final_delivery/E03-DUAL-20261108-02/transformers_smoke20/input/smoke20_input.jsonl \
-  --result-dir outputs/final_delivery/E03-DUAL-20261108-02/docker/smoke \
-  --reference-dir outputs/evaluation/final_dual/E03-DUAL-20261108-02-official-start-vllm20
+  -t emotionalcompany/final-dual:E03-DUAL-20261109-04 \
+  outputs/final_delivery/E03-DUAL-20261109-04/docker/context
 ```
 
-The container receives no network (`--network none`). A successful run must
-load one Base and both named LoRAs, return exact server Prompt Token IDs on
-both routes, produce 20 schema-valid rows, and match the host vLLM's stable
-submission fields and route metrics with zero route failures or generation-cap
-hits. The verifier records exact
-`response_text` equality as a diagnostic because vLLM's online serving API
-does not guarantee reproducible text across runs, even for the same input and
-sampling settings ([vLLM reproducibility notes](https://docs.vllm.ai/en/v0.11.2/usage/reproducibility/)).
-The verifier also checks the container log for OOM and crash markers.
+The official command inside the container is:
 
-After the first verified smoke, inspect the image virtual size, save it under
-the same ignored run directory, hash the tar, remove the just-built local tag,
-load from that tar, and repeat the offline GPU smoke. The package script
-refuses to overwrite an existing context, image archive, or result run.
+```bash
+bash /root/participant/start.sh TEST_FILE RESULT_DIR
+```
+
+The image entrypoint also supports the following forms:
+
+```bash
+docker run --rm --gpus all --network none IMAGE TEST_FILE RESULT_DIR
+docker run --rm --gpus all --network none IMAGE bash /root/participant/start.sh TEST_FILE RESULT_DIR
+docker run --rm --gpus all --network none IMAGE /root/participant/start.sh TEST_FILE RESULT_DIR
+docker run --rm --gpus all --network none --entrypoint /bin/bash IMAGE /root/participant/start.sh TEST_FILE RESULT_DIR
+```
+
+To keep a container available for a later `docker exec`, mount the input and
+result locations when creating it. With no command arguments the image idles
+without starting vLLM or using the GPU:
+
+```bash
+docker run -d --gpus all --network none --name final-dual-idle \
+  -v /host/input:/input:ro -v /host/result:/result:rw IMAGE
+docker exec final-dual-idle bash /root/participant/start.sh /input/test.jsonl /result
+docker rm -f final-dual-idle
+```
+
+Each completed run writes only `submission.jsonl` and
+`performance_report.json` in `RESULT_DIR`. Existing files with those names are
+replaced; other files are preserved. All inputs are processed, while timing is
+limited to the first 100 samples. The output verifier checks row count, ID
+order, completion, and the official submission Schema; it does not compare
+generated text or quality metrics across runs.
+
+Example output-contract check:
+
+```bash
+python3 scripts/final_dual_docker_package.py verify-output \
+  --test-file outputs/final_delivery/E03-DUAL-20261109-04/input/smoke.jsonl \
+  --result-dir outputs/final_delivery/E03-DUAL-20261109-04/docker/smoke \
+  --expected-rows 3
+```
