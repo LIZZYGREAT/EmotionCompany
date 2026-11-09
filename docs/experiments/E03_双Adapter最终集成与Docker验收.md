@@ -1,8 +1,8 @@
 # E03 双 Adapter 最终集成、vLLM 与 Docker 验收
 
-执行日期：2026-11-08；任务分支：`feat/final-dual-adapter-delivery`。
+执行日期：2026-11-08 至 2026-11-09；任务分支：`feat/final-dual-adapter-delivery`。
 
-当前结论：**阶段 A Transformers、阶段 B vLLM 双 LoRA、阶段 C 官方入口验收通过。Docker v1.0 的回导 Smoke 曾因长度上限失败，该历史保留；v1.1 已完成单次 Build/Save、归档校验、回导身份核验及回导后独立 20 条 GPU Smoke。用户审阅并接受下文记录的 100 条稳定字段差异，阶段 D 状态为 `passed_with_user_accepted_variance`，当前交付状态为 `ready_for_local_submission_review`。完整 Val、官方评分和正式提交未运行。**
+当前结论：**阶段 A Transformers、阶段 B vLLM 双 LoRA、阶段 C 官方入口均通过。v1.1 的 100 条稳定字段差异经用户审阅接受，保留历史记录；其后发现仓库 `participant/README.md` 已为 v3，故按 v3 回退说明补齐解析器并重建最终镜像 `E03-DUAL-20261109-03`。新镜像 Save/Load、四种入口形式的 20 条离线 GPU Smoke、100 条离线压力运行均通过；本地交付状态为 `ready_for_local_submission_review`。完整 Val、官方评分和正式提交未运行。**
 
 ## 阶段状态
 
@@ -11,7 +11,8 @@
 | A. 资产锁定、Transformers 双 Adapter Smoke | `passed` | Base、Tokenizer、Prompt、LoRA 配置与候选文件身份均核验；20 条双路生成、Schema 和两 Adapter 切换等价性通过。 |
 | B. vLLM 0.11.1 双 LoRA Smoke | `passed` | 单服务先跑 10 条、通过后跑同一冻结集 20 条；双别名、Token IDs、格式、Schema、显存及延迟门禁通过。 |
 | C. 官方 `start.sh` 双路入口 | `passed` | 保持两个位置参数；显式选用 vLLM 后真实入口完成 20 条双路生成，两个官方输出文件及报告均验证。 |
-| D. Docker 离线 GPU Smoke、镜像导出/回导 | `passed_with_user_accepted_variance` | v1.1 单次构建、保存、SHA-256、回导、身份核验和回导后 20 条 GPU Smoke 通过；100 条宿主对照中的稳定字段差异经用户审阅并接受，详见下文。 |
+| D. Docker v1.1 离线 GPU Smoke、镜像导出/回导 | `passed_with_user_accepted_variance`（历史） | 100 条宿主对照中的稳定字段差异经用户审阅并接受；随后按 README v3 复核并以新镜像替代，历史证据保留。 |
+| E. README v3 契约修订与最终 Docker | `passed` | 官方回退逻辑、预存结果目录和入口兼容性通过回归；Run 03 宿主 20×3/100 条与 Docker 20×4/100 条通过；新镜像已 Save/Load 并核对身份。详见本文末节。 |
 | 官方评分、完整 Val、提交 | `not_run` | Smoke 不读取 Gold、不计算质量分数，不代表赛事提交就绪。 |
 
 ## 冻结资产与身份
@@ -196,3 +197,39 @@ Gate 0 相关回归为 96 项通过，仓库 `unit-cpu` 集合为 312 项通过�
 新镜像回导和 Smoke 通过后，删除了旧 v1 tag `E03-DUAL-20261108-02`、对应旧 `image.tar`，以及该交付过程生成的三份旧 Build Context 和一份 v1.1 临时 Build Context。旧 Image ID、旧 tar SHA、文件清单、代码/环境身份及验收报告保留在 `disk_preflight.json` 和旧 tar SHA sidecar 中。未删除原始 Base/Adapter，未运行全局 Docker prune。Docker 项目 tag 目前只保留 v1.1 正式镜像；最终 tar 只保留一份。
 
 清理后 E 盘可用 `42.09 GiB`，Docker Desktop VHDX 为 `81.54 GiB`，工作区可用 `867.55 GiB`；Docker Build Cache 为 `36.79 GB`，未执行缓存清理。清理后的 Docker 镜像列表、`docker system df -v`、Inspect 与空间记录分别在 `image-list-after-cleanup.txt`、`system-df-after-cleanup.txt`、`image-inspect-final.json` 和 `disk_preflight.json`。最终状态：**`ready_for_local_submission_review`**。正式提交入口/输出协议仍按阶段 C 验证；完整 Val、官方评分和赛事提交仍为 `not_run`。
+
+## 2026-11-09：README v3 契约复核与最终 Docker Run 03
+
+### 文档基准与实现对照
+
+复核清单以“官方 README v2”为标题，但仓库当前的 [`participant/README.md`](../../participant/README.md) 实际标题为 v3。本次以仓库 v3 中“唯一运行命令”和结果回退规则为准，保留 v1.1 章节作为历史证据。
+
+| README v3 要求 | Run 03 结果 |
+|---|---|
+| 唯一入口为 `bash /root/participant/start.sh TEST_FILE RESULT_DIR`，固定激活 `conda_env`，接收两个位置参数 | 镜像默认入口支持两路径、完整 `bash start.sh`、直接 start.sh 路径；显式 `/bin/bash` 覆盖入口也用真实 `nvidia-smi` 检查后执行官方脚本。四种 20 条容器运行均完成并通过独立校验。镜像内运行环境为 Python 3.10.22、vLLM 0.11.1。 |
+| `RESULT_DIR` 可预先存在；覆盖本次 `submission.jsonl` 与 `performance_report.json`，保留其他文件 | Docker 20 条用例预置旧两文件和 `keep.txt`。新提交与报告均被替换；`keep.txt` SHA-256 仍为 `6b410b28024e74584695a51426a19df533d6d31f80caaf461d94f26824d8eceb`。 |
+| 完整输入均推理，性能只测前 100 条 | 宿主与 Docker 固定 100 条均生成 100 行且 100/100 通过提交 Schema；报告 `performance.measured_samples=100`、`measurement_limit=100`。CPU 回归还覆盖 100/500/1000 行的全量输出与前 100 条计时边界。 |
+| 字段错误时逐字段回退；无法解析 JSON object 时尝试提取 `response_text`，否则去掉思考标签/代码围栏后保留完整原文 | 原生 `emotion=…;response=…` 协议不变；修复缺分隔符时的 `response_text` JSON 字段恢复，并在无法单独恢复时保留清理后的完整文本。缺失或无效字段分别置空；无效 Profile 子项置空数组，`memory_refs` 为空数组。新增测试覆盖合法 JSON、损坏 JSON 提取、缺失字段及完整原文回退。 |
+| 输入 TEST_FILE 为 `.jsonl` | 本地冻结输入是 target-free 的 `{id, history}` 记录，未把 target/Gold 放入 Prompt。README v3 没有给出测试记录的字段 Schema；因此“额外顶层元数据是否会出现在隐藏 TEST_FILE 中”不能由这份 README 单独证明。当前实现继续严格要求 `id/history` 白名单，未据此猜测并放宽。 |
+
+相关实现和身份提交：`d453fbe` 补齐 v3 的 JSON/原文回退，`0698929` 更新 runtime contract 身份，`74ec40c` 分配不可复用的 Run 03 配置/模型锁。60 项协议、推理、入口及 Docker 打包回归通过；新增行为只影响异常输出后处理，没有重训或改动 Base、Adapter、Prompt、提交 Schema、官方数据或 D0.3 划分。
+
+### Run 03 宿主验证
+
+运行环境为本机 RTX 4060 Laptop（8188 MiB）、固定 `conda_env`、vLLM 0.11.1。README v3 对齐后的代码使用同一冻结 20 条输入独立冷启动三次，并用固定 100 条 target-free 输入跑一次。四份报告均为 `status=passed`、输入 ID 顺序完整、官方 Schema 全通过；双路 Prompt Token IDs 精确匹配数分别为 20/20、20/20、20/20、100/100，路由错误为 0。证据位于 `outputs/evaluation/final_dual/E03-DUAL-20261109-03-host-smoke20-cold-01b/`、`-cold-02/`、`-cold-03/` 与 `-host-stress100/`；对应模型锁 SHA-256 为 `a70cfd66db96e5777bea7d499f1447a19407aba43181e0a57b959d210bac676a`。
+
+### 最终镜像、回导与离线容器验证
+
+| 项 | Run 03 结果 |
+|---|---|
+| Tag / Image ID / 平台 | `emotionalcompany/final-dual:E03-DUAL-20261109-03` / `sha256:3b71277321d0a84cf5f477a164c37a73a7dc354feda1c4611058047e8ee7a3a9` / `linux/amd64` |
+| 镜像体积 / RootFS 层 | `31,955,950,145` bytes / 41 层；低于 50,000,000,000-byte 限制。镜像内六个运行时代码 SHA 与 `package_manifest.json` 和 container model lock 一致，behavior version 为 `E03-v1.2-readme-v3-contract`。 |
+| 最终 tar | `outputs/final_delivery/E03-DUAL-20261109-03/docker/image.tar`，`11,768,260,608` bytes，SHA-256 `2c2ab740a9f7a229e1196faa76b9d85ad5d3913594f3a3238747d4ebdfd9085b`；`sha256sum --check` 通过。 |
+| Save/Load | 从 daemon 保存后校验 tar SHA，再执行 `docker load`；回导 tag 和 Image ID 与构建结果一致。镜像构建、归档、回导摘要在忽略目录 `docker/image_build.json`。 |
+| 四种 20 条入口形式 | 默认 ENTRYPOINT + 两路径；默认 ENTRYPOINT + `bash /root/participant/start.sh …`；默认 ENTRYPOINT + `/root/participant/start.sh …`；显式 `/bin/bash` ENTRYPOINT（先实际运行 `nvidia-smi`，再执行官方入口）。四种均为 20/20 输出、Schema、双路格式和 Prompt Token IDs 精确匹配；无 route error、retry、cap、OOM 或 quality warning。 |
+| Docker 100 条压力运行 | `outputs/final_delivery/E03-DUAL-20261109-03/docker/stress100/`：输入、提交、Schema、双路格式和 Prompt Token IDs 均 100/100；Profile 与 Emotion/Response alias 各 100 次；route error、retry、cap、unresolved cap 和 quality warning 均为 0。GPU 峰值 `7756/8188 MiB`。 |
+| Docker Desktop 存储 | 实际 VHDX 位于 `E:\DockerData\DockerDesktopWSL\disk\docker_data.vhdx`；回导后 E 盘仍有 66 GiB 可用。用户压缩旧 VHDX 后，本次镜像构建期间空间充足。 |
+
+旧 tag `E03-DUAL-20261108-03` 的 11.77 GB tar 先经 SHA 校验后删除；README v3 复核发现后，临时 `E03-DUAL-20261109-01` 镜像、tar 与旧构建上下文也已移除。未运行 `docker system prune`，未删除任何 Base/Adapter 权重或原始候选。
+
+本地 README v3 运行契约与 Docker 验收状态为 **`passed`**。该结论不代表完整 Val、官方评分或正式提交；这些仍为 `not_run`。唯一未由 `participant/README.md` 证明的范围是隐藏 TEST_FILE 是否含额外顶层字段，需以主办方输入样例/Schema 核实。
