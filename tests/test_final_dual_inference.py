@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -193,6 +194,8 @@ def test_main_falls_back_per_field_continues_and_overwrites_only_official_output
     }
 
     report = json.loads((result_dir / "performance_report.json").read_text(encoding="utf-8"))
+    assert stat.S_IMODE((result_dir / "submission.jsonl").stat().st_mode) == 0o644
+    assert stat.S_IMODE((result_dir / "performance_report.json").stat().st_mode) == 0o644
     assert report["status"] == "passed"
     assert report["complete"] is True
     assert report["samples"] == report["submission_rows"] == 3

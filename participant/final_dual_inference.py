@@ -126,6 +126,7 @@ def load_runtime_assets(config: dict[str, Any]) -> tuple[Any, dict[str, str], di
 
 def _temporary_file(directory: Path, prefix: str, suffix: str = ".tmp") -> tuple[int, Path]:
     descriptor, name = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=directory)
+    os.fchmod(descriptor, 0o644)
     return descriptor, Path(name)
 
 
