@@ -192,7 +192,7 @@ def test_v1_1_runtime_code_identity_is_locked_and_mismatch_is_rejected(tmp_path:
     monkeypatch.setattr(final_dual, "_execution_git_head", lambda: "locked-head")
     config = {
         "runtime_behavior": {
-            "version": "E03-v1.2-readme-v2-contract",
+            "version": "E03-v1.2-readme-v3-contract",
             "max_emotion_response_retries": 1,
             "retry_only_on_finish_reason": "length",
         }

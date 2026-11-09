@@ -362,7 +362,7 @@ def _verify_runtime_code_identity(config: dict[str, Any], lock: dict[str, Any], 
     if runtime_behavior is None:
         return None
     if (
-        runtime_behavior.get("version") != "E03-v1.2-readme-v2-contract"
+        runtime_behavior.get("version") != "E03-v1.2-readme-v3-contract"
         or runtime_behavior.get("max_emotion_response_retries") != 1
         or runtime_behavior.get("retry_only_on_finish_reason") != "length"
     ):
@@ -1283,7 +1283,7 @@ def main() -> int:
     published_report_path = official_result_dir / "performance_report.json"
     report = {
         "version": "final-dual-official-run-v1.2",
-        "runtime_behavior_version": config.get("runtime_behavior", {}).get("version", "E03-v1.2-readme-v2-contract"),
+        "runtime_behavior_version": config.get("runtime_behavior", {}).get("version", "E03-v1.2-readme-v3-contract"),
         "status": "passed" if inference_success else "failed",
         "inference_success": inference_success,
         "diagnostic_quality_gate": diagnostic_quality_gate,
