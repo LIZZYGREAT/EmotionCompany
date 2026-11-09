@@ -1,6 +1,6 @@
 {
   "version": "E03-final-dual-docker-v1.2",
-  "run_id": "E03-DUAL-20261109-02",
+  "run_id": "E03-DUAL-20261109-03",
   "mode": "dual_adapter",
   "backend": "vllm",
   "model_id": "Qwen/Qwen3-1.7B",
