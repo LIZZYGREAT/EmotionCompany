@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+import src.data.e03_a8_sft as a8_sft
+import src.inference.final_dual_protocol as final_protocol
 from src.inference.final_dual_protocol import (
     PromptBuildError,
     assemble_submission,
@@ -79,6 +81,37 @@ def test_e03b_prompt_uses_p0_history_then_rechecks_final_prompt_cap() -> None:
     assert result["selected_start_index"] >= result["p0_selected_start_index"]
     assert result["messages"][-1]["content"] == "current user message"
     assert result["selected_message_ids"][-1] == 5
+
+
+def test_runtime_prompt_builders_skip_per_sample_hash_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unexpected_hash(*_args, **_kwargs):
+        raise AssertionError("official inference must not calculate identity hashes")
+
+    monkeypatch.setattr(final_protocol, "token_ids_sha256", unexpected_hash)
+    monkeypatch.setattr(final_protocol, "history_sha256", unexpected_hash)
+    monkeypatch.setattr(a8_sft, "canonical_sha256", unexpected_hash)
+    prompts = _prompts()
+
+    profile = build_profile_prompt(
+        _sample(),
+        WordTokenizer(),
+        selection_prompt=prompts["selection"],
+        profile_prompt=prompts["profile"],
+        profile_budget_prompt=prompts["profile_budget"],
+        prompt_cap=128,
+        include_diagnostics=False,
+    )
+    emotion = build_emotion_response_prompt(
+        _sample(),
+        WordTokenizer(),
+        selection_prompt=prompts["selection"],
+        emotion_response_prompt=prompts["emotion_response"],
+        prompt_cap=128,
+        include_diagnostics=False,
+    )
+
+    assert set(profile) == {"messages", "prompt_ids"}
+    assert set(emotion) == {"messages", "prompt_ids"}
 
 
 def test_prompt_floor_error_is_reported_without_slicing_current_user() -> None:

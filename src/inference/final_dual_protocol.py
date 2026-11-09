@@ -8,8 +8,6 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from jsonschema import Draft202012Validator
-
 from src.data.e03_a8_sft import PromptFloorExceeded, select_common_history
 from src.shared.e03_a8_protocol import A8ParseError, parse_specialist_output
 from src.shared.prompting import (
@@ -75,6 +73,7 @@ def build_profile_prompt(
     profile_prompt: str,
     profile_budget_prompt: str,
     prompt_cap: int = 1280,
+    include_diagnostics: bool = True,
 ) -> dict[str, Any]:
     """Apply P0/T1, then the trained A8 P/EP common-history budget."""
     sample_id = str(sample.get("id", "<missing-id>"))
@@ -99,6 +98,7 @@ def build_profile_prompt(
             tokenizer=tokenizer,
             initial_start_index=int(p0_selection["selected_start_index"]),
             prompt_cap=prompt_cap,
+            include_history_hash=include_diagnostics,
         )
     except PromptFloorExceeded as exc:
         raise PromptBuildError(
@@ -113,23 +113,27 @@ def build_profile_prompt(
     selected_history = list(common["selected_history"])
     if not ids or len(ids) > prompt_cap:
         raise PromptBuildError("a8_prompt_limit", f"{sample_id}: A8 P prompt violates the frozen token cap")
-    selected_turn_ids = [
-        message.get("turn_id", index)
-        for index, message in enumerate(selected_history)
-    ]
-    return {
+    result = {
         "messages": build_messages(selected_history, profile_prompt),
         "prompt_ids": ids,
-        "prompt_tokens": len(ids),
-        "prompt_token_ids_sha256": token_ids_sha256(ids),
-        "p0_selected_start_index": int(p0_selection["selected_start_index"]),
-        "selected_start_index": int(common["selected_start_index"]),
-        "selected_message_ids": selected_turn_ids,
-        "selected_history_sha256": common["selected_history_sha256"],
-        "extra_removed_messages": int(common["extra_removed_messages"]),
-        "p0_prompt_tokens": int(p0_selection["prompt_tokens"]),
-        "ep_budget_prompt_tokens": int(common["prompt_lengths"]["EP"]),
     }
+    if include_diagnostics:
+        selected_turn_ids = [
+            message.get("turn_id", index)
+            for index, message in enumerate(selected_history)
+        ]
+        result.update({
+            "prompt_tokens": len(ids),
+            "prompt_token_ids_sha256": token_ids_sha256(ids),
+            "p0_selected_start_index": int(p0_selection["selected_start_index"]),
+            "selected_start_index": int(common["selected_start_index"]),
+            "selected_message_ids": selected_turn_ids,
+            "selected_history_sha256": common["selected_history_sha256"],
+            "extra_removed_messages": int(common["extra_removed_messages"]),
+            "p0_prompt_tokens": int(p0_selection["prompt_tokens"]),
+            "ep_budget_prompt_tokens": int(common["prompt_lengths"]["EP"]),
+        })
+    return result
 
 
 def build_emotion_response_prompt(
@@ -139,6 +143,7 @@ def build_emotion_response_prompt(
     selection_prompt: str,
     emotion_response_prompt: str,
     prompt_cap: int = 1280,
+    include_diagnostics: bool = True,
 ) -> dict[str, Any]:
     """Apply P0/T1 first, then recheck the final E03-B prompt with complete turns."""
     sample_id = str(sample.get("id", "<missing-id>"))
@@ -173,23 +178,27 @@ def build_emotion_response_prompt(
     selected_history = list(final_selection["selected_history"])
     if not ids or len(ids) > prompt_cap:
         raise PromptBuildError("e03b_prompt_limit", f"{sample_id}: E03-B prompt violates the frozen token cap")
-    selected_turn_ids = [
-        message.get("turn_id", index)
-        for index, message in enumerate(selected_history)
-    ]
-    return {
+    result = {
         "messages": build_messages(selected_history, emotion_response_prompt),
         "prompt_ids": ids,
-        "prompt_tokens": len(ids),
-        "prompt_token_ids_sha256": token_ids_sha256(ids),
-        "p0_selected_start_index": int(p0_selection["selected_start_index"]),
-        "selected_start_index": int(p0_selection["selected_start_index"])
-        + int(final_selection["selected_start_index"]),
-        "selected_message_ids": selected_turn_ids,
-        "selected_history_sha256": history_sha256(selected_history),
-        "extra_removed_messages": int(final_selection["selected_start_index"]),
-        "p0_prompt_tokens": int(p0_selection["prompt_tokens"]),
     }
+    if include_diagnostics:
+        selected_turn_ids = [
+            message.get("turn_id", index)
+            for index, message in enumerate(selected_history)
+        ]
+        result.update({
+            "prompt_tokens": len(ids),
+            "prompt_token_ids_sha256": token_ids_sha256(ids),
+            "p0_selected_start_index": int(p0_selection["selected_start_index"]),
+            "selected_start_index": int(p0_selection["selected_start_index"])
+            + int(final_selection["selected_start_index"]),
+            "selected_message_ids": selected_turn_ids,
+            "selected_history_sha256": history_sha256(selected_history),
+            "extra_removed_messages": int(final_selection["selected_start_index"]),
+            "p0_prompt_tokens": int(p0_selection["prompt_tokens"]),
+        })
+    return result
 
 
 def parse_emotion_response_output(
@@ -318,6 +327,8 @@ def assemble_submission(
     profile_raw: str | None,
     emotion_response_raw: str | None,
     official_schema: Mapping[str, Any],
+    *,
+    validate_schema: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Keep valid fields from either route and enforce the official submission schema."""
     profile = {dimension: [] for dimension in PROFILE_DIMS}
@@ -352,7 +363,10 @@ def assemble_submission(
         "user_profile": profile,
         "memory_refs": [],
     }
-    Draft202012Validator(dict(official_schema)).validate(submission)
+    if validate_schema:
+        from jsonschema import Draft202012Validator
+
+        Draft202012Validator(dict(official_schema)).validate(submission)
     diagnostics = {
         "profile_parse_error": profile_error,
         "emotion_parse_error": emotion["emotion_error"],

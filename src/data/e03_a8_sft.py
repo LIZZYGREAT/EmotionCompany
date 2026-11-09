@@ -45,6 +45,7 @@ def select_common_history(
     tokenizer: Any,
     initial_start_index: int,
     prompt_cap: int,
+    include_history_hash: bool = True,
 ) -> dict[str, Any]:
     if not isinstance(initial_start_index, int) or isinstance(initial_start_index, bool):
         raise ValueError("initial_start_index must be an integer")
@@ -72,15 +73,16 @@ def select_common_history(
     selected = list(history[start:])
     if not selected or selected[-1].get("role") != "user":
         raise RuntimeError("common history selection lost the current user message")
-    fingerprint = canonical_sha256(selected)
-    return {
+    result = {
         "selected_start_index": start,
         "selected_history": selected,
-        "selected_history_sha256": fingerprint,
         "prompt_ids": prompt_ids,
         "prompt_lengths": {arm: len(ids) for arm, ids in prompt_ids.items()},
         "extra_removed_messages": start - initial_start_index,
     }
+    if include_history_hash:
+        result["selected_history_sha256"] = canonical_sha256(selected)
+    return result
 
 
 def build_a8_training_item(

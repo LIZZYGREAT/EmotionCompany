@@ -32,6 +32,14 @@ activate_project_conda_env
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 PROBE_SCRIPT="$WORKSPACE_ROOT/scripts/e02_vllm_probe.py"
+if [[ $# -ne 2 ]]; then
+  echo "用法: $0 TEST_FILE RESULT_DIR" >&2
+  exit 2
+fi
+
+TEST_FILE="$1"
+RESULT_DIR="$2"
+
 if [[ -n "${EVALUATION_INFERENCE_CONFIG:-}" && "$EVALUATION_INFERENCE_CONFIG" != /* ]]; then
   EVALUATION_INFERENCE_CONFIG="$WORKSPACE_ROOT/$EVALUATION_INFERENCE_CONFIG"
   export EVALUATION_INFERENCE_CONFIG
@@ -53,13 +61,32 @@ TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
 VLLM_ARGS=(--tensor-parallel-size "$TENSOR_PARALLEL_SIZE")
 VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-}"
 
-if [[ $# -ne 2 ]]; then
-  echo "用法: $0 TEST_FILE RESULT_DIR" >&2
-  exit 2
-fi
+command -v "$PYTHON_CMD" >/dev/null 2>&1 || {
+  echo "ERROR: 找不到 Python 命令: $PYTHON_CMD" >&2
+  exit 1
+}
 
-TEST_FILE="$1"
-RESULT_DIR="$2"
+CONFIG_META="$("$PYTHON_CMD" - "$CONFIG_FILE" <<'PY'
+import json
+import sys
+
+config = json.load(open(sys.argv[1], encoding="utf-8"))
+print(config.get("mode", ""), config.get("backend", "transformers"))
+PY
+)"
+read -r EARLY_MODE CONFIG_BACKEND <<< "$CONFIG_META"
+BACKEND="${EVALUATION_BACKEND:-$CONFIG_BACKEND}"
+if [[ "$EARLY_MODE" == "dual_adapter" ]]; then
+  case "$BACKEND" in
+    transformers|vllm) ;;
+    *) echo "ERROR: dual_adapter backend 必须为 transformers 或 vllm: $BACKEND" >&2; exit 1 ;;
+  esac
+  echo "后端: $BACKEND（dual_adapter 官方入口）"
+  export EVALUATION_BACKEND="$BACKEND"
+  export VLLM_BIN
+  export VLLM_START_TIMEOUT="$START_TIMEOUT"
+  exec "$PYTHON_CMD" "$SCRIPT_DIR/final_dual_inference.py" "$TEST_FILE" "$RESULT_DIR"
+fi
 
 [[ -f "$TEST_FILE" && "$TEST_FILE" == *.jsonl ]] || {
   echo "ERROR: TEST_FILE 必须是存在的 .jsonl 文件: $TEST_FILE" >&2
@@ -69,10 +96,6 @@ if [[ -e "$RESULT_DIR" && ! -d "$RESULT_DIR" ]]; then
   echo "ERROR: RESULT_DIR 已存在但不是目录: $RESULT_DIR" >&2
   exit 1
 fi
-command -v "$PYTHON_CMD" >/dev/null 2>&1 || {
-  echo "ERROR: 找不到 Python 命令: $PYTHON_CMD" >&2
-  exit 1
-}
 
 mapfile -d '' -t CONFIG_FACTS < <("$PYTHON_CMD" - "$CONFIG_FILE" <<'PY'
 import json
@@ -127,33 +150,6 @@ CONFIG_VLLM_GPU_MEMORY_UTILIZATION="${CONFIG_FACTS[15]:-}"
 BACKEND="${EVALUATION_BACKEND:-}"
 if [[ -z "$BACKEND" ]]; then
   BACKEND="$CONFIG_BACKEND"
-fi
-
-CONFIG_MODE="$($PYTHON_CMD - "$CONFIG_FILE" <<'PY'
-import json
-import sys
-
-config = json.load(open(sys.argv[1], encoding="utf-8"))
-print(config.get("mode", ""))
-PY
-)"
-
-if [[ "$CONFIG_MODE" == "dual_adapter" ]]; then
-  case "$BACKEND" in
-    transformers|vllm) ;;
-    *) echo "ERROR: dual_adapter backend 必须为 transformers 或 vllm: $BACKEND" >&2; exit 1 ;;
-  esac
-  if [[ "$BACKEND" == "vllm" ]]; then
-    command -v "$VLLM_BIN" >/dev/null 2>&1 || {
-      echo "ERROR: 找不到 vLLM 命令: $VLLM_BIN" >&2
-      exit 1
-    }
-  fi
-  echo "后端: $BACKEND（dual_adapter 官方入口）"
-  export EVALUATION_BACKEND="$BACKEND"
-  export VLLM_BIN
-  export VLLM_START_TIMEOUT="$START_TIMEOUT"
-  exec "$PYTHON_CMD" "$SCRIPT_DIR/final_dual_inference.py" "$TEST_FILE" "$RESULT_DIR"
 fi
 
 if [[ "$BACKEND" == "transformers" ]]; then
