@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -194,7 +195,7 @@ def build_emotion_response_prompt(
 def parse_emotion_response_output(
     raw_text: str, official_schema: Mapping[str, Any]
 ) -> dict[str, Any]:
-    """Parse the frozen ER form, with a conservative text-only fallback."""
+    """Parse the frozen ER form and apply the documented field-level fallback."""
     empty = {
         "emotion_label": "",
         "response_text": "",
@@ -228,6 +229,65 @@ def parse_emotion_response_output(
     cleaned = re.sub(r"(?m)^\s*```[^\n]*\s*$", "", cleaned).strip()
 
     parsed = dict(empty)
+    specialist_schema = _specialist_schema(official_schema)
+    allowed = set(specialist_schema.get("$defs", {}).get("emotion", {}).get("enum", []))
+
+    json_object: Mapping[str, Any] | None = None
+    json_fallback_error: str | None = None
+    try:
+        decoded = json.loads(cleaned)
+    except json.JSONDecodeError:
+        decoded = None
+        if cleaned.lstrip().startswith("{"):
+            response_key = re.search(r'"response_text"\s*:', cleaned)
+            response_value = re.search(
+                r'"response_text"\s*:\s*("(?:\\.|[^"\\])*")',
+                cleaned,
+                flags=re.DOTALL,
+            )
+            if response_value is not None:
+                try:
+                    value = json.loads(response_value.group(1))
+                except json.JSONDecodeError:
+                    value = None
+                    json_fallback_error = "invalid_response_text"
+                else:
+                    json_fallback_error = None
+                json_object = {"response_text": value}
+            elif response_key is not None:
+                json_object = {}
+                json_fallback_error = "invalid_response_text"
+
+    if isinstance(decoded, dict):
+        json_object = decoded
+    if json_object is not None:
+        if json_fallback_error is None:
+            emotion_value = json_object.get("emotion_label")
+            if isinstance(emotion_value, str) and emotion_value in allowed:
+                parsed["emotion_label"] = emotion_value
+            elif emotion_value is None:
+                parsed["emotion_error"] = "missing_emotion_label"
+            else:
+                parsed["emotion_error"] = "invalid_emotion_label"
+
+        response_value = json_object.get("response_text")
+        if json_fallback_error is not None:
+            parsed["response_error"] = json_fallback_error
+        elif not isinstance(response_value, str):
+            parsed["response_error"] = (
+                "missing_response_text" if response_value is None else "invalid_response_text"
+            )
+        else:
+            response_value = re.sub(
+                r"</?think>", " ", response_value, flags=re.IGNORECASE
+            ).strip()
+            if response_value:
+                parsed["response_text"] = response_value
+            else:
+                parsed["response_error"] = "empty_response"
+        parsed["format_error"] = "json_fallback"
+        return parsed
+
     emotion_match = re.match(r"^\s*emotion\s*=\s*([a-z_]+)(?=$|[;\s])", cleaned, flags=re.IGNORECASE)
     if emotion_match is None:
         parsed["emotion_error"] = "invalid_emotion_prefix"
@@ -245,13 +305,7 @@ def parse_emotion_response_output(
             response_text = response_text[emotion_match.end():].lstrip(" ;:\t\r\n-—")
 
     response_text = re.sub(r"\s*</?think>\s*", " ", response_text, flags=re.IGNORECASE).strip()
-    instruction_only = re.match(
-        r"^(?:only\s+output|return\s+(?:valid\s+)?json|output\s+(?:format|json)|"
-        r"respond\s+with|use\s+the\s+following\s+format|format\s*:)",
-        response_text,
-        flags=re.IGNORECASE,
-    )
-    if response_text and not instruction_only:
+    if response_text:
         parsed["response_text"] = response_text
     else:
         parsed["response_error"] = "unrecoverable_response"

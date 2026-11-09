@@ -346,7 +346,7 @@ def verify_previous_gates(config: dict[str, Any], repo_root: Path = ROOT) -> dic
 def validate_static_config(config: dict[str, Any], repo_root: Path = ROOT) -> dict[str, Any]:
     source = load_json(repo_root / SOURCE_CONFIG)
     if config.get("version") != "E03-final-dual-docker-v1.2":
-        raise ValueError("Docker config must declare the v1.2 README v2 runtime contract")
+        raise ValueError("Docker config must declare the v1.2 README runtime contract")
     if config.get("mode") != "dual_adapter" or config.get("backend") != "vllm":
         raise ValueError("Docker deployment config must use mode=dual_adapter and backend=vllm")
     if config.get("model_id") != source.get("model_id") or config.get("model_revision") != source.get("model_revision"):
@@ -363,7 +363,7 @@ def validate_static_config(config: dict[str, Any], repo_root: Path = ROOT) -> di
         raise ValueError("Docker generation/context protocol differs from the tested deployment config")
     runtime_behavior = config.get("runtime_behavior", {})
     if runtime_behavior != {
-        "version": "E03-v1.2-readme-v2-contract",
+        "version": "E03-v1.2-readme-v3-contract",
         "max_emotion_response_retries": 1,
         "retry_only_on_finish_reason": "length",
     }:
@@ -664,7 +664,7 @@ def prepare_context(*, output_dir: Path, repo_root: Path = ROOT) -> dict[str, An
         code_hashes = _sha_code_files(temporary_dir)
         manifest = {
             "schema_version": "final_dual_docker_package_v1.2",
-            "runtime_behavior_version": "E03-v1.2-readme-v2-contract",
+            "runtime_behavior_version": "E03-v1.2-readme-v3-contract",
             "status": "prepared_for_image_build",
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
             "source_commit": _git_head(repo_root),
@@ -981,7 +981,7 @@ def verify_output(
         record = report.get("outputs", {}).get(name, {})
         if record.get("sha256") != sha256_file(path) or record.get("rows") != len(rows):
             raise ValueError(f"performance_report {name} hash/row count differs from the published file")
-    if (package_manifest.get("runtime_behavior_version") != "E03-v1.2-readme-v2-contract"
+    if (package_manifest.get("runtime_behavior_version") != "E03-v1.2-readme-v3-contract"
             or report.get("version") != "final-dual-official-run-v1.2"):
         raise ValueError("v1.2 Docker package was not run with the v1.2 official inference entrypoint")
     runtime_code_identity = package_manifest.get("runtime_code_identity")

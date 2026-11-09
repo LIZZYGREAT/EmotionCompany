@@ -1,6 +1,6 @@
 {
   "version": "E03-final-dual-docker-v1.2",
-  "run_id": "E03-DUAL-20261109-01",
+  "run_id": "E03-DUAL-20261109-02",
   "mode": "dual_adapter",
   "backend": "vllm",
   "model_id": "Qwen/Qwen3-1.7B",
@@ -64,7 +64,7 @@
     "serving_context_limit": 2560
   },
   "runtime_behavior": {
-    "version": "E03-v1.2-readme-v2-contract",
+    "version": "E03-v1.2-readme-v3-contract",
     "max_emotion_response_retries": 1,
     "retry_only_on_finish_reason": "length"
   },

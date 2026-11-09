@@ -265,7 +265,7 @@ def test_verify_output_accepts_one_retry_and_one_resolved_cap(tmp_path: Path, mo
         "unresolved_cap_hits": {"profile": 0, "emotion_response": 0},
         "emotion_response_severe_anomaly_count": 0,
         "runtime_code_identity": {
-            "version": "E03-v1.2-readme-v2-contract",
+            "version": "E03-v1.2-readme-v3-contract",
             "git_head": "fake-head",
             "file_sha256": {"participant/final_dual_inference.py": "code-sha"},
         },
@@ -295,7 +295,7 @@ def test_verify_output_accepts_one_retry_and_one_resolved_cap(tmp_path: Path, mo
         "test_file_sha256": package.sha256_file(test_file), "sample_count": 20,
     }), encoding="utf-8")
     manifest = {
-        "runtime_behavior_version": "E03-v1.2-readme-v2-contract",
+        "runtime_behavior_version": "E03-v1.2-readme-v3-contract",
         "runtime_code_identity": report["runtime_code_identity"],
         "input": {"sha256": package.sha256_file(test_file)},
     }

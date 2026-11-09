@@ -1,13 +1,13 @@
 {
   "version": "E03-final-dual-v1.2",
-  "run_id": "E03-DUAL-20261109-01",
+  "run_id": "E03-DUAL-20261109-02",
   "mode": "dual_adapter",
   "backend": "transformers",
   "model_id": "Qwen/Qwen3-1.7B",
   "model_revision": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
   "model_path": "participant/model",
   "expected_base_weight_sha256": "005d20550c04f4e246e5b434448786b44a0196b47d758d0acc77aba279e5bbc5",
-  "model_lock_path": "outputs/final_delivery/E03-DUAL-20261109-01/model_lock.json",
+  "model_lock_path": "outputs/final_delivery/E03-DUAL-20261109-02/model_lock.json",
   "candidates_root": "outputs/final_candidates",
   "adapters": {
     "profile": {
@@ -109,7 +109,7 @@
     }
   },
   "runtime_behavior": {
-    "version": "E03-v1.2-readme-v2-contract",
+    "version": "E03-v1.2-readme-v3-contract",
     "max_emotion_response_retries": 1,
     "retry_only_on_finish_reason": "length"
   }

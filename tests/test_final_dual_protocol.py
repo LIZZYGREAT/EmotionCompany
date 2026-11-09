@@ -124,6 +124,52 @@ def test_missing_e03b_separator_recovers_emotion_and_visible_response() -> None:
     assert parsed["format_error"] == "missing_response_separator"
 
 
+def test_json_fallback_extracts_response_text_and_valid_emotion() -> None:
+    parsed = parse_emotion_response_output(
+        '{"emotion_label":"joy","response_text":"I can listen."}', SCHEMA
+    )
+
+    assert parsed["emotion_label"] == "joy"
+    assert parsed["response_text"] == "I can listen."
+    assert parsed["emotion_error"] is None
+    assert parsed["response_error"] is None
+    assert parsed["format_error"] == "json_fallback"
+
+
+def test_malformed_json_fallback_extracts_response_text_field() -> None:
+    parsed = parse_emotion_response_output(
+        '{"response_text":"I can listen.",}', SCHEMA
+    )
+
+    assert parsed["emotion_label"] == ""
+    assert parsed["response_text"] == "I can listen."
+    assert parsed["emotion_error"] == "missing_emotion_label"
+    assert parsed["response_error"] is None
+    assert parsed["format_error"] == "json_fallback"
+
+
+def test_valid_json_with_missing_fields_uses_empty_field_fallbacks() -> None:
+    parsed = parse_emotion_response_output('{"emotion_label":"joy"}', SCHEMA)
+
+    assert parsed["emotion_label"] == "joy"
+    assert parsed["response_text"] == ""
+    assert parsed["emotion_error"] is None
+    assert parsed["response_error"] == "missing_response_text"
+    assert parsed["format_error"] == "json_fallback"
+
+
+def test_unparseable_output_falls_back_to_complete_cleaned_text() -> None:
+    parsed = parse_emotion_response_output(
+        "<think>internal reasoning</think>\n```text\nReturn valid JSON.\n```", SCHEMA
+    )
+
+    assert parsed["emotion_label"] == ""
+    assert parsed["response_text"] == "Return valid JSON."
+    assert parsed["emotion_error"] == "invalid_emotion_prefix"
+    assert parsed["response_error"] is None
+    assert parsed["format_error"] == "missing_response_separator"
+
+
 @pytest.mark.parametrize(
     ("raw", "emotion", "response"),
     [
