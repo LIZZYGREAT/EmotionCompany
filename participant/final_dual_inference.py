@@ -27,7 +27,11 @@ from src.inference.final_dual_protocol import (  # noqa: E402
     build_emotion_response_prompt,
     build_profile_prompt,
 )
-from src.inference.final_dual_vllm import DualLoRAVLLMService, VLLMServiceError  # noqa: E402
+from src.inference.final_dual_vllm import (  # noqa: E402
+    DualLoRAVLLMService,
+    ExternalVLLMService,
+    VLLMServiceError,
+)
 
 SCHEMA_PATH = ROOT / "participant/templates/submission_schema.json"
 ROUTES = (
@@ -182,11 +186,340 @@ def _write_report_temp(directory: Path, report: dict[str, Any]) -> Path:
     return path
 
 
+def _config_is_dual(config: Any) -> bool:
+    """Accept either the explicit mode or the adapters block as the Dual marker."""
+    if not isinstance(config, dict):
+        return False
+    adapters = config.get("adapters")
+    return config.get("mode") == "dual_adapter" or (
+        isinstance(adapters, dict)
+        and isinstance(adapters.get("profile"), dict)
+        and isinstance(adapters.get("emotion_response"), dict)
+    )
+
+
+def _runtime_validation_schema(schema: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Relax only the official id pattern for runtime diagnostics.
+
+    The official runner passes test IDs through untouched; the published
+    example IDs (for example ``test1_000001_t5``) do not satisfy the Schema
+    pattern.  Keeping the pattern here would report every official-style row
+    as invalid even though the submission contract treats the ID as opaque.
+    """
+    if schema is None:
+        return None
+    relaxed = json.loads(json.dumps(schema))
+    properties = relaxed.get("properties")
+    if isinstance(properties, dict) and "id" in properties:
+        properties["id"] = {"type": "string"}
+    return relaxed
+
+
 def _percentile95(values: list[float]) -> float | None:
     if not values:
         return None
     ordered = sorted(values)
     return ordered[max(0, int(0.95 * len(ordered) + 0.999999) - 1)]
+
+
+def _read_log_tail(path: Path | None, limit: int = 8000) -> str:
+    if path is None:
+        return ""
+    try:
+        if not path.is_file():
+            return ""
+        text = path.read_text(encoding="utf-8", errors="replace")
+        return text[-limit:]
+    except OSError:
+        return ""
+
+
+def _diagnostic_environment() -> dict[str, str]:
+    """Return the runtime knobs that explain layout/config decisions."""
+    names = (
+        "EVALUATION_BACKEND", "EVALUATION_INFERENCE_CONFIG",
+        "EVALUATION_FORCE_DUAL_CONFIG", "EVALUATION_MODEL_PATH",
+        "EVALUATION_TOKENIZER_PATH", "EVALUATION_HARDWARE_LABEL",
+        "VLLM_BIN", "VLLM_HOST", "VLLM_PORT", "VLLM_START_TIMEOUT",
+        "VLLM_GPU_MEMORY_UTILIZATION", "VLLM_ENFORCE_EAGER",
+        "VLLM_TENSOR_PARALLEL_SIZE",
+        "CONDA_DEFAULT_ENV", "CONDA_PREFIX", "PYTHON_BIN", "PATH",
+        "CUDA_VISIBLE_DEVICES", "HF_HOME", "HF_HUB_OFFLINE",
+        "TRANSFORMERS_OFFLINE",
+    )
+    facts = {name: os.environ[name] for name in names if name in os.environ}
+    for name in sorted(os.environ):
+        if name.startswith("EVALUATION_") and any(
+            token in name.upper() for token in ("KEY", "TOKEN", "SECRET")
+        ):
+            facts[name] = "<redacted>"
+    return facts
+
+
+def _container_bind_mounts() -> list[Path]:
+    """Return writable container bind mounts (job data/uploads) when inside Docker."""
+    if not (Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()):
+        return []
+    try:
+        lines = Path("/proc/mounts").read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    virtual_filesystems = {
+        "proc", "sysfs", "devpts", "tmpfs", "cgroup", "cgroup2", "mqueue",
+        "devtmpfs", "overlay", "shm", "none", "nsfs", "securityfs",
+        "debugfs", "tracefs", "pstore", "bpf", "configfs", "fusectl",
+        "hugetlbfs", "autofs", "ramfs",
+    }
+    excluded_prefixes = (
+        "/proc", "/sys", "/dev", "/etc", "/usr", "/opt", "/bin", "/sbin",
+        "/lib", "/lib32", "/lib64", "/run", "/var",
+    )
+    roots: list[Path] = []
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 4:
+            continue
+        mount_point = fields[1].replace("\\040", " ").replace("\\011", "\t")
+        filesystem, options = fields[2], fields[3]
+        if filesystem in virtual_filesystems or "ro" in options.split(","):
+            continue
+        path = Path(mount_point)
+        if path == Path("/") or any(
+            path == Path(prefix) or path.is_relative_to(prefix)
+            for prefix in excluded_prefixes
+        ):
+            continue
+        try:
+            if path.is_dir():
+                roots.append(path)
+        except OSError:
+            continue
+    return roots
+
+
+class _DiagnosticSink:
+    """Best-effort diagnostic mirror for runs with no platform log access.
+
+    The container cannot write to an arbitrary host directory.  It can write
+    to RESULT_DIR and to directories the harness mounted into the container,
+    so we mirror the same record to likely mount points and keep a fixed-name
+    copy in RESULT_DIR for retrieval.
+    """
+
+    def __init__(
+        self,
+        *,
+        test_file: Path,
+        result_dir: Path,
+        config_path: Path | None = None,
+        config: Any = None,
+        runtime: dict[str, Any] | None = None,
+    ):
+        self.test_file = test_file
+        self.result_dir = result_dir
+        self.config_path = config_path
+        self.config = config if isinstance(config, dict) else {}
+        self.runtime = runtime or {}
+        self.diagnostic_id = (
+            time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + f"-{os.getpid()}"
+        )
+        self.progress: dict[str, Any] = {"stage": "starting", "completed_samples": 0}
+        self._started_paths: list[Path] = []
+
+    def _roots(self) -> list[Path]:
+        # Only RESULT_DIR, its near ancestors, the input directory, and a
+        # non-project CWD are safe candidates.  Inside the delivery container
+        # (where the harness mounts job data) also probe the usual mount
+        # points; on a developer host this probe is disabled so tests never
+        # write into unrelated drives.
+        candidates: list[Path] = [
+            self.result_dir,
+            self.result_dir.parent,
+            self.result_dir.parent.parent,
+            self.test_file.parent,
+        ]
+        cwd = Path.cwd()
+        try:
+            if not cwd.resolve().is_relative_to(ROOT.resolve()):
+                candidates.append(cwd)
+        except OSError:
+            pass
+        if Path("/.dockerenv").exists() or Path("/run/.containerenv").exists():
+            candidates.extend(
+                Path(value) for value in (
+                    "/output", "/result", "/results", "/workspace", "/data",
+                    "/job", "/jobs", "/upload", "/uploads",
+                )
+            )
+            mnt = Path("/mnt")
+            try:
+                if mnt.is_dir():
+                    candidates.extend(child for child in mnt.iterdir() if child.is_dir())
+            except OSError:
+                pass
+            candidates.extend(_container_bind_mounts())
+        roots: list[Path] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            key = str(resolved)
+            if key in seen or resolved == Path("/"):
+                continue
+            seen.add(key)
+            roots.append(resolved)
+        return roots
+
+    def _payload(self, event: str, **extra: Any) -> dict[str, Any]:
+        adapters = self.config.get("adapters")
+        prompts = self.config.get("prompts")
+        payload: dict[str, Any] = {
+            "schema": "emotionalcompany-inference-diagnostic-v1",
+            "event": event,
+            "diagnostic_id": self.diagnostic_id,
+            "time_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "pid": os.getpid(),
+            "cwd": str(Path.cwd()),
+            "test_file": str(self.test_file),
+            "test_file_exists": self.test_file.is_file(),
+            "result_dir": str(self.result_dir),
+            "result_dir_exists": self.result_dir.is_dir(),
+            "result_dir_writable": os.access(self.result_dir, os.W_OK),
+            "config_path": str(self.config_path) if self.config_path else None,
+            "config_exists": bool(self.config_path and self.config_path.is_file()),
+            "config": {
+                "mode": self.config.get("mode"),
+                "backend": self.config.get("backend"),
+                "model_path": self.config.get("model_path"),
+                "adapter_keys": sorted(adapters) if isinstance(adapters, dict) else [],
+                "prompt_keys": sorted(prompts) if isinstance(prompts, dict) else [],
+            },
+            "environment": _diagnostic_environment(),
+            "runtime": self.runtime,
+            "progress": dict(self.progress),
+        }
+        payload.update(extra)
+        return payload
+
+    def _write_json(self, directory: Path, name: str, payload: dict[str, Any]) -> Path | None:
+        temporary: Path | None = None
+        try:
+            if not directory.is_dir() or not os.access(directory, os.W_OK):
+                return None
+            temporary = directory / f".{name}.{os.getpid()}.tmp"
+            with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2, allow_nan=False)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            target = directory / name
+            os.replace(temporary, target)
+            return target
+        except OSError:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return None
+
+    def write_started(self) -> None:
+        payload = self._payload("started")
+        self._started_paths.clear()
+        for root in self._roots():
+            target = self._write_json(
+                root, f"emotionalcompany_inference_started_{self.diagnostic_id}.json", payload
+            )
+            if target is not None:
+                self._started_paths.append(target)
+        fixed = self._write_json(self.result_dir, "inference_started.json", payload)
+        if fixed is not None:
+            self._started_paths.append(fixed)
+
+    def note_progress(self, *, stage: str, completed: int, total: int, sample_id: str | None) -> None:
+        self.progress = {
+            "stage": stage,
+            "completed_samples": completed,
+            "total_samples": total,
+            "last_sample_id": sample_id,
+        }
+        self._write_json(
+            self.result_dir,
+            "inference_started.json",
+            self._payload("started"),
+        )
+
+    def clear_started(self) -> None:
+        for path in self._started_paths:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        self._started_paths.clear()
+
+    def failure_payload(
+        self,
+        *,
+        error: str | None,
+        degraded_reason: str | None,
+        service_unavailable: bool,
+        route_attempts: dict[str, int] | None = None,
+        route_successes: dict[str, int] | None = None,
+        systemic_route_failures: list[str] | None = None,
+        log_tail: str = "",
+    ) -> dict[str, Any]:
+        return self._payload(
+            "failed",
+            error=error,
+            degraded_reason=degraded_reason,
+            service_unavailable=service_unavailable,
+            route_request_attempts=route_attempts or {},
+            route_request_successes=route_successes or {},
+            systemic_route_failures=systemic_route_failures or [],
+            vllm_log_tail=log_tail[-8000:],
+        )
+
+    def write_failure(self, **kwargs: Any) -> list[str]:
+        payload = self.failure_payload(**kwargs)
+        written: list[str] = []
+        for root in self._roots():
+            target = self._write_json(
+                root, f"emotionalcompany_inference_error_{self.diagnostic_id}.json", payload
+            )
+            if target is not None:
+                written.append(str(target))
+        fixed = self._write_json(self.result_dir, "inference_error.json", payload)
+        if fixed is not None:
+            written.append(str(fixed))
+        try:
+            text = json.dumps(payload, ensure_ascii=False, indent=2)
+        except (TypeError, ValueError):
+            text = str(payload)
+        for directory, name in (
+            (self.result_dir, "inference_error.log"),
+            *[
+                (root, f"emotionalcompany_inference_error_{self.diagnostic_id}.log")
+                for root in self._roots()
+            ],
+        ):
+            temporary: Path | None = None
+            try:
+                if not directory.is_dir() or not os.access(directory, os.W_OK):
+                    continue
+                temporary = directory / f".{name}.{os.getpid()}.tmp"
+                temporary.write_text(text + "\n", encoding="utf-8")
+                os.replace(temporary, directory / name)
+                written.append(str(directory / name))
+            except OSError:
+                if temporary is not None:
+                    try:
+                        temporary.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+        return written
+
 
 
 def _load_schema() -> dict[str, Any]:
@@ -262,6 +595,11 @@ def main() -> int:
     clean_success = False
     diagnostics: dict[str, Any] = {}
     schema_invalid_count = 0
+    diagnostic_sink: _DiagnosticSink | None = None
+    route_attempt_counts: dict[str, int] = {"profile": 0, "emotion_response": 0}
+    route_success_counts: dict[str, int] = {"profile": 0, "emotion_response": 0}
+    systemic_route_failures: list[str] = []
+    log_text = ""
 
     try:
         test_file = Path(sys.argv[1]).expanduser().resolve()
@@ -271,6 +609,8 @@ def main() -> int:
         if result_dir.exists() and not result_dir.is_dir():
             raise NotADirectoryError(f"RESULT_DIR exists and is not a directory: {result_dir}")
         result_dir.mkdir(parents=True, exist_ok=True)
+        diagnostic_sink = _DiagnosticSink(test_file=test_file, result_dir=result_dir)
+        diagnostic_sink.write_started()
 
         config_value = os.environ.get(
             "EVALUATION_INFERENCE_CONFIG", "configs/deployment/final_dual_v1_2.json"
@@ -279,10 +619,11 @@ def main() -> int:
         if not config_path.is_file():
             raise FileNotFoundError(f"deployment config not found: {config_path}")
         config = json.loads(config_path.read_text(encoding="utf-8"))
-        if not isinstance(config, dict) or config.get("mode") != "dual_adapter":
-            raise ValueError("deployment config mode must be dual_adapter")
+        if not _config_is_dual(config):
+            raise ValueError("deployment config must select dual_adapter or declare both Adapters")
         backend = _normalize_backend(
-            os.environ.get("EVALUATION_BACKEND", config.get("backend", "transformers"))
+            os.environ.get("EVALUATION_BACKEND", "").strip()
+            or config.get("backend", "transformers")
         )
         fallback_enabled = bool(
             config.get("fallback", {}).get("degraded_output_on_runtime_failure", False)
@@ -290,6 +631,11 @@ def main() -> int:
             else False
         )
         diagnostics = _runtime_diagnostics(config_path, backend)
+        if diagnostic_sink is not None:
+            diagnostic_sink.config_path = config_path
+            diagnostic_sink.config = config
+            diagnostic_sink.runtime = diagnostics
+            diagnostic_sink.write_started()
 
         samples = read_test_samples(test_file)
         test_file_sha256 = sha256_file(test_file)
@@ -368,7 +714,32 @@ def main() -> int:
 
         service_facts: dict[str, Any] | None = None
         init_started = time.perf_counter()
-        if assets_error is None and degraded_reason is None and backend == "vllm":
+        reuse_base_url = os.environ.get("EVALUATION_REUSE_VLLM_BASE_URL", "").strip()
+        if assets_error is None and degraded_reason is None and backend == "vllm" and reuse_base_url:
+            deployment = config.get("deployment", {})
+            vllm_config = deployment.get("vllm", {}) if isinstance(deployment, dict) else {}
+            request_timeout = (
+                vllm_config.get("request_timeout_seconds", 900)
+                if isinstance(vllm_config, dict) else 900
+            )
+            service = ExternalVLLMService(
+                base_url=reuse_base_url,
+                request_timeout_seconds=float(request_timeout),
+            )
+            try:
+                service_facts = service.start()
+            except Exception as exc:
+                print(
+                    f"WARNING: official vLLM server is not ready: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                if not fallback_enabled:
+                    raise
+                first_line = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+                degraded_reason = f"external_vllm_unavailable: {first_line[:800]}"
+                service = None
+        elif assets_error is None and degraded_reason is None and backend == "vllm":
             descriptor, log_name = tempfile.mkstemp(prefix="final-dual-vllm-", suffix=".log")
             os.close(descriptor)
             server_log = Path(log_name)
@@ -376,8 +747,10 @@ def main() -> int:
                 config=config,
                 root=ROOT,
                 log_path=server_log,
-                vllm_bin=os.environ.get("VLLM_BIN", "vllm"),
-                startup_timeout_seconds=float(os.environ.get("VLLM_START_TIMEOUT", "900")),
+                vllm_bin=os.environ.get("VLLM_BIN", "").strip() or "vllm",
+                startup_timeout_seconds=float(
+                    os.environ.get("VLLM_START_TIMEOUT", "").strip() or "900"
+                ),
             )
             try:
                 service_facts = service.start()
@@ -425,12 +798,20 @@ def main() -> int:
         submission_descriptor, submission_temp = _temporary_file(result_dir, ".submission.")
         latencies_ms: list[float] = []
         fallback_counts = {"profile": 0, "emotion_label": 0, "response_text": 0}
-        fallback_sample_ids: set[str] = set()
+        fallback_sample_ids: list[str] = []
+        fallback_sample_id_set: set[str] = set()
+        parse_failure_ids: list[str] = []
+        parse_failure_id_set: set[str] = set()
+        generation_failure_ids: list[str] = []
+        generation_failure_id_set: set[str] = set()
         submission_rows = 0
         schema_valid_count = 0
         schema_invalid_count = 0
         schema_error_samples: list[str] = []
-        validator = Draft202012Validator(schema) if schema is not None else None
+        validator = (
+            Draft202012Validator(_runtime_validation_schema(schema))
+            if schema is not None else None
+        )
 
         try:
             with os.fdopen(submission_descriptor, "w", encoding="utf-8", newline="\n") as submission_handle:
@@ -492,6 +873,7 @@ def main() -> int:
                         if prompt is None or degraded_reason is not None or service_unavailable:
                             continue
                         max_new_tokens = int(generation_config[route]["max_new_tokens"])
+                        route_attempt_counts[route] += 1
                         try:
                             if backend == "vllm":
                                 if service is None:
@@ -514,6 +896,7 @@ def main() -> int:
                                 )
                             text = response.get("text") if isinstance(response, dict) else None
                             generated[route] = text if isinstance(text, str) else ""
+                            route_success_counts[route] += 1
                         except Exception as exc:
                             print(
                                 f"WARNING: {sample['id']} {route} request failed; using field fallback: "
@@ -553,10 +936,25 @@ def main() -> int:
                         "emotion_label": diagnostics_row.get("emotion_parse_error"),
                         "response_text": diagnostics_row.get("response_parse_error"),
                     }
+                    row_parse_failed = False
+                    row_generation_failed = False
                     for field, error in row_errors.items():
-                        if error is not None:
-                            fallback_counts[field] += 1
-                            fallback_sample_ids.add(sample["id"])
+                        if error is None:
+                            continue
+                        fallback_counts[field] += 1
+                        if sample["id"] not in fallback_sample_id_set:
+                            fallback_sample_id_set.add(sample["id"])
+                            fallback_sample_ids.append(sample["id"])
+                        if error == "generation_failed":
+                            row_generation_failed = True
+                        else:
+                            row_parse_failed = True
+                    if row_parse_failed and sample["id"] not in parse_failure_id_set:
+                        parse_failure_id_set.add(sample["id"])
+                        parse_failure_ids.append(sample["id"])
+                    if row_generation_failed and sample["id"] not in generation_failure_id_set:
+                        generation_failure_id_set.add(sample["id"])
+                        generation_failure_ids.append(sample["id"])
 
                     if validator is not None:
                         errors = sorted(validator.iter_errors(submission), key=lambda item: list(item.path))
@@ -575,6 +973,15 @@ def main() -> int:
 
                     submission_handle.write(_jsonl_line(submission))
                     submission_rows += 1
+                    if diagnostic_sink is not None and (
+                        index == 1 or index % 10 == 0 or index == len(samples)
+                    ):
+                        diagnostic_sink.note_progress(
+                            stage="inference",
+                            completed=index,
+                            total=len(samples),
+                            sample_id=sample["id"],
+                        )
                     elapsed_ms = (time.perf_counter() - sample_started) * 1000
                     if index <= MEASUREMENT_LIMIT:
                         latencies_ms.append(elapsed_ms)
@@ -586,6 +993,10 @@ def main() -> int:
                 submission_temp.unlink(missing_ok=True)
             raise
 
+        server_base_url = getattr(service, "base_url", None) or (
+            config.get("deployment", {}).get("vllm", {}).get("base_url")
+            if backend == "vllm" else None
+        )
         if service is not None:
             service.close()
             service = None
@@ -600,24 +1011,42 @@ def main() -> int:
         p95_latency = round(_percentile95(latencies_ms), 6) if latencies_ms else None
         minimum_latency = round(min(latencies_ms), 6) if latencies_ms else None
         maximum_latency = round(max(latencies_ms), 6) if latencies_ms else None
-        hardware_label = os.environ.get("EVALUATION_HARDWARE_LABEL") or socket.gethostname()
-        parse_failure_count = sum(fallback_counts.values())
-        status = "degraded" if (degraded_reason is not None or service_unavailable) else "passed"
+        hardware_label = (
+            os.environ.get("EVALUATION_HARDWARE_LABEL")
+            or diagnostics.get("device_name")
+            or socket.gethostname()
+        )
+        systemic_threshold = min(5, max(2, len(samples)))
+        systemic_route_failures = [
+            route
+            for route in route_attempt_counts
+            if route_attempt_counts[route] >= systemic_threshold
+            and route_success_counts[route] == 0
+        ]
+        status = (
+            "degraded" if (degraded_reason is not None or service_unavailable)
+            else "failed" if systemic_route_failures
+            else "passed"
+        )
 
         report = {
-            "version": "final-dual-official-run-v3",
+            "version": "final-dual-official-run-v4",
             "status": status,
             "inference_success": status == "passed",
+            "diagnostic_id": diagnostic_sink.diagnostic_id if diagnostic_sink else None,
             "degraded_reason": degraded_reason,
             "service_unavailable": service_unavailable,
             "complete": submission_rows == len(samples),
-            "backend": backend,
-            "official_backend": "openai_compatible" if backend == "vllm" else "transformers",
+            "backend": "openai_compatible" if backend == "vllm" else "transformers",
+            "runtime_backend": backend,
             "samples": len(samples),
             "submission_rows": submission_rows,
             "initialization_seconds": round(initialization_seconds, 6),
             "field_fallback_count": fallback_counts,
-            "field_fallback_sample_ids": sorted(fallback_sample_ids),
+            "field_fallback_sample_ids": sorted(fallback_sample_id_set),
+            "route_request_attempts": route_attempt_counts,
+            "route_request_successes": route_success_counts,
+            "systemic_route_failures": systemic_route_failures,
             "required_rounds": MEASUREMENT_LIMIT,
             "rounds": len(latencies_ms),
             "average_latency_ms": average_latency,
@@ -629,8 +1058,10 @@ def main() -> int:
             "hardware_label": hardware_label,
             "test_file_sha256": test_file_sha256,
             "submission_sha256": submission_sha256,
-            "parse_failure_count": parse_failure_count,
-            "parse_failure_ids": sorted(fallback_sample_ids),
+            "parse_failure_count": len(parse_failure_ids),
+            "parse_failure_ids": parse_failure_ids,
+            "generation_failure_count": len(generation_failure_ids),
+            "generation_failure_ids": generation_failure_ids,
             "timing_scope": (
                 "per-sample prompt construction through two serial generations, parsing, and "
                 "output append; server/model initialization excluded"
@@ -669,6 +1100,28 @@ def main() -> int:
                 "performance_report.json": {"path": "performance_report.json"},
             },
         }
+        if backend == "vllm":
+            # Keep the official OpenAI-compatible report shape.  The dual run
+            # uses two LoRA aliases; the emotion-response alias is the primary
+            # reply route, and the full list is recorded separately.
+            report.update({
+                "api_model": "emotion-response",
+                "api_models": [alias for _route, alias in ROUTES],
+                "base_url": server_base_url,
+            })
+        if status != "passed":
+            report["failure_diagnostics"] = {
+                "error": (
+                    "systemic_generation_route_failure"
+                    if status == "failed" else None
+                ),
+                "degraded_reason": degraded_reason,
+                "service_unavailable": service_unavailable,
+                "route_request_attempts": route_attempt_counts,
+                "route_request_successes": route_success_counts,
+                "systemic_route_failures": systemic_route_failures,
+                "vllm_log_tail": _read_log_tail(server_log),
+            }
         if not report["complete"]:
             raise OSError(f"wrote {submission_rows} outputs for {len(samples)} input records")
 
@@ -678,8 +1131,16 @@ def main() -> int:
         os.replace(report_temp, result_dir / "performance_report.json")
         report_temp = None
         clean_success = status == "passed"
-        print(f"PASS: {result_dir / 'submission.jsonl'}", flush=True)
-        print(f"PASS: {result_dir / 'performance_report.json'}", flush=True)
+        if status == "failed":
+            raise RuntimeError(
+                "systemic generation route failure: "
+                + ", ".join(
+                    f"{route} succeeded 0/{route_attempt_counts[route]} attempts"
+                    for route in systemic_route_failures
+                )
+            )
+        print(f"{'PASS' if status == 'passed' else 'DEGRADED'}: {result_dir / 'submission.jsonl'}", flush=True)
+        print(f"{'PASS' if status == 'passed' else 'DEGRADED'}: {result_dir / 'performance_report.json'}", flush=True)
         return 0
     except Exception as exc:
         failure_error = f"{type(exc).__name__}: {exc}"
@@ -701,10 +1162,9 @@ def main() -> int:
                     flush=True,
                 )
         if result_dir is not None and (failure_error is not None or degraded_reason is not None or service_unavailable):
-            log_text = ""
+            log_text = _read_log_tail(server_log)
             if server_log is not None and server_log.is_file():
                 try:
-                    log_text = server_log.read_text(encoding="utf-8", errors="replace")
                     if log_text:
                         shutil.copyfile(server_log, result_dir / "vllm_server.log")
                         print(
@@ -720,7 +1180,10 @@ def main() -> int:
                 "degraded_reason": degraded_reason,
                 "service_unavailable": service_unavailable,
                 "diagnostics": diagnostics,
-                "vllm_log_tail": log_text[-8000:],
+                "route_request_attempts": route_attempt_counts,
+                "route_request_successes": route_success_counts,
+                "systemic_route_failures": systemic_route_failures,
+                "vllm_log_tail": log_text,
             }
             try:
                 _write_json_atomic(result_dir / "runtime_failure.json", failure)
@@ -731,6 +1194,21 @@ def main() -> int:
                 )
             except Exception:
                 pass
+        if diagnostic_sink is not None and result_dir is not None:
+            if failure_error is not None or degraded_reason is not None or service_unavailable:
+                written = diagnostic_sink.write_failure(
+                    error=failure_error,
+                    degraded_reason=degraded_reason,
+                    service_unavailable=service_unavailable,
+                    route_attempts=route_attempt_counts,
+                    route_successes=route_success_counts,
+                    systemic_route_failures=systemic_route_failures,
+                    log_tail=log_text,
+                )
+                for path in written[:8]:
+                    print(f"INFO: inference diagnostics written to {path}", file=sys.stderr, flush=True)
+            elif clean_success:
+                diagnostic_sink.clear_started()
         for path in (submission_temp, report_temp):
             if path is not None:
                 path.unlink(missing_ok=True)

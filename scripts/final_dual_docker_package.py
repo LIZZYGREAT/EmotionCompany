@@ -248,8 +248,13 @@ def check_static(repo_root: Path = ROOT) -> dict[str, Any]:
         raise ValueError("Dockerfile must pin the validated CUDA 12.8 runtime base digest")
     if f"FROM {MINIFORGE_IMAGE} AS miniforge" not in dockerfile or "COPY --from=miniforge /opt/conda /opt/conda" not in dockerfile:
         raise ValueError("Dockerfile must use the pinned conda-forge Miniforge 26.1.0-0 image")
-    if "ENV CONDA_DEFAULT_ENV=conda_env" not in dockerfile or "ENV VLLM_BIN=/opt/conda/envs/conda_env/bin/vllm" not in dockerfile:
+    if "ENV CONDA_DEFAULT_ENV=conda_env" not in dockerfile or (
+        "ENV VLLM_BIN=/usr/local/bin/emotionalcompany-vllm" not in dockerfile
+        and "ENV VLLM_BIN=/opt/conda/envs/conda_env/bin/vllm" not in dockerfile
+    ):
         raise ValueError("Dockerfile does not use the fixed conda_env vLLM runtime")
+    if "emotionalcompany_vllm_wrapper.py" not in dockerfile:
+        raise ValueError("Dockerfile must install the dual vLLM launcher wrapper")
     if "HF_HUB_OFFLINE" not in entrypoint or "TRANSFORMERS_OFFLINE" not in entrypoint or "EVALUATION_BACKEND" not in entrypoint:
         raise ValueError("Docker entrypoint must force offline vLLM inference")
     if 'exec bash /root/participant/start.sh "$TEST_FILE" "$RESULT_DIR"' not in entrypoint:
@@ -599,6 +604,13 @@ def verify_output(
     if len(predictions) != row_count or output_ids != input_ids:
         raise ValueError("submission rows must preserve every input ID in order")
     schema = load_json(ROOT / SCHEMA_PATH)
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    if isinstance(properties, dict) and "id" in properties:
+        # The official runner treats IDs as opaque strings.  Relax only the
+        # pattern so official-style IDs (for example test1_000001_t5) can be
+        # verified locally without weakening the remaining field contract.
+        schema = json.loads(json.dumps(schema))
+        schema["properties"]["id"] = {"type": "string"}
     validator = Draft202012Validator(schema)
     for row in predictions:
         errors = sorted(validator.iter_errors(row), key=lambda item: list(item.path))

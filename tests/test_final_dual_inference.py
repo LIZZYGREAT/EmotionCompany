@@ -79,6 +79,8 @@ def _run_mocked_main(
     preserve_existing: bool = False,
     fallback_enabled: bool = False,
     service_start_error: Exception | None = None,
+    fail_all_requests: bool = False,
+    omit_mode: bool = False,
 ) -> tuple[int, Path, list[tuple[str, list[dict[str, Any]], int]], dict[str, Any]]:
     test_file = tmp_path / "input.jsonl"
     _write_jsonl(test_file, rows)
@@ -92,7 +94,6 @@ def _run_mocked_main(
 
     config_path = tmp_path / "deployment.json"
     config = {
-        "mode": "dual_adapter",
         "backend": "vllm",
         "model_path": str(tmp_path / "base"),
         "model_lock_path": str(tmp_path / "missing-model-lock.json"),
@@ -104,8 +105,18 @@ def _run_mocked_main(
             "eos_token_id": 151645,
             "pad_token_id": 151643,
         },
-        "deployment": {"vllm": {"request_timeout_seconds": 900}},
+        "deployment": {"vllm": {
+            "request_timeout_seconds": 900,
+            "base_url": "http://127.0.0.1:8000/v1",
+        }},
     }
+    if omit_mode:
+        config["adapters"] = {
+            "profile": {"path": str(tmp_path / "profile")},
+            "emotion_response": {"path": str(tmp_path / "er")},
+        }
+    else:
+        config["mode"] = "dual_adapter"
     if fallback_enabled:
         config["fallback"] = {"degraded_output_on_runtime_failure": True}
     config_path.write_text(json.dumps(config), encoding="utf-8")
@@ -152,7 +163,7 @@ def _run_mocked_main(
             self, *, model_alias: str, messages: list[dict[str, Any]], max_tokens: int
         ) -> dict[str, Any]:
             calls.append((model_alias, messages, max_tokens))
-            if request_error_at is not None and len(calls) == request_error_at:
+            if fail_all_requests or (request_error_at is not None and len(calls) == request_error_at):
                 service_state["dead"] = service_dies_on_error
                 raise RuntimeError("simulated HTTP request failure")
             if model_alias == "profile":
@@ -227,6 +238,16 @@ def test_main_falls_back_per_field_continues_and_overwrites_only_official_output
     assert report["samples"] == report["submission_rows"] == 3
     assert report["field_fallback_count"]["emotion_label"] == 2
     assert report["field_fallback_count"]["response_text"] == 1
+    assert report["backend"] == "openai_compatible"
+    assert report["runtime_backend"] == "vllm"
+    assert report["api_model"] == "emotion-response"
+    assert report["api_models"] == ["profile", "emotion-response"]
+    assert report["base_url"] == "http://127.0.0.1:8000/v1"
+    assert report["parse_failure_count"] == len(report["parse_failure_ids"]) == 2
+    assert report["parse_failure_ids"] == ["test1_000001_t5", "raw/id:003"]
+    assert report["generation_failure_count"] == len(report["generation_failure_ids"]) == 1
+    assert report["generation_failure_ids"] == ["test_000002_t1"]
+    assert report["submission_schema"]["invalid_count"] == 0
     assert report["performance"]["measured_samples"] == 3
     assert (result_dir / "keep.txt").read_bytes() == facts["keep_content"]
     assert {path.name for path in result_dir.iterdir()} == {
@@ -265,9 +286,19 @@ def test_service_failure_returns_nonzero_preserves_old_outputs_and_closes_servic
     assert (result_dir / "submission.jsonl").read_bytes() == b"old submission\n"
     assert (result_dir / "performance_report.json").read_bytes() == b"old report\n"
     assert (result_dir / "keep.txt").read_bytes() == facts["keep_content"]
-    assert sorted(path.name for path in result_dir.iterdir()) == [
-        "keep.txt", "performance_report.json", "runtime_failure.json", "submission.jsonl"
-    ]
+    result_names = {path.name for path in result_dir.iterdir()}
+    assert {
+        "keep.txt", "performance_report.json", "runtime_failure.json",
+        "submission.jsonl", "inference_started.json",
+        "inference_error.json", "inference_error.log",
+    } <= result_names
+    assert any(name.startswith("emotionalcompany_inference_error_") for name in result_names)
+    error_record = json.loads((result_dir / "inference_error.json").read_text(encoding="utf-8"))
+    assert error_record["event"] == "failed"
+    assert error_record["config"]["mode"] == "dual_adapter"
+    assert error_record["environment"]["EVALUATION_BACKEND"] == "vllm"
+    assert "service became unavailable" in (error_record.get("error") or "")
+    assert error_record["progress"]["stage"] == "starting" or error_record["progress"]["stage"] == "inference"
 
 
 def test_single_route_request_failure_uses_fallback_and_finishes_when_service_is_alive(
@@ -353,3 +384,40 @@ def test_service_death_mid_run_can_finish_with_degraded_outputs(
     report = json.loads((result_dir / "performance_report.json").read_text(encoding="utf-8"))
     assert report["status"] == "degraded"
     assert report["service_unavailable"] is True
+
+
+def test_main_accepts_adapters_without_an_explicit_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code, result_dir, calls, _facts = _run_mocked_main(
+        tmp_path, monkeypatch, [_sample(1)], omit_mode=True
+    )
+
+    assert code == 0
+    assert [call[0] for call in calls] == ["profile", "emotion-response"]
+    report = json.loads((result_dir / "performance_report.json").read_text(encoding="utf-8"))
+    assert report["status"] == "passed"
+
+
+def test_all_requests_failing_with_a_live_service_are_not_reported_as_passed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code, result_dir, calls, facts = _run_mocked_main(
+        tmp_path,
+        monkeypatch,
+        [_sample(1), _sample(2)],
+        fail_all_requests=True,
+    )
+
+    assert code == 1
+    assert len(calls) == 4
+    assert facts["service_state"]["closed"] is True
+    report = json.loads((result_dir / "performance_report.json").read_text(encoding="utf-8"))
+    assert report["status"] == "failed"
+    assert report["inference_success"] is False
+    assert report["route_request_attempts"] == {"profile": 2, "emotion_response": 2}
+    assert report["route_request_successes"] == {"profile": 0, "emotion_response": 0}
+    assert report["systemic_route_failures"] == ["profile", "emotion_response"]
+    assert report["generation_failure_count"] == 2
+    assert (result_dir / "submission.jsonl").is_file()
+    assert (result_dir / "runtime_failure.json").is_file()

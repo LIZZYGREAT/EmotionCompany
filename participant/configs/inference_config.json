@@ -1,27 +1,21 @@
 {
-  "backend": "transformers",
-  "model_path": "./model",
+  "backend": "openai_compatible",
+  "model_path": "/root/participant/model",
   "model_id": "Qwen/Qwen3-1.7B",
-  "model_revision": null,
-  "experiment_id": "E00.2",
+  "model_revision": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+  "mode": "dual_adapter",
   "trust_remote_code": false,
   "device_map": "auto",
   "torch_dtype": "auto",
-  "quantization": {
-    "enabled": false,
-    "load_in_4bit": true,
-    "quant_type": "nf4",
-    "compute_dtype": "bfloat16",
-    "use_double_quant": true
-  },
   "base_url": "http://127.0.0.1:8000/v1",
-  "api_model": "local-model",
+  "api_model": "model",
   "api_key": "",
-  "request_timeout_seconds": 600,
+  "request_timeout_seconds": 900,
   "api_options": {},
   "openai_compatible": {
     "pass_reasoning_content_field": false
   },
+  "format_version": "F2",
   "prompt": {
     "version": "P0",
     "path": "configs/prompts/p0.txt",
@@ -31,6 +25,7 @@
     "model_id": "Qwen/Qwen3-1.7B",
     "revision": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
     "local_files_only": true,
+    "local_path": "model",
     "expected_signature_sha256": "1662c9e99c6185441026a168b2dd6b09af103dc6dc3563b72f598411f14d1913",
     "expected_template_sha256": "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8",
     "eos_token_id": 151645,
@@ -43,16 +38,76 @@
   },
   "context": {
     "max_prompt_tokens": 1280,
-    "budget_profile": "local_smoke_candidate_P1280",
-    "budget_profile_source": "configs/data_token_audit.yaml candidate S=2048/P=1280; candidate only",
+    "budget_profile": "official_dual_P1280",
+    "budget_profile_source": "frozen A8/E03-B dual protocol",
     "serving_context_limit": null
   },
   "generation": {
+    "profile": {
+      "max_new_tokens": 256,
+      "do_sample": false,
+      "temperature": 0.0,
+      "enable_thinking": false
+    },
+    "emotion_response": {
+      "max_new_tokens": 1200,
+      "do_sample": false,
+      "temperature": 0.0,
+      "enable_thinking": false
+    },
     "max_new_tokens": 1200,
     "do_sample": false,
     "temperature": 1.0,
-    "top_p": 1.0
+    "top_p": 1.0,
+    "eos_token_id": 151645,
+    "pad_token_id": 151643
+  },
+  "adapters": {
+    "profile": {
+      "name": "profile",
+      "path": "participant/adapters/profile",
+      "expected_weight_sha256": "4f4bea7c738109b2b90502350abbc8bb37e98de08c62031f497d3516b2aa1787",
+      "server_model_id": "profile"
+    },
+    "emotion_response": {
+      "name": "emotion-response",
+      "path": "participant/adapters/emotion-response",
+      "expected_weight_sha256": "b3db90b9eff9204f3b5717fc52e33481feb4149571c5fdad9238b47642e62b3b",
+      "server_model_id": "emotion-response"
+    }
+  },
+  "prompts": {
+    "selection": {
+      "path": "configs/prompts/p0.txt",
+      "sha256": "d427e4996d0075a3adfe03ae25881d093687a6565f5b037f605accecc84c70b2"
+    },
+    "profile": {
+      "path": "configs/prompts/p_a8_v2_profile.txt",
+      "sha256": "0cf6e196b5d4ac4005ea2cc2b454ec058ee24592fb8bb0a1c172ca464dba3cdb"
+    },
+    "profile_history_budget": {
+      "path": "configs/prompts/p_a8_v2_emotion_profile.txt",
+      "sha256": "832aa10ad57626b38d45247fd6715a7aac7b0c7c838e817c6a0206d50a498a94"
+    },
+    "emotion_response": {
+      "path": "configs/prompts/p_e03b.txt",
+      "sha256": "630e842b31defc42968110d35154ab20c007041bd8b75583072bdd51e68a9c35"
+    }
+  },
+  "quantization": {
+    "enabled": false,
+    "load_in_4bit": false,
+    "compute_dtype": "bfloat16"
+  },
+  "fallback": {
+    "degraded_output_on_runtime_failure": true
+  },
+  "deployment": {
+    "vllm": {
+      "base_url": "http://127.0.0.1:8000/v1",
+      "request_timeout_seconds": 900
+    }
   },
   "performance_rounds": 100,
-  "hardware_label": "fill-in-before-official-run"
+  "hardware_label": "official-platform-gpu"
 }

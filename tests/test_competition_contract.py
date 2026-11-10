@@ -26,6 +26,27 @@ def test_official_schemas_and_submission_template_keep_the_reviewed_fingerprints
         assert actual == expected_sha256, f"受保护赛事文件指纹变化: {relative_path}"
 
 
+OFFICIAL_START_SHA256 = "f8ed932171974a8e99214efe5144982938475163a363fb421f2a84f2640e5ff4"
+
+
+def test_submitted_image_uses_the_unmodified_official_start_script():
+    source = ROOT / "participant/start_official.sh"
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == OFFICIAL_START_SHA256
+    script = source.read_text(encoding="utf-8")
+
+    assert "source activate conda_env" in script
+    assert '[[ $# -ne 2 ]]' in script
+    assert 'TEST_FILE="$1"' in script
+    assert 'RESULT_DIR="$2"' in script
+    assert '"$PYTHON_CMD" "$SCRIPT_DIR/run_inference.py" "$TEST_FILE" "$RESULT_DIR"' in script
+
+    for relative in ("docker/final_dual/Dockerfile", "docker/final_dual/Dockerfile.overlay"):
+        dockerfile = (ROOT / relative).read_text(encoding="utf-8")
+        assert "COPY participant/start_official.sh /root/participant/start.sh" in dockerfile
+        assert "emotionalcompany_vllm_wrapper.py" in dockerfile
+        assert "ENV VLLM_BIN=/usr/local/bin/emotionalcompany-vllm" in dockerfile
+
+
 def test_start_script_preserves_entry_arguments_and_fixed_environment_contract():
     script = (ROOT / "participant/start.sh").read_text(encoding="utf-8")
 
@@ -45,6 +66,24 @@ def test_start_script_keeps_lora_opt_in_and_checks_the_requested_server_route():
     assert 'PROBE_SCRIPT="$WORKSPACE_ROOT/scripts/e02_vllm_probe.py"' in script
     assert '"$PROBE_SCRIPT" models' in script
     assert 'export EVALUATION_API_MODEL="$REQUEST_MODEL_NAME"' in script
+
+
+def test_start_script_writes_a_startup_diagnostic_for_invalid_argument_count(tmp_path):
+    completed = subprocess.run(
+        ["bash", str(ROOT / "participant/start.sh")],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    diagnostic = tmp_path / "emotionalcompany_startup_error.log"
+    assert diagnostic.is_file()
+    text = diagnostic.read_text(encoding="utf-8")
+    assert "invalid_argument_count" in text
+    assert "argc=0" in text
 
 
 def test_start_script_bootstraps_conda_from_declared_executable(tmp_path):
@@ -111,6 +150,74 @@ def test_start_script_bootstraps_conda_from_declared_executable(tmp_path):
     ]
 
 
+def test_start_script_force_dual_switches_a_non_dual_config_to_the_built_in_dual_config(tmp_path):
+    fake_conda = tmp_path / "conda"
+    fake_conda.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = shell.bash ] && [ \"$2\" = hook ]; then\n"
+        "  cat <<'HOOK'\n"
+        "conda() {\n"
+        "  [ \"$1\" = activate ] && [ \"$2\" = conda_env ] || return 2\n"
+        "  export CONDA_DEFAULT_ENV=conda_env\n"
+        "  export CONDA_PREFIX=/synthetic/conda_env\n"
+        "}\n"
+        "HOOK\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    fake_conda.chmod(0o755)
+    config_path = tmp_path / "single.json"
+    config_path.write_text(json.dumps({
+        "backend": "transformers",
+        "model_path": "unused",
+    }), encoding="utf-8")
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text("{}\n", encoding="utf-8")
+    capture_path = tmp_path / "runner_args.txt"
+    python_wrapper = tmp_path / "python-wrapper"
+    python_wrapper.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"${1:-}\" == */participant/final_dual_inference.py ]]; then\n"
+        "  printf '%s\\n' \"$@\" > \"$RUNNER_CAPTURE\"\n"
+        "  exit 0\n"
+        "fi\n"
+        f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    python_wrapper.chmod(0o755)
+    environment = {
+        **os.environ,
+        "CONDA_EXE": str(fake_conda),
+        "CONDA_DEFAULT_ENV": "",
+        "CONDA_PREFIX": "",
+        "EVALUATION_INFERENCE_CONFIG": str(config_path),
+        "EVALUATION_BACKEND": "openai_compatible",
+        "EVALUATION_FORCE_DUAL_CONFIG": "true",
+        "PYTHON_BIN": str(python_wrapper),
+        "RUNNER_CAPTURE": str(capture_path),
+    }
+
+    completed = subprocess.run(
+        ["bash", str(ROOT / "participant/start.sh"), str(input_path), str(tmp_path / "result")],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "使用镜像内置 Dual 配置" in completed.stderr
+    assert capture_path.read_text(encoding="utf-8").splitlines() == [
+        str(ROOT / "participant/final_dual_inference.py"),
+        str(input_path),
+        str(tmp_path / "result"),
+    ]
+
+
 def test_start_script_routes_dual_adapter_mode_to_its_runner_with_two_arguments(tmp_path):
     fake_conda = tmp_path / "conda"
     fake_conda.write_text(
@@ -156,6 +263,75 @@ def test_start_script_routes_dual_adapter_mode_to_its_runner_with_two_arguments(
         "EVALUATION_INFERENCE_CONFIG": str(config_path),
         "EVALUATION_BACKEND": "vllm",
         "VLLM_BIN": str(fake_vllm),
+        "PYTHON_BIN": str(python_wrapper),
+        "RUNNER_CAPTURE": str(capture_path),
+    }
+
+    completed = subprocess.run(
+        ["bash", str(ROOT / "participant/start.sh"), str(input_path), str(tmp_path / "result")],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert capture_path.read_text(encoding="utf-8").splitlines() == [
+        str(ROOT / "participant/final_dual_inference.py"),
+        str(input_path),
+        str(tmp_path / "result"),
+    ]
+
+
+def test_start_script_routes_adapters_only_config_to_the_dual_runner(tmp_path):
+    fake_conda = tmp_path / "conda"
+    fake_conda.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = shell.bash ] && [ \"$2\" = hook ]; then\n"
+        "  cat <<'HOOK'\n"
+        "conda() {\n"
+        "  [ \"$1\" = activate ] && [ \"$2\" = conda_env ] || return 2\n"
+        "  export CONDA_DEFAULT_ENV=conda_env\n"
+        "  export CONDA_PREFIX=/synthetic/conda_env\n"
+        "}\n"
+        "HOOK\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    fake_conda.chmod(0o755)
+    config_path = tmp_path / "adapters-only.json"
+    config_path.write_text(json.dumps({
+        "backend": "transformers",
+        "adapters": {
+            "profile": {"path": "unused-profile"},
+            "emotion_response": {"path": "unused-emotion-response"},
+        },
+    }), encoding="utf-8")
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text("{}\n", encoding="utf-8")
+    capture_path = tmp_path / "runner_args.txt"
+    python_wrapper = tmp_path / "python-wrapper"
+    python_wrapper.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"${1:-}\" == */participant/final_dual_inference.py ]]; then\n"
+        "  printf '%s\\n' \"$@\" > \"$RUNNER_CAPTURE\"\n"
+        "  exit 0\n"
+        "fi\n"
+        f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    python_wrapper.chmod(0o755)
+    environment = {
+        **os.environ,
+        "CONDA_EXE": str(fake_conda),
+        "CONDA_DEFAULT_ENV": "",
+        "CONDA_PREFIX": "",
+        "EVALUATION_INFERENCE_CONFIG": str(config_path),
+        "EVALUATION_BACKEND": "vllm",
         "PYTHON_BIN": str(python_wrapper),
         "RUNNER_CAPTURE": str(capture_path),
     }

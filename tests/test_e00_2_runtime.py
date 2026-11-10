@@ -30,6 +30,7 @@ def test_load_config_default_is_unchanged_and_explicit_override_is_validated(tmp
     assert runner.load_config() == expected
 
     override = copy.deepcopy(expected)
+    override["backend"] = "transformers"
     override["hardware_label"] = "e00-2-test-override"
     override["generation"] = {
         "max_new_tokens": 1200, "do_sample": True, "temperature": 0.7, "top_p": 0.8, "top_k": 20,

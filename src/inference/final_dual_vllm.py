@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -104,6 +105,51 @@ def gpu_snapshot() -> dict[str, Any]:
     return {"status": "observed" if devices else "unavailable", "source": "nvidia-smi", "devices": devices}
 
 
+def _chat_completion_request(
+    *,
+    base_url: str,
+    timeout_seconds: float,
+    model_alias: str,
+    messages: Sequence[Mapping[str, Any]],
+    max_tokens: int,
+) -> dict[str, Any]:
+    clean_messages = []
+    for message in messages:
+        role, content = message.get("role"), message.get("content")
+        if role not in {"system", "user", "assistant"} or not isinstance(content, str):
+            raise ValueError("generation messages must have standard role/content string fields")
+        clean_messages.append({"role": role, "content": content})
+    payload = {
+        "model": model_alias,
+        "messages": clean_messages,
+        "max_tokens": int(max_tokens),
+        "temperature": 0,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    started = time.monotonic()
+    response = _http_json(
+        f"{base_url.rstrip('/')}/chat/completions",
+        timeout=timeout_seconds,
+        payload=payload,
+    )
+    elapsed = time.monotonic() - started
+    choices = response.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+    prompt_tokens = usage.get("prompt_tokens")
+    completion_tokens = usage.get("completion_tokens")
+    return {
+        "text": _response_content(response),
+        "requested_model_alias": model_alias,
+        "response_model": response.get("model") if isinstance(response.get("model"), str) else None,
+        "finish_reason": choice.get("finish_reason") if isinstance(choice.get("finish_reason"), str) else None,
+        "usage_prompt_tokens": prompt_tokens if type(prompt_tokens) is int else None,
+        "usage_completion_tokens": completion_tokens if type(completion_tokens) is int else None,
+        "generation_seconds": elapsed,
+        "response_id": response.get("id") if isinstance(response.get("id"), str) else None,
+    }
+
+
 class GpuMemoryMonitor:
     def __init__(self, interval_seconds: float = 1.0):
         self.interval_seconds = interval_seconds
@@ -154,13 +200,17 @@ class DualLoRAVLLMService:
         self.vllm_bin = vllm_bin
         self.startup_timeout_seconds = float(startup_timeout_seconds)
         self.vllm = dict(self.config.get("deployment", {}).get("vllm", {}))
-        self.host = str(os.environ.get("VLLM_HOST", self.vllm.get("host", "127.0.0.1")))
-        self.port = int(os.environ.get("VLLM_PORT", self.vllm.get("port", 8000)))
+        self.host = str(
+            os.environ.get("VLLM_HOST", "").strip() or self.vllm.get("host", "127.0.0.1")
+        )
+        port_value = os.environ.get("VLLM_PORT", "").strip()
+        self.port = int(port_value) if port_value else int(self.vllm.get("port", 8000))
         client_host = "127.0.0.1" if self.host in {"0.0.0.0", "::"} else self.host
         self.base_url = f"http://{client_host}:{self.port}/v1"
         self.timeout_seconds = float(request_timeout_seconds or self.vllm.get("request_timeout_seconds", 900))
-        configured_memory = os.environ.get(
-            "VLLM_GPU_MEMORY_UTILIZATION", self.vllm.get("gpu_memory_utilization", 0.8)
+        configured_memory = (
+            os.environ.get("VLLM_GPU_MEMORY_UTILIZATION", "").strip()
+            or self.vllm.get("gpu_memory_utilization", 0.8)
         )
         self.gpu_memory_utilization = float(configured_memory)
         self.enforce_eager = str(
@@ -377,37 +427,13 @@ class DualLoRAVLLMService:
         messages: Sequence[Mapping[str, Any]],
         max_tokens: int,
     ) -> dict[str, Any]:
-        clean_messages = []
-        for message in messages:
-            role, content = message.get("role"), message.get("content")
-            if role not in {"system", "user", "assistant"} or not isinstance(content, str):
-                raise ValueError("generation messages must have standard role/content string fields")
-            clean_messages.append({"role": role, "content": content})
-        payload = {
-            "model": model_alias,
-            "messages": clean_messages,
-            "max_tokens": int(max_tokens),
-            "temperature": 0,
-            "chat_template_kwargs": {"enable_thinking": False},
-        }
-        started = time.monotonic()
-        response = _http_json(f"{self.base_url}/chat/completions", timeout=self.timeout_seconds, payload=payload)
-        elapsed = time.monotonic() - started
-        choices = response.get("choices")
-        choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
-        usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
-        prompt_tokens = usage.get("prompt_tokens")
-        completion_tokens = usage.get("completion_tokens")
-        return {
-            "text": _response_content(response),
-            "requested_model_alias": model_alias,
-            "response_model": response.get("model") if isinstance(response.get("model"), str) else None,
-            "finish_reason": choice.get("finish_reason") if isinstance(choice.get("finish_reason"), str) else None,
-            "usage_prompt_tokens": prompt_tokens if type(prompt_tokens) is int else None,
-            "usage_completion_tokens": completion_tokens if type(completion_tokens) is int else None,
-            "generation_seconds": elapsed,
-            "response_id": response.get("id") if isinstance(response.get("id"), str) else None,
-        }
+        return _chat_completion_request(
+            base_url=self.base_url,
+            timeout_seconds=self.timeout_seconds,
+            model_alias=model_alias,
+            messages=messages,
+            max_tokens=max_tokens,
+        )
 
     def close(self, *, terminate_timeout_seconds: float = 30.0) -> int | None:
         process = self.process
@@ -424,3 +450,70 @@ class DualLoRAVLLMService:
             self._log_handle.close()
             self._log_handle = None
         return returncode
+
+
+class ExternalVLLMService:
+    """Talk to the vLLM server that the official start.sh already launched.
+
+    The official start.sh owns the server lifecycle.  This client only checks
+    readiness, lists the advertised models, and sends serial chat requests to
+    the two LoRA aliases; ``close`` deliberately leaves the server running.
+    """
+
+    def __init__(self, *, base_url: str, request_timeout_seconds: float = 900.0):
+        normalized = base_url.rstrip("/")
+        if not normalized:
+            raise ValueError("external vLLM base URL must not be empty")
+        self.base_url = normalized
+        self.timeout_seconds = float(request_timeout_seconds)
+        parsed = urllib.parse.urlparse(normalized)
+        self.port = parsed.port
+        self.process = None
+
+    def start(self) -> dict[str, Any]:
+        models = self.list_models(timeout=10.0)
+        return {
+            "status": "ready",
+            "startup_seconds": 0.0,
+            "models": models or None,
+            "port": self.port,
+            "gpu_memory_utilization": None,
+            "enforce_eager": None,
+            "managed_by": "official_start_sh",
+        }
+
+    def is_alive(self) -> bool:
+        try:
+            self.list_models(timeout=5.0)
+            return True
+        except Exception:
+            return False
+
+    def list_models(self, *, timeout: float = 10.0) -> list[str]:
+        payload = _http_json(f"{self.base_url}/models", timeout=timeout)
+        values = payload.get("data")
+        if not isinstance(values, list):
+            return []
+        return [
+            value["id"]
+            for value in values
+            if isinstance(value, dict) and isinstance(value.get("id"), str)
+        ]
+
+    def chat_completion(
+        self,
+        *,
+        model_alias: str,
+        messages: Sequence[Mapping[str, Any]],
+        max_tokens: int,
+    ) -> dict[str, Any]:
+        return _chat_completion_request(
+            base_url=self.base_url,
+            timeout_seconds=self.timeout_seconds,
+            model_alias=model_alias,
+            messages=messages,
+            max_tokens=max_tokens,
+        )
+
+    def close(self, **_kwargs: Any) -> None:
+        return None

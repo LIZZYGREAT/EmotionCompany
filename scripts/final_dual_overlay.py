@@ -23,7 +23,7 @@ from scripts.final_dual_docker_package import PDF_PATH, pdf_asset_facts, verify_
 
 DEFAULT_FACTS = Path("outputs/deployment/final_overlay/base_image.json")
 OVERLAY_FILES = (
-    Path("participant/start.sh"),
+    Path("participant/start_official.sh"),
     Path("participant/run_inference.py"),
     Path("participant/final_dual_inference.py"),
     Path("participant/configs/inference_config.json"),
@@ -31,6 +31,7 @@ OVERLAY_FILES = (
     Path("configs/deployment/final_dual_docker.json"),
     Path("docker/final_dual/entrypoint.sh"),
     Path("docker/final_dual/entrypoint_args.sh"),
+    Path("docker/final_dual/emotionalcompany_vllm_wrapper.py"),
     Path("src/inference/final_dual_protocol.py"),
     Path("src/inference/final_dual_vllm.py"),
     PDF_PATH,

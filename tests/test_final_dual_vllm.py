@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 import src.inference.final_dual_vllm as dual_vllm
 from src.inference.final_dual_vllm import DualLoRAVLLMService, VLLMServiceError
+
+
+ROOT = Path(__file__).resolve().parents[1]
+VLLM_WRAPPER = ROOT / "docker/final_dual/emotionalcompany_vllm_wrapper.py"
 
 
 def _service(tmp_path: Path) -> DualLoRAVLLMService:
@@ -187,3 +194,99 @@ def test_start_uses_models_endpoint_only_for_readiness_without_alias_or_version_
     assert "version" not in facts
     assert not hasattr(service, "_check_version")
     service.close()
+
+
+def test_external_service_uses_the_official_servers_lora_aliases(monkeypatch) -> None:
+    calls: list[tuple[str, dict | None]] = []
+
+    def fake_http_json(url: str, *, timeout: float, payload: dict | None = None):
+        calls.append((url, payload))
+        if url.endswith("/models"):
+            return {"data": [
+                {"id": "model"},
+                {"id": "profile"},
+                {"id": "emotion-response"},
+            ]}
+        return {
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 1},
+            "model": "emotion-response",
+        }
+
+    monkeypatch.setattr(dual_vllm, "_http_json", fake_http_json)
+    service = dual_vllm.ExternalVLLMService(base_url="http://127.0.0.1:8000/v1")
+    facts = service.start()
+
+    assert facts["models"] == ["model", "profile", "emotion-response"]
+    assert facts["managed_by"] == "official_start_sh"
+    result = service.chat_completion(
+        model_alias="emotion-response",
+        messages=[{"role": "user", "content": "hello"}],
+        max_tokens=8,
+    )
+    assert result["text"] == "ok"
+    assert calls[-1][0].endswith("/chat/completions")
+    assert calls[-1][1]["model"] == "emotion-response"
+    assert service.is_alive() is True
+    service.close()
+
+
+def test_vllm_wrapper_forces_single_gpu_and_registers_both_adapters(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    emotion = tmp_path / "emotion-response"
+    profile.mkdir()
+    emotion.mkdir()
+    environment = {
+        **os.environ,
+        "EMOTIONALCOMPANY_REAL_VLLM": "/bin/echo",
+        "EMOTIONALCOMPANY_PROFILE_ADAPTER": str(profile),
+        "EMOTIONALCOMPANY_EMOTION_ADAPTER": str(emotion),
+    }
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(VLLM_WRAPPER),
+            "serve", "/base",
+            "--host", "127.0.0.1",
+            "--port", "8000",
+            "--served-model-name", "model",
+            "--tensor-parallel-size", "2",
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--tensor-parallel-size 1" in completed.stdout
+    assert "--tensor-parallel-size 2" not in completed.stdout
+    assert "--enable-lora" in completed.stdout
+    assert f"profile={profile}" in completed.stdout
+    assert f"emotion-response={emotion}" in completed.stdout
+
+
+def test_vllm_wrapper_keeps_base_only_behavior_without_adapters(tmp_path: Path) -> None:
+    environment = {
+        **os.environ,
+        "EMOTIONALCOMPANY_REAL_VLLM": "/bin/echo",
+        "EMOTIONALCOMPANY_PROFILE_ADAPTER": str(tmp_path / "missing-profile"),
+        "EMOTIONALCOMPANY_EMOTION_ADAPTER": str(tmp_path / "missing-emotion"),
+    }
+
+    completed = subprocess.run(
+        [
+            sys.executable, str(VLLM_WRAPPER), "serve", "/base",
+            "--host", "127.0.0.1", "--port", "8000",
+            "--served-model-name", "model", "--tensor-parallel-size", "2",
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--tensor-parallel-size 1" in completed.stdout
+    assert "--enable-lora" not in completed.stdout

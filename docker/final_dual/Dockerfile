@@ -11,9 +11,9 @@ ENV CONDA_PREFIX=/opt/conda/envs/conda_env
 ENV CONDA_DEFAULT_ENV=conda_env
 ENV PATH=/opt/conda/envs/conda_env/bin:/opt/conda/bin:${PATH}
 ENV PYTHON_BIN=/opt/conda/envs/conda_env/bin/python
-ENV VLLM_BIN=/opt/conda/envs/conda_env/bin/vllm
-ENV EVALUATION_INFERENCE_CONFIG=/root/configs/deployment/final_dual_docker.json
+ENV VLLM_BIN=/usr/local/bin/emotionalcompany-vllm
 ENV EVALUATION_BACKEND=openai_compatible
+ENV EVALUATION_INFERENCE_CONFIG=/root/participant/configs/inference_config.json
 ENV HF_HOME=/tmp/huggingface
 ENV HF_HUB_OFFLINE=1
 ENV TRANSFORMERS_OFFLINE=1
@@ -40,7 +40,7 @@ RUN /opt/conda/bin/conda create --yes --name conda_env --file /tmp/conda-linux-6
     && /opt/conda/bin/conda clean --all --yes
 
 WORKDIR /root
-COPY participant/start.sh /root/participant/start.sh
+COPY participant/start_official.sh /root/participant/start.sh
 COPY participant/run_inference.py /root/participant/run_inference.py
 COPY participant/final_dual_inference.py /root/participant/final_dual_inference.py
 COPY participant/configs/inference_config.json /root/participant/configs/inference_config.json
@@ -65,9 +65,11 @@ COPY src/inference/final_dual_vllm.py /root/src/inference/final_dual_vllm.py
 COPY package_manifest.json /root/package_manifest.json
 COPY docker/final_dual/entrypoint.sh /usr/local/bin/emotionalcompany-final-dual-entrypoint
 COPY docker/final_dual/entrypoint_args.sh /usr/local/bin/entrypoint_args.sh
+COPY docker/final_dual/emotionalcompany_vllm_wrapper.py /usr/local/bin/emotionalcompany-vllm
 
 RUN chmod 0755 /usr/local/bin/emotionalcompany-final-dual-entrypoint \
       /usr/local/bin/entrypoint_args.sh \
+      /usr/local/bin/emotionalcompany-vllm \
       /root/participant/start.sh \
     && test -x /opt/conda/envs/conda_env/bin/vllm \
     && test -f /root/participant/model/config.json \

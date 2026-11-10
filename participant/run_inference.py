@@ -1501,8 +1501,51 @@ def _prediction_status_counts(statuses: list[str]) -> dict[str, int]:
     return {status: statuses.count(status) for status in sorted(set(statuses))}
 
 
+def _dual_submission_config(path: Path) -> dict[str, Any] | None:
+    """Return the config when the official entry must run the Dual protocol."""
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    adapters = config.get("adapters")
+    if config.get("mode") == "dual_adapter" or (
+        isinstance(adapters, dict)
+        and isinstance(adapters.get("profile"), dict)
+        and isinstance(adapters.get("emotion_response"), dict)
+    ):
+        return config
+    return None
+
+
 def main() -> None:
     args = parse_args()
+    dispatch_config_path = inference_config_path()
+    if (
+        os.environ.get("EVALUATION_BASE_URL", "").strip()
+        and _dual_submission_config(dispatch_config_path) is not None
+    ):
+        # The official start.sh owns the vLLM server.  Delegate to the Dual
+        # runner with an explicit external-server contract instead of
+        # starting a second server or modifying start.sh.
+        base_url = os.environ.get("EVALUATION_BASE_URL", "").strip()
+        if not base_url:
+            raise RuntimeError("dual_adapter official entry requires EVALUATION_BASE_URL from start.sh")
+        environment = os.environ.copy()
+        environment["EVALUATION_INFERENCE_CONFIG"] = str(dispatch_config_path)
+        environment["EVALUATION_REUSE_VLLM_BASE_URL"] = base_url
+        environment["EVALUATION_BACKEND"] = "vllm"
+        os.execve(
+            sys.executable,
+            [
+                sys.executable,
+                str(ROOT / "final_dual_inference.py"),
+                str(args.test_file),
+                str(args.result_dir),
+            ],
+            environment,
+        )
     test_file = validate_test_file(args.test_file.resolve())
     result_dir = args.result_dir.resolve()
     prepare_result_dir(result_dir)

@@ -142,10 +142,10 @@ def _verify_fixture(tmp_path: Path) -> tuple[Path, Path, Path, list[dict[str, An
     outputs = [_valid_submission(row["id"]) for row in input_rows]
     _write_jsonl(result_dir / "submission.jsonl", outputs)
     report = {
-        "version": "final-dual-official-run-v2",
+        "version": "final-dual-official-run-v4",
         "status": "passed",
         "complete": True,
-        "backend": "vllm",
+        "backend": "openai_compatible",
         "samples": 3,
         "submission_rows": 3,
         "performance": {"measurement_limit": 100, "measured_samples": 3},
@@ -168,6 +168,22 @@ def test_verify_output_checks_only_official_files_ids_and_order(tmp_path: Path) 
 
     assert result["status"] == "passed_interface_output"
     assert result["input_rows"] == result["submission_rows"] == 3
+    assert result["ids_preserved_in_order"] is True
+
+
+def test_verify_output_accepts_official_opaque_ids(tmp_path: Path) -> None:
+    _repo, test_file, result_dir, _input_rows, _outputs = _verify_fixture(tmp_path)
+    ids = ["test1_000001_t5", "raw/id:002", "test_000003_t0"]
+    input_rows = [
+        {"id": sample_id, "history": [{"role": "user", "content": "message"}]}
+        for sample_id in ids
+    ]
+    _write_jsonl(test_file, input_rows)
+    _write_jsonl(result_dir / "submission.jsonl", [_valid_submission(i) for i in ids])
+
+    result = package.verify_output(test_file=test_file, result_dir=result_dir)
+
+    assert result["status"] == "passed_interface_output"
     assert result["ids_preserved_in_order"] is True
 
 

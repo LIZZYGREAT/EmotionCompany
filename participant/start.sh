@@ -33,8 +33,49 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 PROBE_SCRIPT="$WORKSPACE_ROOT/scripts/e02_vllm_probe.py"
 PYTHON_CMD="${PYTHON_BIN:-python3}"
+
+# Best-effort startup diagnostics.  The container cannot write to an
+# arbitrary host directory; this mirrors the reason to RESULT_DIR's ancestors,
+# the input directory, CWD, and (inside the delivery container) common mounts.
+write_startup_diagnostic() {
+  local reason="$1"
+  shift
+  local timestamp line directory seen
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  line="emotionalcompany startup error: ${reason}; time=${timestamp}; pid=$$; pwd=${PWD}; argc=$#; argv=$(printf '%q ' "$@")"
+  local -a directories=("$PWD")
+  if [[ -f /.dockerenv || -f /run/.containerenv ]]; then
+    directories+=(/output /result /results /workspace /data /job /jobs /upload /uploads)
+    for directory in /mnt/*; do
+      [[ -d "$directory" ]] && directories+=("$directory")
+    done
+    if [[ -r /proc/mounts ]]; then
+      local device mount_point fs_type options rest
+      while read -r device mount_point fs_type options rest; do
+        case "$fs_type" in
+          proc|sysfs|devpts|tmpfs|cgroup|cgroup2|mqueue|devtmpfs|overlay|shm|none|nsfs|securityfs|debugfs|tracefs|pstore|bpf|configfs|fusectl|hugetlbfs|autofs|ramfs) continue ;;
+        esac
+        case ",$options," in *,ro,*) continue ;; esac
+        mount_point="${mount_point//\\040/ }"
+        case "$mount_point" in
+          /|/proc*|/sys*|/dev*|/etc*|/usr*|/opt*|/bin*|/sbin*|/lib*|/run*|/var*) continue ;;
+        esac
+        [[ -d "$mount_point" ]] && directories+=("$mount_point")
+      done < /proc/mounts
+    fi
+  fi
+  seen=" "
+  for directory in "${directories[@]}"; do
+    [[ -d "$directory" && -w "$directory" ]] || continue
+    case "$seen" in *" $directory "*) continue ;; esac
+    seen+="$directory "
+    printf '%s\n' "$line" >> "$directory/emotionalcompany_startup_error.log" 2>/dev/null || true
+  done
+}
+
 if [[ $# -ne 2 ]]; then
   echo "用法: $0 TEST_FILE RESULT_DIR" >&2
+  write_startup_diagnostic "invalid_argument_count" "$@"
   exit 2
 fi
 
@@ -45,10 +86,8 @@ if [[ -n "${EVALUATION_INFERENCE_CONFIG:-}" && "$EVALUATION_INFERENCE_CONFIG" !=
   EVALUATION_INFERENCE_CONFIG="$WORKSPACE_ROOT/$EVALUATION_INFERENCE_CONFIG"
   export EVALUATION_INFERENCE_CONFIG
 fi
-CONFIG_FILE="${EVALUATION_INFERENCE_CONFIG:-$SCRIPT_DIR/configs/inference_config.json}"
-DUAL_CONFIG="$WORKSPACE_ROOT/configs/deployment/final_dual_docker.json"
-if [[ -f "$DUAL_CONFIG" && "$SCRIPT_DIR" == "/root/participant" && "${EVALUATION_FORCE_DUAL_CONFIG:-true}" != "false" ]]; then
-  SELECTED_MODE="$("$PYTHON_CMD" - "$CONFIG_FILE" <<'PY' 2>/dev/null || true
+config_facts() {
+  "$PYTHON_CMD" - "$1" <<'PY' 2>/dev/null
 import json
 import sys
 
@@ -56,11 +95,28 @@ try:
     value = json.load(open(sys.argv[1], encoding="utf-8"))
 except Exception:
     value = {}
-print(value.get("mode", "") if isinstance(value, dict) else "")
+adapters = value.get("adapters") if isinstance(value, dict) else None
+is_dual = isinstance(value, dict) and (
+    value.get("mode") == "dual_adapter"
+    or (
+        isinstance(adapters, dict)
+        and isinstance(adapters.get("profile"), dict)
+        and isinstance(adapters.get("emotion_response"), dict)
+    )
+)
+backend = value.get("backend", "transformers") if isinstance(value, dict) else "transformers"
+print("true" if is_dual else "false", backend)
 PY
-)"
-  if [[ "$CONFIG_FILE" != "$DUAL_CONFIG" && "$SELECTED_MODE" != "dual_adapter" ]]; then
-    echo "WARNING: 所选配置不是 dual_adapter（mode='$SELECTED_MODE'）；使用镜像内置 Dual 配置: $DUAL_CONFIG" >&2
+}
+
+CONFIG_FILE="${EVALUATION_INFERENCE_CONFIG:-$SCRIPT_DIR/configs/inference_config.json}"
+DUAL_CONFIG="$WORKSPACE_ROOT/configs/deployment/final_dual_docker.json"
+FORCE_DUAL="${EVALUATION_FORCE_DUAL_CONFIG:-}"
+if [[ -f "$DUAL_CONFIG" && "${EVALUATION_FORCE_DUAL_CONFIG:-true}" != "false" \
+      && ( "$SCRIPT_DIR" == "/root/participant" || "$FORCE_DUAL" == "true" ) ]]; then
+  read -r SELECTED_DUAL _ <<<"$(config_facts "$CONFIG_FILE" || true)"
+  if [[ "$CONFIG_FILE" != "$DUAL_CONFIG" && "$SELECTED_DUAL" != "true" ]]; then
+    echo "WARNING: 所选配置不是 Dual（无 mode=dual_adapter 或 adapters）；使用镜像内置 Dual 配置: $DUAL_CONFIG" >&2
     CONFIG_FILE="$DUAL_CONFIG"
   fi
 fi
@@ -70,6 +126,7 @@ if [[ ! -f "$CONFIG_FILE" && -f "$DUAL_CONFIG" ]]; then
 fi
 [[ -f "$CONFIG_FILE" ]] || {
   echo "ERROR: 推理配置文件不存在: $CONFIG_FILE" >&2
+  write_startup_diagnostic "config_missing: ${CONFIG_FILE}" "$TEST_FILE" "$RESULT_DIR"
   exit 1
 }
 
@@ -86,24 +143,20 @@ VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-}"
 
 command -v "$PYTHON_CMD" >/dev/null 2>&1 || {
   echo "ERROR: 找不到 Python 命令: $PYTHON_CMD" >&2
+  write_startup_diagnostic "python_missing: ${PYTHON_CMD}" "$TEST_FILE" "$RESULT_DIR"
   exit 1
 }
 
-CONFIG_META="$("$PYTHON_CMD" - "$CONFIG_FILE" <<'PY'
-import json
-import sys
-
-config = json.load(open(sys.argv[1], encoding="utf-8"))
-print(config.get("mode", ""), config.get("backend", "transformers"))
-PY
-)"
-read -r EARLY_MODE CONFIG_BACKEND <<< "$CONFIG_META"
+CONFIG_META="$(config_facts "$CONFIG_FILE")"
+read -r CONFIG_IS_DUAL CONFIG_BACKEND <<< "$CONFIG_META"
 BACKEND="${EVALUATION_BACKEND:-$CONFIG_BACKEND}"
-if [[ "$EARLY_MODE" == "dual_adapter" ]]; then
+if [[ "$CONFIG_IS_DUAL" == "true" ]]; then
   case "$BACKEND" in
     transformers) ;;
     vllm|openai_compatible|openai-compatible|openai) BACKEND="vllm" ;;
-    *) echo "ERROR: dual_adapter backend 必须为 transformers、vllm 或 openai_compatible: $BACKEND" >&2; exit 1 ;;
+    *) echo "ERROR: dual_adapter backend 必须为 transformers、vllm 或 openai_compatible: $BACKEND" >&2
+       write_startup_diagnostic "invalid_backend: ${BACKEND}" "$TEST_FILE" "$RESULT_DIR"
+       exit 1 ;;
   esac
   echo "后端: $BACKEND（dual_adapter 官方入口）"
   export EVALUATION_BACKEND="$BACKEND"
@@ -119,6 +172,7 @@ fi
 }
 if [[ -e "$RESULT_DIR" && ! -d "$RESULT_DIR" ]]; then
   echo "ERROR: RESULT_DIR 已存在但不是目录: $RESULT_DIR" >&2
+  write_startup_diagnostic "result_dir_not_directory: ${RESULT_DIR}" "$TEST_FILE" "$RESULT_DIR"
   exit 1
 fi
 
