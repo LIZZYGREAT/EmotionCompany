@@ -88,4 +88,10 @@ jobs:
             tests/test_e03_a6_f4_staged_contract.py \
             tests/test_e03_a6_f4_staged_resume.py \
             tests/test_e03_a6_f4_staged_fast.py \
-            tests/test_e03_a8_replay.py
+            tests/test_e03_a8_replay.py \
+            tests/test_final_dual_protocol.py \
+            tests/test_final_dual_vllm.py \
+            tests/test_final_dual_inference.py \
+            tests/test_final_dual_entrypoint.py \
+            tests/test_final_dual_docker_package.py \
+            tests/test_final_dual_overlay.py
