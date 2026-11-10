@@ -42,7 +42,8 @@ def test_start_script_keeps_lora_opt_in_and_checks_the_requested_server_route():
 
     assert 'LORA_ENABLED="${VLLM_LORA_ENABLED:-$CONFIG_ADAPTER_ENABLED}"' in script
     assert 'VLLM_ARGS+=(--enable-lora --lora-modules "$LORA_NAME=$LORA_PATH" --max-lora-rank "$MAX_LORA_RANK")' in script
-    assert 'scripts/e02_vllm_probe.py" models' in script
+    assert 'PROBE_SCRIPT="$WORKSPACE_ROOT/scripts/e02_vllm_probe.py"' in script
+    assert '"$PROBE_SCRIPT" models' in script
     assert 'export EVALUATION_API_MODEL="$REQUEST_MODEL_NAME"' in script
 
 

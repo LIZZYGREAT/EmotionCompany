@@ -1,5 +1,5 @@
 {
-  "version": "E03-final-dual-v1.2",
+  "version": "E03-final-dual-v1.3-portable",
   "run_id": "E03-DUAL-20261109-03",
   "mode": "dual_adapter",
   "backend": "transformers",
@@ -90,6 +90,9 @@
       "": 0
     }
   },
+  "fallback": {
+    "degraded_output_on_runtime_failure": true
+  },
   "deployment": {
     "vllm": {
       "expected_version": "0.11.1",
@@ -97,19 +100,19 @@
       "port": 8000,
       "base_url": "http://127.0.0.1:8000/v1",
       "served_model_name": "qwen-base",
-      "dtype": "bfloat16",
+      "dtype": "auto",
       "max_model_len": 2560,
       "max_num_seqs": 1,
       "max_num_batched_tokens": 2560,
       "max_lora_rank": 8,
       "max_loras": 1,
       "max_cpu_loras": 2,
-      "gpu_memory_utilization": 0.8,
+      "gpu_memory_utilization": 0.7,
       "request_timeout_seconds": 900
     }
   },
   "runtime_behavior": {
-    "version": "E03-v1.2-readme-v3-contract",
+    "version": "E03-v1.3-portable-contract",
     "max_emotion_response_retries": 1,
     "retry_only_on_finish_reason": "length"
   }

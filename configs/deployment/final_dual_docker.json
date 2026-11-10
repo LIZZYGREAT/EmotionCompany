@@ -1,7 +1,7 @@
 {
-  "version": "E03-final-dual-docker-v2.0",
+  "version": "E03-final-dual-docker-v3.0",
   "run_id": "E03-DUAL-20261109-04",
-  "runtime_contract_version": "E03-v2-simplified-inference-entrypoint",
+  "runtime_contract_version": "E03-v3-portable-runtime",
   "mode": "dual_adapter",
   "backend": "vllm",
   "model_id": "Qwen/Qwen3-1.7B",
@@ -85,6 +85,9 @@
     "load_in_4bit": false,
     "compute_dtype": "bfloat16"
   },
+  "fallback": {
+    "degraded_output_on_runtime_failure": true
+  },
   "deployment": {
     "vllm": {
       "expected_version": "0.11.1",
@@ -92,14 +95,14 @@
       "port": 8000,
       "base_url": "http://127.0.0.1:8000/v1",
       "served_model_name": "qwen-base",
-      "dtype": "bfloat16",
+      "dtype": "auto",
       "max_model_len": 2560,
       "max_num_seqs": 1,
       "max_num_batched_tokens": 2560,
       "max_lora_rank": 8,
       "max_loras": 1,
       "max_cpu_loras": 2,
-      "gpu_memory_utilization": 0.8,
+      "gpu_memory_utilization": 0.7,
       "request_timeout_seconds": 900
     }
   }

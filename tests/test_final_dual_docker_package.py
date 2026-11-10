@@ -37,8 +37,8 @@ def test_dockerfile_pins_validated_build_images_and_minimal_runtime_entrypoint()
     assert "nvidia-smi" not in entrypoint
     assert "exec sleep infinity" in entrypoint
     assert 'exec bash /root/participant/start.sh "$TEST_FILE" "$RESULT_DIR"' in entrypoint
-    assert "participant/run_inference.py" not in dockerfile
-    assert "scripts/e02_vllm_probe.py" not in dockerfile
+    assert "participant/run_inference.py" in dockerfile
+    assert "scripts/e02_vllm_probe.py" in dockerfile
     assert "COPY report/main.pdf /root/report/main.pdf" in dockerfile
 
 

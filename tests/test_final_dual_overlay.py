@@ -62,11 +62,11 @@ def test_prepare_code_context_is_small_and_records_pdf_and_parent(
     assert manifest["report_pdf"]["sha256"] == overlay.sha256_file(output / overlay.PDF_PATH)
 
 
-def test_smoke_fixture_uses_unrestricted_ids_and_extra_metadata() -> None:
+def test_smoke_fixture_uses_official_schema_ids_and_extra_metadata() -> None:
     rows = overlay.make_smoke_rows(3)
 
     assert [row["id"] for row in rows] == [
-        "test1_000001_t5", "test_000001_t0", "overlay-smoke:3"
+        "test_000001_t0", "test_000002_t0", "test_000003_t0"
     ]
     assert rows[0]["platform_metadata"] == {"source": "overlay-smoke"}
     assert rows[0]["history"][0]["smoke_metadata"] == "must be ignored"

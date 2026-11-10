@@ -77,6 +77,8 @@ def _run_mocked_main(
     request_error_at: int | None = None,
     service_dies_on_error: bool = False,
     preserve_existing: bool = False,
+    fallback_enabled: bool = False,
+    service_start_error: Exception | None = None,
 ) -> tuple[int, Path, list[tuple[str, list[dict[str, Any]], int]], dict[str, Any]]:
     test_file = tmp_path / "input.jsonl"
     _write_jsonl(test_file, rows)
@@ -89,7 +91,7 @@ def _run_mocked_main(
         (result_dir / "keep.txt").write_bytes(keep_content)
 
     config_path = tmp_path / "deployment.json"
-    config_path.write_text(json.dumps({
+    config = {
         "mode": "dual_adapter",
         "backend": "vllm",
         "model_path": str(tmp_path / "base"),
@@ -103,7 +105,10 @@ def _run_mocked_main(
             "pad_token_id": 151643,
         },
         "deployment": {"vllm": {"request_timeout_seconds": 900}},
-    }), encoding="utf-8")
+    }
+    if fallback_enabled:
+        config["fallback"] = {"degraded_output_on_runtime_failure": True}
+    config_path.write_text(json.dumps(config), encoding="utf-8")
 
     prompts = {
         "selection": "selection",
@@ -131,6 +136,8 @@ def _run_mocked_main(
             pass
 
         def start(self) -> dict[str, Any]:
+            if service_start_error is not None:
+                raise service_start_error
             return {"startup_seconds": 0.01, "models": []}
 
         def is_alive(self) -> bool:
@@ -259,7 +266,7 @@ def test_service_failure_returns_nonzero_preserves_old_outputs_and_closes_servic
     assert (result_dir / "performance_report.json").read_bytes() == b"old report\n"
     assert (result_dir / "keep.txt").read_bytes() == facts["keep_content"]
     assert sorted(path.name for path in result_dir.iterdir()) == [
-        "keep.txt", "performance_report.json", "submission.jsonl"
+        "keep.txt", "performance_report.json", "runtime_failure.json", "submission.jsonl"
     ]
 
 
@@ -293,3 +300,56 @@ def test_main_measures_only_the_first_100_samples(
     assert report["performance"]["measured_samples"] == 100
     assert len(report["performance"]["latencies_ms"]) == 100
     assert len((result_dir / "submission.jsonl").read_text(encoding="utf-8").splitlines()) == 101
+
+
+def test_runtime_start_failure_can_write_degraded_official_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code, result_dir, calls, facts = _run_mocked_main(
+        tmp_path,
+        monkeypatch,
+        [_sample(1), _sample(2)],
+        fallback_enabled=True,
+        service_start_error=RuntimeError("simulated GPU/driver failure"),
+    )
+
+    assert code == 0
+    assert calls == []
+    assert facts["service_state"]["closed"] is False
+    submissions = [
+        json.loads(line)
+        for line in (result_dir / "submission.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["id"] for row in submissions] == ["test_000001_t1", "test_000002_t1"]
+    assert all(row["emotion_label"] == "" and row["response_text"] == "" for row in submissions)
+    report = json.loads((result_dir / "performance_report.json").read_text(encoding="utf-8"))
+    assert report["status"] == "degraded"
+    assert report["inference_success"] is False
+    assert report["complete"] is True
+    assert report["submission_rows"] == 2
+    assert (result_dir / "runtime_failure.json").is_file()
+
+
+def test_service_death_mid_run_can_finish_with_degraded_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code, result_dir, calls, facts = _run_mocked_main(
+        tmp_path,
+        monkeypatch,
+        [_sample(1), _sample(2)],
+        request_error_at=1,
+        service_dies_on_error=True,
+        fallback_enabled=True,
+    )
+
+    assert code == 0
+    assert len(calls) == 1
+    assert facts["service_state"]["closed"] is True
+    submissions = [
+        json.loads(line)
+        for line in (result_dir / "submission.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(submissions) == 2
+    report = json.loads((result_dir / "performance_report.json").read_text(encoding="utf-8"))
+    assert report["status"] == "degraded"
+    assert report["service_unavailable"] is True

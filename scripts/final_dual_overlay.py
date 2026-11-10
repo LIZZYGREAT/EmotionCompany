@@ -23,7 +23,14 @@ from scripts.final_dual_docker_package import PDF_PATH, pdf_asset_facts, verify_
 
 DEFAULT_FACTS = Path("outputs/deployment/final_overlay/base_image.json")
 OVERLAY_FILES = (
+    Path("participant/start.sh"),
+    Path("participant/run_inference.py"),
     Path("participant/final_dual_inference.py"),
+    Path("participant/configs/inference_config.json"),
+    Path("scripts/e02_vllm_probe.py"),
+    Path("configs/deployment/final_dual_docker.json"),
+    Path("docker/final_dual/entrypoint.sh"),
+    Path("docker/final_dual/entrypoint_args.sh"),
     Path("src/inference/final_dual_protocol.py"),
     Path("src/inference/final_dual_vllm.py"),
     PDF_PATH,
@@ -304,16 +311,16 @@ def build_overlay(*, image: str, tag: str, context_dir: Path, facts_file: Path, 
 def make_smoke_rows(count: int) -> list[dict[str, Any]]:
     if count < 1:
         raise ValueError("smoke count must be positive")
-    sample_ids = ["test1_000001_t5", "test_000001_t0"]
     rows = []
     for index in range(count):
-        sample_id = sample_ids[index] if index < len(sample_ids) else f"overlay-smoke:{index + 1}"
+        # Use IDs that satisfy the official submission Schema so the local
+        # verifier can prove the platform-facing output contract.
         rows.append({
-            "id": sample_id,
+            "id": f"test_{index + 1:06d}_t0",
             "history": [{
                 "role": "user",
                 "content": "我今天有些疲惫，想找人聊几句。",
-                "turn_id": index,
+                "turn_id": index + 1,
                 "smoke_metadata": "must be ignored",
             }],
             "platform_metadata": {"source": "overlay-smoke"},
@@ -324,8 +331,8 @@ def make_smoke_rows(count: int) -> list[dict[str, Any]]:
 def run_smoke(
     *, image: str, run_dir: Path, count: int = 2, mode: str = "direct", timeout: float = 7200,
 ) -> dict[str, Any]:
-    if mode not in {"direct", "explicit-bash"}:
-        raise ValueError("smoke mode must be direct or explicit-bash")
+    if mode not in {"direct", "explicit-bash", "shell-wrapper", "bin-bash-command"}:
+        raise ValueError("smoke mode must be direct, explicit-bash, shell-wrapper, or bin-bash-command")
     run_dir = run_dir.expanduser().resolve()
     if not (run_dir / "build.json").is_file():
         raise FileNotFoundError(f"overlay build evidence is missing: {run_dir / 'build.json'}")
@@ -365,6 +372,16 @@ def run_smoke(
     ]
     if mode == "explicit-bash":
         container_command.extend([image, "bash", "/root/participant/start.sh", "/input/test.jsonl", "/output"])
+    elif mode == "shell-wrapper":
+        container_command.extend([
+            image, "bash", "-lc",
+            "bash /root/participant/start.sh /input/test.jsonl /output",
+        ])
+    elif mode == "bin-bash-command":
+        container_command.extend([
+            image, "/bin/bash", "-c",
+            "bash /root/participant/start.sh /input/test.jsonl /output",
+        ])
     else:
         container_command.extend([image, "/input/test.jsonl", "/output"])
     started_at = datetime.now(timezone.utc).isoformat()
@@ -408,8 +425,15 @@ def export_image(*, image: str, run_dir: Path) -> dict[str, Any]:
         raise FileNotFoundError("export requires a successful overlay build and smoke record")
     build = json_read(build_path)
     successful_smokes = [json_read(path) for path in smoke_candidates]
-    if not any(item.get("status") == "passed" for item in successful_smokes):
-        raise ValueError("export is blocked until at least one Docker smoke passes")
+    matching_smokes = [
+        item
+        for item in successful_smokes
+        if item.get("status") == "passed" and item.get("image_id") == build.get("image_id")
+    ]
+    if not matching_smokes:
+        raise ValueError(
+            "export is blocked until a Docker smoke for the exact built image ID passes"
+        )
     info = inspect_image(image)
     if info.get("Id") != build.get("image_id"):
         raise ValueError("export image ID differs from the smoke-tested build")
@@ -476,7 +500,7 @@ def build_parser() -> argparse.ArgumentParser:
     smoke.add_argument("--image", required=True)
     smoke.add_argument("--run-dir", type=Path, required=True)
     smoke.add_argument("--count", type=int, default=2)
-    smoke.add_argument("--mode", choices=("direct", "explicit-bash"), default="direct")
+    smoke.add_argument("--mode", choices=("direct", "explicit-bash", "shell-wrapper", "bin-bash-command"), default="direct")
     smoke.add_argument("--timeout", type=float, default=7200)
 
     export = subparsers.add_parser("export", help="save one complete, smoke-tested image tar")

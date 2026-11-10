@@ -12,19 +12,19 @@ activate_project_conda_env() {
     conda_command="$(type -P conda || true)"
   fi
   if [[ -z "$conda_command" || ! -x "$conda_command" ]]; then
-    echo "ERROR: 找不到 Conda 可执行文件；请确保 conda 在 PATH 中，或设置 CONDA_EXE。入口需要环境 conda_env。" >&2
-    exit 1
+    echo "WARNING: 找不到 Conda 可执行文件；若 PYTHON_BIN/PATH 已指向 conda_env，则继续运行。" >&2
+    return 0
   fi
 
   local conda_hook
   if ! conda_hook="$("$conda_command" shell.bash hook 2>/dev/null)"; then
-    echo "ERROR: 无法初始化 Conda shell hook: $conda_command" >&2
-    exit 1
+    echo "WARNING: 无法初始化 Conda shell hook: $conda_command；继续使用当前环境。" >&2
+    return 0
   fi
   eval "$conda_hook"
   if ! conda activate conda_env; then
-    echo "ERROR: 无法激活 Conda 环境 conda_env。请检查该环境是否已创建。" >&2
-    exit 1
+    echo "WARNING: 无法激活 Conda 环境 conda_env；继续使用当前环境。" >&2
+    return 0
   fi
 }
 activate_project_conda_env
@@ -32,6 +32,7 @@ activate_project_conda_env
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 PROBE_SCRIPT="$WORKSPACE_ROOT/scripts/e02_vllm_probe.py"
+PYTHON_CMD="${PYTHON_BIN:-python3}"
 if [[ $# -ne 2 ]]; then
   echo "用法: $0 TEST_FILE RESULT_DIR" >&2
   exit 2
@@ -45,6 +46,28 @@ if [[ -n "${EVALUATION_INFERENCE_CONFIG:-}" && "$EVALUATION_INFERENCE_CONFIG" !=
   export EVALUATION_INFERENCE_CONFIG
 fi
 CONFIG_FILE="${EVALUATION_INFERENCE_CONFIG:-$SCRIPT_DIR/configs/inference_config.json}"
+DUAL_CONFIG="$WORKSPACE_ROOT/configs/deployment/final_dual_docker.json"
+if [[ -f "$DUAL_CONFIG" && "$SCRIPT_DIR" == "/root/participant" && "${EVALUATION_FORCE_DUAL_CONFIG:-true}" != "false" ]]; then
+  SELECTED_MODE="$("$PYTHON_CMD" - "$CONFIG_FILE" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+try:
+    value = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    value = {}
+print(value.get("mode", "") if isinstance(value, dict) else "")
+PY
+)"
+  if [[ "$CONFIG_FILE" != "$DUAL_CONFIG" && "$SELECTED_MODE" != "dual_adapter" ]]; then
+    echo "WARNING: 所选配置不是 dual_adapter（mode='$SELECTED_MODE'）；使用镜像内置 Dual 配置: $DUAL_CONFIG" >&2
+    CONFIG_FILE="$DUAL_CONFIG"
+  fi
+fi
+if [[ ! -f "$CONFIG_FILE" && -f "$DUAL_CONFIG" ]]; then
+  echo "WARNING: 推理配置不存在: $CONFIG_FILE；回退到 $DUAL_CONFIG" >&2
+  CONFIG_FILE="$DUAL_CONFIG"
+fi
 [[ -f "$CONFIG_FILE" ]] || {
   echo "ERROR: 推理配置文件不存在: $CONFIG_FILE" >&2
   exit 1
@@ -78,11 +101,13 @@ read -r EARLY_MODE CONFIG_BACKEND <<< "$CONFIG_META"
 BACKEND="${EVALUATION_BACKEND:-$CONFIG_BACKEND}"
 if [[ "$EARLY_MODE" == "dual_adapter" ]]; then
   case "$BACKEND" in
-    transformers|vllm) ;;
-    *) echo "ERROR: dual_adapter backend 必须为 transformers 或 vllm: $BACKEND" >&2; exit 1 ;;
+    transformers) ;;
+    vllm|openai_compatible|openai-compatible|openai) BACKEND="vllm" ;;
+    *) echo "ERROR: dual_adapter backend 必须为 transformers、vllm 或 openai_compatible: $BACKEND" >&2; exit 1 ;;
   esac
   echo "后端: $BACKEND（dual_adapter 官方入口）"
   export EVALUATION_BACKEND="$BACKEND"
+  export EVALUATION_INFERENCE_CONFIG="$CONFIG_FILE"
   export VLLM_BIN
   export VLLM_START_TIMEOUT="$START_TIMEOUT"
   exec "$PYTHON_CMD" "$SCRIPT_DIR/final_dual_inference.py" "$TEST_FILE" "$RESULT_DIR"
@@ -151,6 +176,9 @@ BACKEND="${EVALUATION_BACKEND:-}"
 if [[ -z "$BACKEND" ]]; then
   BACKEND="$CONFIG_BACKEND"
 fi
+case "$BACKEND" in
+  vllm|openai-compatible|openai) BACKEND="openai_compatible" ;;
+esac
 
 if [[ "$BACKEND" == "transformers" ]]; then
   echo "后端: transformers（直接加载本地模型）"
@@ -163,18 +191,29 @@ if [[ "$BACKEND" != "openai_compatible" ]]; then
   exit 1
 fi
 
-mapfile -d '' -t GPU_MEMORY_FACTS < <("$PYTHON_CMD" "$PROBE_SCRIPT" resolve-gpu-memory \
-  --config-value "$CONFIG_VLLM_GPU_MEMORY_UTILIZATION" \
-  --override-value "$VLLM_GPU_MEMORY_UTILIZATION" \
-  --format nul)
-[[ "${#GPU_MEMORY_FACTS[@]}" -eq 4 ]] || {
-  echo "ERROR: 无法解析 deployment.vllm.gpu_memory_utilization" >&2
-  exit 1
-}
-GPU_MEMORY_CONFIG_VALUE="${GPU_MEMORY_FACTS[0]}"
-GPU_MEMORY_OVERRIDE_VALUE="${GPU_MEMORY_FACTS[1]}"
-GPU_MEMORY_EFFECTIVE_VALUE="${GPU_MEMORY_FACTS[2]}"
-GPU_MEMORY_SOURCE="${GPU_MEMORY_FACTS[3]}"
+GPU_MEMORY_FACTS=()
+if [[ -f "$PROBE_SCRIPT" ]]; then
+  mapfile -d '' -t GPU_MEMORY_FACTS < <("$PYTHON_CMD" "$PROBE_SCRIPT" resolve-gpu-memory \
+    --config-value "$CONFIG_VLLM_GPU_MEMORY_UTILIZATION" \
+    --override-value "$VLLM_GPU_MEMORY_UTILIZATION" \
+    --format nul 2>/dev/null || true)
+fi
+if [[ "${#GPU_MEMORY_FACTS[@]}" -eq 4 ]]; then
+  GPU_MEMORY_CONFIG_VALUE="${GPU_MEMORY_FACTS[0]}"
+  GPU_MEMORY_OVERRIDE_VALUE="${GPU_MEMORY_FACTS[1]}"
+  GPU_MEMORY_EFFECTIVE_VALUE="${GPU_MEMORY_FACTS[2]}"
+  GPU_MEMORY_SOURCE="${GPU_MEMORY_FACTS[3]}"
+else
+  echo "WARNING: 无法从配置/探针解析 gpu_memory_utilization；使用 0.7 兼容默认值。" >&2
+  GPU_MEMORY_CONFIG_VALUE=""
+  GPU_MEMORY_OVERRIDE_VALUE=""
+  GPU_MEMORY_EFFECTIVE_VALUE="0.7"
+  GPU_MEMORY_SOURCE="portable_default"
+fi
+if [[ -z "$GPU_MEMORY_EFFECTIVE_VALUE" ]]; then
+  GPU_MEMORY_EFFECTIVE_VALUE="0.7"
+  GPU_MEMORY_SOURCE="portable_default"
+fi
 if [[ -n "$GPU_MEMORY_EFFECTIVE_VALUE" ]]; then
   VLLM_ARGS+=(--gpu-memory-utilization "$GPU_MEMORY_EFFECTIVE_VALUE")
 fi
@@ -202,30 +241,37 @@ if [[ -n "$CONFIG_VLLM_MAX_NUM_BATCHED_TOKENS" ]]; then
     exit 1
   }
   VLLM_ARGS+=(--max-num-batched-tokens "$CONFIG_VLLM_MAX_NUM_BATCHED_TOKENS")
+else
+  VLLM_ARGS+=(--max-num-batched-tokens "2560")
 fi
 
 read -r PROMPT_LIMIT GENERATION_LIMIT CONTEXT_LIMIT < <("$PYTHON_CMD" -c \
   'import json, os, sys; c=json.load(open(sys.argv[1], encoding="utf-8")); x=c.get("context", {}); g=c.get("generation", {}); p=os.environ.get("EVALUATION_MAX_PROMPT_TOKENS", x.get("max_prompt_tokens")); k=os.environ.get("EVALUATION_SERVING_CONTEXT_LIMIT", x.get("serving_context_limit")); print(p or "", g.get("max_new_tokens", ""), k or "")' \
   "$CONFIG_FILE")
-[[ "$PROMPT_LIMIT" =~ ^[1-9][0-9]*$ && "$GENERATION_LIMIT" =~ ^[1-9][0-9]*$ ]] || {
-  echo "ERROR: 配置必须显式提供正整数 P 和 G" >&2
-  exit 1
-}
+if ! [[ "$PROMPT_LIMIT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "WARNING: 配置缺少正整数 P；使用兼容默认值 1280。" >&2
+  PROMPT_LIMIT=1280
+fi
+if ! [[ "$GENERATION_LIMIT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "WARNING: 配置缺少正整数 G；使用兼容默认值 1200。" >&2
+  GENERATION_LIMIT=1200
+fi
+if ! [[ "$CONTEXT_LIMIT" =~ ^[1-9][0-9]*$ ]]; then
+  CONTEXT_LIMIT=2560
+  echo "WARNING: 配置未提供 K；单模型兜底路径使用 K=2560。" >&2
+fi
 if [[ -n "$CONTEXT_LIMIT" ]]; then
-  [[ "$CONTEXT_LIMIT" =~ ^[1-9][0-9]*$ ]] || {
-    echo "ERROR: EVALUATION_SERVING_CONTEXT_LIMIT 必须为正整数或留空" >&2
-    exit 1
-  }
-  ((PROMPT_LIMIT + GENERATION_LIMIT <= CONTEXT_LIMIT)) || {
+  if ((PROMPT_LIMIT + GENERATION_LIMIT <= CONTEXT_LIMIT)); then
+    if [[ -n "$CONFIG_VLLM_MAX_NUM_BATCHED_TOKENS" ]] && ((CONFIG_VLLM_MAX_NUM_BATCHED_TOKENS < PROMPT_LIMIT + GENERATION_LIMIT)); then
+      echo "ERROR: deployment.vllm.max_num_batched_tokens 小于 P+G 预算" >&2
+      exit 1
+    fi
+    VLLM_ARGS+=(--max-model-len "$CONTEXT_LIMIT")
+    echo "部署预算预检通过：P=$PROMPT_LIMIT, G=$GENERATION_LIMIT, K=$CONTEXT_LIMIT"
+  else
     echo "ERROR: 部署预算不兼容：P($PROMPT_LIMIT) + G($GENERATION_LIMIT) > K($CONTEXT_LIMIT)" >&2
     exit 1
-  }
-  if [[ -n "$CONFIG_VLLM_MAX_NUM_BATCHED_TOKENS" ]] && ((CONFIG_VLLM_MAX_NUM_BATCHED_TOKENS < PROMPT_LIMIT + GENERATION_LIMIT)); then
-    echo "ERROR: deployment.vllm.max_num_batched_tokens 小于 P+G 预算" >&2
-    exit 1
   fi
-  VLLM_ARGS+=(--max-model-len "$CONTEXT_LIMIT")
-  echo "部署预算预检通过：P=$PROMPT_LIMIT, G=$GENERATION_LIMIT, K=$CONTEXT_LIMIT"
 else
   echo "部署预算：P=$PROMPT_LIMIT, G=$GENERATION_LIMIT, K 未配置；服务上下文能力 not_verified"
 fi
@@ -447,12 +493,18 @@ fi
 record_vllm_lifecycle_event "health_ready"
 
 echo "vLLM 已就绪，开始推理测试"
-export EVALUATION_GPU_FACTS_JSON="$("$PYTHON_CMD" "$WORKSPACE_ROOT/scripts/e02_vllm_probe.py" gpu-facts)"
-SERVER_MODELS_JSON="$("$PYTHON_CMD" "$WORKSPACE_ROOT/scripts/e02_vllm_probe.py" models \
-  --base-url "$BASE_URL" \
-  --requested-model "$REQUEST_MODEL_NAME" \
-  --api-key "$API_KEY")"
-export EVALUATION_SERVER_MODELS_JSON="$("$PYTHON_CMD" -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["server_model_ids"]))' <<<"$SERVER_MODELS_JSON")"
+if [[ -f "$PROBE_SCRIPT" ]]; then
+  export EVALUATION_GPU_FACTS_JSON="$("$PYTHON_CMD" "$PROBE_SCRIPT" gpu-facts 2>/dev/null || echo '{}')"
+  SERVER_MODELS_JSON="$("$PYTHON_CMD" "$PROBE_SCRIPT" models \
+    --base-url "$BASE_URL" \
+    --requested-model "$REQUEST_MODEL_NAME" \
+    --api-key "$API_KEY" 2>/dev/null || echo '{"server_model_ids":[]}')"
+  export EVALUATION_SERVER_MODELS_JSON="$("$PYTHON_CMD" -c 'import json,sys; print(json.dumps(json.load(sys.stdin).get("server_model_ids", [])))' <<<"$SERVER_MODELS_JSON" 2>/dev/null || echo '[]')"
+else
+  echo "WARNING: 缺少 $PROBE_SCRIPT；跳过 GPU/模型身份诊断，不影响推理。" >&2
+  export EVALUATION_GPU_FACTS_JSON='{}'
+  export EVALUATION_SERVER_MODELS_JSON='[]'
+fi
 if [[ "$LORA_ENABLED" == "true" && -n "$CONFIG_VLLM_EXPECTED_VERSION" ]]; then
   export EVALUATION_VLLM_VERSION="$CONFIG_VLLM_EXPECTED_VERSION"
 else
@@ -463,12 +515,13 @@ export EVALUATION_BASE_URL="$BASE_URL"
 export EVALUATION_API_MODEL="$REQUEST_MODEL_NAME"
 export EVALUATION_API_KEY="$API_KEY"
 export EVALUATION_MODEL_PATH="$MODEL_DIR"
+export EVALUATION_TOKENIZER_PATH="${EVALUATION_TOKENIZER_PATH:-$MODEL_DIR}"
 [[ "$LORA_ENABLED" != "true" ]] || export EVALUATION_ADAPTER_PATH="$LORA_PATH"
 export EVALUATION_HARDWARE_LABEL="${EVALUATION_HARDWARE_LABEL:-$(hostname)}"
 
 "$PYTHON_CMD" "$SCRIPT_DIR/run_inference.py" "$TEST_FILE" "$RESULT_DIR"
 
-if [[ -n "${E02_VLLM_RUN_ROOT:-}" ]]; then
+if [[ -n "${E02_VLLM_RUN_ROOT:-}" && -f "$PROBE_SCRIPT" ]]; then
   RUN_ROOT="$E02_VLLM_RUN_ROOT"
   if [[ "$RUN_ROOT" != /* ]]; then
     RUN_ROOT="$WORKSPACE_ROOT/$RUN_ROOT"

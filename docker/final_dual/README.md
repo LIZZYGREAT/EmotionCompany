@@ -37,8 +37,28 @@ The image entrypoint also supports the following forms:
 docker run --rm --gpus all --network none IMAGE TEST_FILE RESULT_DIR
 docker run --rm --gpus all --network none IMAGE bash /root/participant/start.sh TEST_FILE RESULT_DIR
 docker run --rm --gpus all --network none IMAGE /root/participant/start.sh TEST_FILE RESULT_DIR
+docker run --rm --gpus all --network none IMAGE bash -lc "bash /root/participant/start.sh TEST_FILE RESULT_DIR"
+docker run --rm --gpus all --network none IMAGE /bin/bash -c "bash /root/participant/start.sh TEST_FILE RESULT_DIR"
+docker run --rm --gpus all --network none IMAGE sh -c "bash /root/participant/start.sh TEST_FILE RESULT_DIR"
 docker run --rm --gpus all --network none --entrypoint /bin/bash IMAGE /root/participant/start.sh TEST_FILE RESULT_DIR
 ```
+
+The entrypoint deliberately passes unknown command forms through instead of
+rejecting them.  When no arguments are supplied it stays alive only so the
+platform can attach with `docker exec`.
+
+Runtime portability behavior:
+
+- vLLM uses `--dtype auto`; BF16 is retained on Ampere+ GPUs and vLLM falls
+  back to FP16 on pre-Ampere GPUs instead of exiting on a dtype check.
+- Startup retries lower `gpu_memory_utilization`, tries alternate local ports,
+  and retries with `--enforce-eager` before giving up.
+- `fallback.degraded_output_on_runtime_failure` in the deployment config makes
+  a non-startable runtime still emit a complete, Schema-valid submission with
+  empty fields and a `degraded` report, rather than failing without files.
+- On failure the image writes `vllm_server.log` and `runtime_failure.json`
+  into `RESULT_DIR` so the reason survives even when the platform exposes no
+  container logs.
 
 To keep a container available for a later `docker exec`, mount the input and
 result locations when creating it. With no command arguments the image idles

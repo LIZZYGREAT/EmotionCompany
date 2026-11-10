@@ -7,6 +7,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -153,10 +154,18 @@ class DualLoRAVLLMService:
         self.vllm_bin = vllm_bin
         self.startup_timeout_seconds = float(startup_timeout_seconds)
         self.vllm = dict(self.config.get("deployment", {}).get("vllm", {}))
-        self.host = str(self.vllm.get("host", "127.0.0.1"))
-        self.port = int(self.vllm.get("port", 8000))
-        self.base_url = str(self.vllm.get("base_url", f"http://{self.host}:{self.port}/v1")).rstrip("/")
+        self.host = str(os.environ.get("VLLM_HOST", self.vllm.get("host", "127.0.0.1")))
+        self.port = int(os.environ.get("VLLM_PORT", self.vllm.get("port", 8000)))
+        client_host = "127.0.0.1" if self.host in {"0.0.0.0", "::"} else self.host
+        self.base_url = f"http://{client_host}:{self.port}/v1"
         self.timeout_seconds = float(request_timeout_seconds or self.vllm.get("request_timeout_seconds", 900))
+        configured_memory = os.environ.get(
+            "VLLM_GPU_MEMORY_UTILIZATION", self.vllm.get("gpu_memory_utilization", 0.8)
+        )
+        self.gpu_memory_utilization = float(configured_memory)
+        self.enforce_eager = str(
+            os.environ.get("VLLM_ENFORCE_EAGER", "")
+        ).strip().lower() in {"1", "true", "yes", "on"}
         self.process: subprocess.Popen[bytes] | None = None
         self._log_handle = None
         self.command: list[str] = []
@@ -191,12 +200,13 @@ class DualLoRAVLLMService:
             "--max-model-len", str(self.vllm["max_model_len"]),
             "--max-num-seqs", str(self.vllm["max_num_seqs"]),
             "--max-num-batched-tokens", str(self.vllm["max_num_batched_tokens"]),
-            "--gpu-memory-utilization", str(self.vllm["gpu_memory_utilization"]),
+            "--gpu-memory-utilization", str(self.gpu_memory_utilization),
             "--enable-lora",
             "--max-lora-rank", str(self.vllm["max_lora_rank"]),
             "--max-loras", str(self.vllm["max_loras"]),
             "--max-cpu-loras", str(self.vllm["max_cpu_loras"]),
             "--lora-modules", f"profile={profile_path}", f"emotion-response={emotion_path}",
+            *(["--enforce-eager"] if self.enforce_eager else []),
         ]
 
     def _resolve_binary(self) -> str:
@@ -214,12 +224,47 @@ class DualLoRAVLLMService:
             sock.settimeout(1)
             return sock.connect_ex((self.host, self.port)) != 0
 
-    def start(self) -> dict[str, Any]:
-        if self.process is not None:
-            raise RuntimeError("vLLM service is already started")
-        self.resolved_binary = self._resolve_binary()
-        if not self._port_available():
-            raise VLLMServiceError(f"configured vLLM port is already occupied: {self.host}:{self.port}")
+    def _select_port(self) -> None:
+        candidates = [self.port, *(port for port in range(8001, 8011) if port != self.port)]
+        seen: set[int] = set()
+        for port in candidates:
+            if port in seen:
+                continue
+            seen.add(port)
+            self.port = port
+            client_host = "127.0.0.1" if self.host in {"0.0.0.0", "::"} else self.host
+            self.base_url = f"http://{client_host}:{port}/v1"
+            if self._port_available():
+                return
+        raise VLLMServiceError(
+            f"no free local vLLM port in {candidates}; host={self.host}"
+        )
+
+    def _log_tail(self, limit: int = 6000) -> str:
+        try:
+            text = self.log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+        return text[-limit:]
+
+    @staticmethod
+    def _looks_like_memory_error(text: str) -> bool:
+        lowered = text.lower()
+        return any(
+            token in lowered
+            for token in (
+                "out of memory",
+                "cuda out of memory",
+                "no available memory",
+                "not enough memory",
+                "free memory",
+                "gpu_memory_utilization",
+                "kv cache",
+                "oom",
+            )
+        )
+
+    def _start_once(self, *, timeout: float) -> dict[str, Any]:
         self.command = self.build_command()
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_handle = self.log_path.open("ab")
@@ -233,7 +278,7 @@ class DualLoRAVLLMService:
             env={**os.environ, "TOKENIZERS_PARALLELISM": "false"},
         )
         try:
-            deadline = started + self.startup_timeout_seconds
+            deadline = started + timeout
             last_error: Exception | None = None
             while time.monotonic() < deadline:
                 if self.process.poll() is not None:
@@ -246,14 +291,74 @@ class DualLoRAVLLMService:
                         "status": "ready",
                         "startup_seconds": time.monotonic() - started,
                         "models": models or None,
+                        "port": self.port,
+                        "gpu_memory_utilization": self.gpu_memory_utilization,
+                        "enforce_eager": self.enforce_eager,
                     }
                 except Exception as exc:
                     last_error = exc
                     time.sleep(2)
-            raise VLLMServiceError(f"timed out waiting for vLLM readiness: {last_error}; see {self.log_path}")
+            raise VLLMServiceError(
+                f"timed out waiting for vLLM readiness: {last_error}; see {self.log_path}"
+            )
         except Exception:
             self.close()
             raise
+
+    def start(self) -> dict[str, Any]:
+        if self.process is not None:
+            raise RuntimeError("vLLM service is already started")
+        self.resolved_binary = self._resolve_binary()
+        self._select_port()
+
+        configured_memory = self.gpu_memory_utilization
+        memory_candidates = [configured_memory]
+        for value in (0.7, 0.6, 0.5, 0.4):
+            if value < configured_memory and value not in memory_candidates:
+                memory_candidates.append(value)
+
+        eager_candidates = [self.enforce_eager]
+        if not self.enforce_eager:
+            eager_candidates.append(True)
+
+        attempts: list[str] = []
+        overall_started = time.monotonic()
+        for eager in eager_candidates:
+            self.enforce_eager = eager
+            for index, memory in enumerate(memory_candidates):
+                self.gpu_memory_utilization = memory
+                timeout = self.startup_timeout_seconds if not attempts else min(
+                    self.startup_timeout_seconds, 300.0
+                )
+                try:
+                    facts = self._start_once(timeout=timeout)
+                    facts["startup_seconds"] = time.monotonic() - overall_started
+                    facts["attempts"] = attempts
+                    return facts
+                except Exception as exc:
+                    tail = self._log_tail()
+                    attempts.append(
+                        f"eager={eager} gpu_memory_utilization={memory} "
+                        f"error={type(exc).__name__}: {exc}"
+                    )
+                    print(
+                        f"WARNING: vLLM startup attempt failed "
+                        f"(eager={eager}, gpu_memory_utilization={memory}): "
+                        f"{type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    if index + 1 < len(memory_candidates) and self._looks_like_memory_error(tail):
+                        continue
+                    # Non-memory failures (driver, kernel, graph capture, ...)
+                    # are retried once with --enforce-eager when available.
+                    break
+
+        last_tail = self._log_tail(limit=2500)
+        raise VLLMServiceError(
+            "vLLM failed to start after portable retries; "
+            f"attempts={attempts}; log={self.log_path}; tail={last_tail}"
+        )
 
     def is_alive(self) -> bool:
         return self.process is not None and self.process.poll() is None

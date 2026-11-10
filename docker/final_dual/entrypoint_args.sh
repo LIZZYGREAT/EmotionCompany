@@ -2,33 +2,38 @@
 
 final_dual_parse_entrypoint_args() {
   ENTRYPOINT_IDLE=false
+  ENTRYPOINT_START_SH=false
+  ENTRYPOINT_SHELL_COMMAND=""
+  TEST_FILE=""
+  RESULT_DIR=""
+
   if [[ "$#" -eq 0 ]]; then
     ENTRYPOINT_IDLE=true
     return 0
   fi
-  local first_arg="${1:-}"
-  case "$#:$first_arg" in
-    2:*)
+
+  # Official direct form: docker run IMAGE TEST_FILE RESULT_DIR.
+  # Only interpret this as the two official paths when the first argument
+  # actually looks like the input file.  Anything else (bash -c ...,
+  # /bin/bash ... , sh -c ... , a single command string, etc.) is passed
+  # through unchanged instead of being rejected.
+  if [[ "$#" -eq 2 && "$1" != -* && "$2" != -* ]]; then
+    if [[ "$1" == *.jsonl || -f "$1" ]]; then
       TEST_FILE="$1"
       RESULT_DIR="$2"
-      ;;
-    3:/root/participant/start.sh)
-      TEST_FILE="$2"
-      RESULT_DIR="$3"
-      ;;
-    4:bash)
-      if [[ "$2" != "/root/participant/start.sh" ]]; then
-        echo "ERROR: only /root/participant/start.sh is an allowed command" >&2
-        return 2
-      fi
-      TEST_FILE="$3"
-      RESULT_DIR="$4"
-      ;;
-    *)
-      echo "Usage: docker run IMAGE TEST_FILE RESULT_DIR" >&2
-      echo "   or: docker run IMAGE bash /root/participant/start.sh TEST_FILE RESULT_DIR" >&2
-      echo "   or: docker run IMAGE /root/participant/start.sh TEST_FILE RESULT_DIR" >&2
-      return 2
-      ;;
-  esac
+      ENTRYPOINT_START_SH=true
+      return 0
+    fi
+  fi
+
+  # Some runners pass the whole command as one string.  Execute those through
+  # a shell; a single bare executable/path is passed through unchanged.
+  if [[ "$#" -eq 1 ]]; then
+    if [[ "$1" == *" "* || "$1" == *";"* || "$1" == *"|"* || "$1" == *"&"* ]]; then
+      ENTRYPOINT_SHELL_COMMAND="$1"
+    fi
+    return 0
+  fi
+
+  return 0
 }

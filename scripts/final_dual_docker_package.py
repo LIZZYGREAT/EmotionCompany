@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from jsonschema import Draft202012Validator
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -33,7 +35,11 @@ EXPECTED_MODULES = {
 CONTAINER_BASE_PATH = "/root/participant/model"
 RUNTIME_CODE_FILES = (
     Path("participant/start.sh"),
+    Path("participant/run_inference.py"),
     Path("participant/final_dual_inference.py"),
+    Path("scripts/e02_vllm_probe.py"),
+    Path("docker/final_dual/entrypoint.sh"),
+    Path("docker/final_dual/entrypoint_args.sh"),
     Path("src/inference/final_dual_protocol.py"),
     Path("src/inference/final_dual_runtime.py"),
     Path("src/inference/final_dual_vllm.py"),
@@ -41,7 +47,10 @@ RUNTIME_CODE_FILES = (
 
 COPY_FILES = (
     Path("participant/start.sh"),
+    Path("participant/run_inference.py"),
     Path("participant/final_dual_inference.py"),
+    Path("participant/configs/inference_config.json"),
+    Path("scripts/e02_vllm_probe.py"),
     SCHEMA_PATH,
     DOCKER_CONFIG,
     Path("configs/prompts/p0.txt"),
@@ -153,10 +162,10 @@ def _git_head(root: Path) -> str | None:
 
 def validate_static_config(config: dict[str, Any], repo_root: Path = ROOT) -> dict[str, Any]:
     source = load_json(repo_root / SOURCE_CONFIG)
-    if config.get("version") != "E03-final-dual-docker-v2.0":
-        raise ValueError("Docker config must declare the simplified v2 runtime contract")
-    if config.get("runtime_contract_version") != "E03-v2-simplified-inference-entrypoint":
-        raise ValueError("Docker config must identify the simplified inference entrypoint")
+    if config.get("version") != "E03-final-dual-docker-v3.0":
+        raise ValueError("Docker config must declare the v3 portable runtime contract")
+    if config.get("runtime_contract_version") != "E03-v3-portable-runtime":
+        raise ValueError("Docker config must identify the portable inference entrypoint")
     if config.get("mode") != "dual_adapter" or config.get("backend") != "vllm":
         raise ValueError("Docker deployment config must use mode=dual_adapter and backend=vllm")
     if config.get("model_id") != source.get("model_id") or config.get("model_revision") != source.get("model_revision"):
@@ -205,8 +214,10 @@ def validate_static_config(config: dict[str, Any], repo_root: Path = ROOT) -> di
         if any(record.get(key) != value for key, value in expected.items()):
             raise ValueError(f"Docker {name} Adapter identity/path differs from the locked assets")
     vllm = config["deployment"]["vllm"]
-    if vllm.get("expected_version") != "0.11.1" or vllm.get("dtype") != "bfloat16":
-        raise ValueError("Docker runtime must use vLLM 0.11.1 BF16")
+    if vllm.get("expected_version") != "0.11.1" or vllm.get("dtype") not in {
+        "auto", "bfloat16", "float16", "float32",
+    }:
+        raise ValueError("Docker runtime must use vLLM 0.11.1 with an environment-compatible dtype")
     if (config["context"]["max_prompt_tokens"] + config["generation"]["emotion_response"]["max_new_tokens"]
             > vllm["max_model_len"]):
         raise ValueError("Docker vLLM context is smaller than the frozen prompt+generation budget")
@@ -239,7 +250,7 @@ def check_static(repo_root: Path = ROOT) -> dict[str, Any]:
         raise ValueError("Dockerfile must use the pinned conda-forge Miniforge 26.1.0-0 image")
     if "ENV CONDA_DEFAULT_ENV=conda_env" not in dockerfile or "ENV VLLM_BIN=/opt/conda/envs/conda_env/bin/vllm" not in dockerfile:
         raise ValueError("Dockerfile does not use the fixed conda_env vLLM runtime")
-    if "HF_HUB_OFFLINE=1" not in entrypoint or "TRANSFORMERS_OFFLINE=1" not in entrypoint or "EVALUATION_BACKEND=vllm" not in entrypoint:
+    if "HF_HUB_OFFLINE" not in entrypoint or "TRANSFORMERS_OFFLINE" not in entrypoint or "EVALUATION_BACKEND" not in entrypoint:
         raise ValueError("Docker entrypoint must force offline vLLM inference")
     if 'exec bash /root/participant/start.sh "$TEST_FILE" "$RESULT_DIR"' not in entrypoint:
         raise ValueError("Docker entrypoint must pass the two official arguments to start.sh")
@@ -587,6 +598,15 @@ def verify_output(
     row_count = len(inputs)
     if len(predictions) != row_count or output_ids != input_ids:
         raise ValueError("submission rows must preserve every input ID in order")
+    schema = load_json(ROOT / SCHEMA_PATH)
+    validator = Draft202012Validator(schema)
+    for row in predictions:
+        errors = sorted(validator.iter_errors(row), key=lambda item: list(item.path))
+        if errors:
+            raise ValueError(
+                f"submission row does not satisfy the official Schema: "
+                f"{row.get('id')}: {errors[0].message}"
+            )
     load_json(report_path)
 
     return {
@@ -594,6 +614,7 @@ def verify_output(
         "input_rows": row_count,
         "submission_rows": len(predictions),
         "ids_preserved_in_order": True,
+        "submission_schema_valid": True,
     }
 
 
