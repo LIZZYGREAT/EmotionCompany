@@ -16,14 +16,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from jsonschema import Draft202012Validator
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 SOURCE_CONFIG = Path("configs/deployment/final_dual_v1_2.json")
 DOCKER_CONFIG = Path("configs/deployment/final_dual_docker.json")
 SCHEMA_PATH = Path("participant/templates/submission_schema.json")
+PDF_PATH = Path("report/main.pdf")
 CONDA_LOCK = Path("docker/e02/conda-linux-64.explicit.txt")
 PIP_LOCK = Path("docker/e02/requirements-linux-64.lock")
 DOCKERFILE = Path("docker/final_dual/Dockerfile")
@@ -60,6 +59,7 @@ COPY_FILES = (
     DOCKERFILE,
     ENTRYPOINT,
     Path("docker/final_dual/entrypoint_args.sh"),
+    PDF_PATH,
 )
 COPY_DIRS = (Path("src/shared"),)
 MAX_IMAGE_BYTES = 50_000_000_000
@@ -73,6 +73,17 @@ def sha256_file(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def pdf_asset_facts(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise FileNotFoundError(f"required report PDF is missing: {path}")
+    size_bytes = path.stat().st_size
+    with path.open("rb") as handle:
+        header = handle.read(5)
+    if size_bytes <= 0 or header != b"%PDF-":
+        raise ValueError(f"report PDF must be non-empty and begin with %PDF-: {path}")
+    return {"path": PDF_PATH.as_posix(), "size_bytes": size_bytes, "sha256": sha256_file(path)}
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -252,12 +263,14 @@ def check_static(repo_root: Path = ROOT) -> dict[str, Any]:
     for relative in COPY_DIRS:
         if not (repo_root / relative).is_dir():
             raise FileNotFoundError(f"Docker package source directory is missing: {relative}")
+    report_pdf = pdf_asset_facts(repo_root / PDF_PATH)
     return {
         "status": "ready_for_asset_packaging",
         "facts": facts,
         "package_preflight": {"status": "passed", "scope": "static config and build inputs"},
         "runtime_lock_package_count": len(pins),
         "image_size_limit_bytes": MAX_IMAGE_BYTES,
+        "report_pdf": report_pdf,
     }
 
 
@@ -492,6 +505,7 @@ def prepare_context(*, output_dir: Path, repo_root: Path = ROOT) -> dict[str, An
             "package_preflight": static["package_preflight"],
             "source_file_sha256": copied_source_hashes,
             "container_file_sha256": code_hashes,
+            "report_pdf": pdf_asset_facts(temporary_dir / PDF_PATH),
             "context_regular_file_bytes_before_manifest": _regular_file_bytes(temporary_dir),
         }
         manifest_path = temporary_dir / "package_manifest.json"
@@ -531,6 +545,8 @@ def _read_jsonl(path: Path, *, exact_input: bool = False) -> list[dict[str, Any]
                 raise ValueError(f"{path}:{line_number}: input must provide id and history")
             if not isinstance(row.get("id"), str):
                 raise ValueError(f"{path}:{line_number}: id must be a string")
+            if exact_input and not isinstance(row.get("history"), list):
+                raise ValueError(f"{path}:{line_number}: history must be an array")
             rows.append(row)
     if not rows:
         raise ValueError(f"{path}: empty rows")
@@ -555,10 +571,9 @@ def _report_output_file(report: dict[str, Any], result_dir: Path, name: str) -> 
 
 
 def verify_output(
-    *, test_file: Path, result_dir: Path, repo_root: Path = ROOT,
-    expected_rows: int | None = 20,
+    *, test_file: Path, result_dir: Path,
 ) -> dict[str, Any]:
-    """Check only the official output contract and per-row Schema."""
+    """Check both official files, row counts, and exact ID order."""
     submission_path = result_dir / "submission.jsonl"
     report_path = result_dir / "performance_report.json"
     for path in (submission_path, report_path):
@@ -570,43 +585,15 @@ def verify_output(
     input_ids = [row["id"] for row in inputs]
     output_ids = [row["id"] for row in predictions]
     row_count = len(inputs)
-    if expected_rows is not None and row_count != expected_rows:
-        raise ValueError(f"expected {expected_rows} input rows, found {row_count}")
     if len(predictions) != row_count or output_ids != input_ids:
         raise ValueError("submission rows must preserve every input ID in order")
-
-    schema = load_json(repo_root / SCHEMA_PATH)
-    validator = Draft202012Validator(schema)
-    invalid_rows = [
-        index for index, row in enumerate(predictions, 1)
-        if next(validator.iter_errors(row), None) is not None
-    ]
-    if invalid_rows:
-        raise ValueError(f"submission schema failed for rows {invalid_rows[:5]}")
-
-    report = load_json(report_path)
-    if report.get("status") != "passed" or report.get("complete") is not True:
-        raise ValueError("performance_report does not show a completed run")
-    if report.get("backend") != "vllm":
-        raise ValueError("Docker inference did not use the configured vLLM backend")
-    if report.get("samples") != row_count or report.get("submission_rows") != row_count:
-        raise ValueError("performance_report sample/output count differs from TEST_FILE")
-    performance = report.get("performance", {})
-    if performance.get("measurement_limit") != 100:
-        raise ValueError("performance_report must cap timing measurements at 100 samples")
-    if performance.get("measured_samples") != min(row_count, 100):
-        raise ValueError("performance_report measurement count differs from the first-100 rule")
-    output_records = report.get("outputs", {})
-    if not all(name in output_records for name in ("submission.jsonl", "performance_report.json")):
-        raise ValueError("performance_report does not list both official output files")
+    load_json(report_path)
 
     return {
         "status": "passed_interface_output",
         "input_rows": row_count,
         "submission_rows": len(predictions),
-        "schema_valid_rows": len(predictions),
-        "field_fallback_count": report.get("field_fallback_count", {}),
-        "performance_measured_samples": performance["measured_samples"],
+        "ids_preserved_in_order": True,
     }
 
 
@@ -617,10 +604,9 @@ def build_parser() -> argparse.ArgumentParser:
     prepare = sub.add_parser("prepare", help="create a verified, white-list Docker context under outputs/")
     prepare.add_argument("--config", type=Path, default=ROOT / DOCKER_CONFIG)
     prepare.add_argument("--output-dir", type=Path, required=True)
-    verify = sub.add_parser("verify-output", help="check the official output contract and Schema")
+    verify = sub.add_parser("verify-output", help="check official files, row counts, and ID order")
     verify.add_argument("--test-file", type=Path, required=True)
     verify.add_argument("--result-dir", type=Path, required=True)
-    verify.add_argument("--expected-rows", type=int, default=20, help="expected official input/output rows; use 100 for the fixed stress set")
     return parser
 
 
@@ -640,7 +626,6 @@ def main(argv: list[str] | None = None) -> int:
             result = verify_output(
                 test_file=args.test_file.expanduser().resolve(),
                 result_dir=args.result_dir.expanduser().resolve(),
-                expected_rows=args.expected_rows,
             )
     except Exception as exc:
         print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)

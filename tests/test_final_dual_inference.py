@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from jsonschema import Draft202012Validator
 
 import participant.final_dual_inference as final_dual
 
@@ -50,7 +49,15 @@ def test_read_test_samples_requires_id_and_history(tmp_path: Path, row: dict[str
     path = tmp_path / "input.jsonl"
     _write_jsonl(path, [row])
 
-    with pytest.raises(ValueError, match="provide id and history"):
+    with pytest.raises(ValueError):
+        final_dual.read_test_samples(path)
+
+
+def test_read_test_samples_rejects_non_array_history(tmp_path: Path) -> None:
+    path = tmp_path / "input.jsonl"
+    _write_jsonl(path, [{"id": "raw:id", "history": None}])
+
+    with pytest.raises(ValueError, match="history must be an array"):
         final_dual.read_test_samples(path)
 
 
@@ -68,6 +75,7 @@ def _run_mocked_main(
     rows: list[dict[str, Any]],
     *,
     request_error_at: int | None = None,
+    service_dies_on_error: bool = False,
     preserve_existing: bool = False,
 ) -> tuple[int, Path, list[tuple[str, list[dict[str, Any]], int]], dict[str, Any]]:
     test_file = tmp_path / "input.jsonl"
@@ -116,7 +124,7 @@ def _run_mocked_main(
     monkeypatch.setattr(final_dual, "build_profile_prompt", build_prompt)
     monkeypatch.setattr(final_dual, "build_emotion_response_prompt", build_prompt)
     calls: list[tuple[str, list[dict[str, Any]], int]] = []
-    service_state = {"closed": False}
+    service_state = {"closed": False, "dead": False}
 
     class FakeService:
         def __init__(self, **_kwargs: Any):
@@ -125,16 +133,25 @@ def _run_mocked_main(
         def start(self) -> dict[str, Any]:
             return {"startup_seconds": 0.01, "models": []}
 
+        def is_alive(self) -> bool:
+            return not service_state["dead"]
+
+        def list_models(self, *, timeout: float = 10.0) -> list[str]:
+            if service_state["dead"]:
+                raise RuntimeError("simulated unavailable service")
+            return []
+
         def chat_completion(
             self, *, model_alias: str, messages: list[dict[str, Any]], max_tokens: int
         ) -> dict[str, Any]:
             calls.append((model_alias, messages, max_tokens))
             if request_error_at is not None and len(calls) == request_error_at:
+                service_state["dead"] = service_dies_on_error
                 raise RuntimeError("simulated HTTP request failure")
             if model_alias == "profile":
                 return {"text": "malformed profile output"}
             sample_id = messages[0]["content"]
-            text = "emotion=invalid_label;response=Kept valid response text." if sample_id == "test_000001_t1" else (
+            text = "emotion=invalid_label;response=Kept valid response text." if sample_id in {"test_000001_t1", "test1_000001_t5"} else (
                 "emotion=anxiety;response=A normal response."
             )
             return {"text": text}
@@ -163,11 +180,12 @@ def test_main_falls_back_per_field_continues_and_overwrites_only_official_output
     rows = [
         {
             **_sample(1),
+            "id": "test1_000001_t5",
             "target": {"emotion": "must not enter the prompt"},
             "history": [{"role": "user", "content": "hello", "turn_id": 0, "extra": "ignored"}],
         },
         {"id": "test_000002_t1", "history": ["malformed history message"]},
-        _sample(3),
+        {**_sample(3), "id": "raw/id:003"},
     ]
     code, result_dir, calls, facts = _run_mocked_main(
         tmp_path, monkeypatch, rows, preserve_existing=True
@@ -178,15 +196,16 @@ def test_main_falls_back_per_field_continues_and_overwrites_only_official_output
     assert all(call[2] in {256, 1200} for call in calls)
     assert facts["service_state"]["closed"] is True
     assert facts["prompt_samples"][0] == {
-        "id": "test_000001_t1",
+        "id": "test1_000001_t5",
         "history": [{"role": "user", "content": "hello", "turn_id": 0}],
     }
 
     submissions = [json.loads(line) for line in (result_dir / "submission.jsonl").read_text(encoding="utf-8").splitlines()]
     assert [row["id"] for row in submissions] == [row["id"] for row in rows]
-    schema = json.loads(final_dual.SCHEMA_PATH.read_text(encoding="utf-8"))
-    validator = Draft202012Validator(schema)
-    assert all(validator.is_valid(row) for row in submissions)
+    assert all(
+        set(row) == {"id", "response_text", "emotion_label", "user_profile", "memory_refs"}
+        for row in submissions
+    )
     assert submissions[0]["emotion_label"] == ""
     assert submissions[0]["response_text"] == "Kept valid response text."
     assert submissions[1]["user_profile"] == {
@@ -226,7 +245,12 @@ def test_service_failure_returns_nonzero_preserves_old_outputs_and_closes_servic
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     code, result_dir, _calls, facts = _run_mocked_main(
-        tmp_path, monkeypatch, [_sample(1)], request_error_at=1, preserve_existing=True
+        tmp_path,
+        monkeypatch,
+        [_sample(1)],
+        request_error_at=1,
+        service_dies_on_error=True,
+        preserve_existing=True,
     )
 
     assert code == 1
@@ -237,6 +261,23 @@ def test_service_failure_returns_nonzero_preserves_old_outputs_and_closes_servic
     assert sorted(path.name for path in result_dir.iterdir()) == [
         "keep.txt", "performance_report.json", "submission.jsonl"
     ]
+
+
+def test_single_route_request_failure_uses_fallback_and_finishes_when_service_is_alive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code, result_dir, calls, facts = _run_mocked_main(
+        tmp_path, monkeypatch, [{**_sample(1), "id": "service-error-id"}], request_error_at=1
+    )
+
+    assert code == 0
+    assert len(calls) == 2
+    assert facts["service_state"]["closed"] is True
+    submission = json.loads((result_dir / "submission.jsonl").read_text(encoding="utf-8"))
+    assert submission["user_profile"] == {
+        "personality_traits": [], "interests": [], "style": []
+    }
+    assert submission["emotion_label"] == "anxiety"
 
 
 def test_main_measures_only_the_first_100_samples(

@@ -93,6 +93,25 @@ def test_chat_completion_sends_required_payload_without_token_id_extension(monke
     assert result["usage_completion_tokens"] is None
 
 
+def test_chat_completion_accepts_only_choices_message_content(monkeypatch, tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    monkeypatch.setattr(dual_vllm, "_http_json", lambda *args, **kwargs: {
+        "choices": [{"message": {"content": "emotion=neutral;response=Here with you."}}],
+    })
+
+    result = service.chat_completion(
+        model_alias="emotion-response",
+        messages=[{"role": "user", "content": "hello"}],
+        max_tokens=1200,
+    )
+
+    assert result["text"] == "emotion=neutral;response=Here with you."
+    assert result["usage_prompt_tokens"] is None
+    assert result["usage_completion_tokens"] is None
+    assert result["finish_reason"] is None
+    assert result["response_id"] is None
+
+
 def test_chat_completion_treats_empty_content_as_field_fallback_and_metadata_as_optional(monkeypatch, tmp_path: Path) -> None:
     service = _service(tmp_path)
     monkeypatch.setattr(dual_vllm, "_http_json", lambda *args, **kwargs: {

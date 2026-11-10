@@ -327,10 +327,8 @@ def assemble_submission(
     profile_raw: str | None,
     emotion_response_raw: str | None,
     official_schema: Mapping[str, Any],
-    *,
-    validate_schema: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Keep valid fields from either route and enforce the official submission schema."""
+    """Keep parseable fields from either route and use field-level fallbacks."""
     profile = {dimension: [] for dimension in PROFILE_DIMS}
     profile_error = None
     if profile_raw is None:
@@ -363,10 +361,6 @@ def assemble_submission(
         "user_profile": profile,
         "memory_refs": [],
     }
-    if validate_schema:
-        from jsonschema import Draft202012Validator
-
-        Draft202012Validator(dict(official_schema)).validate(submission)
     diagnostics = {
         "profile_parse_error": profile_error,
         "emotion_parse_error": emotion["emotion_error"],

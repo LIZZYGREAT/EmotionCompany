@@ -29,6 +29,8 @@ ROUTES = (
     ("profile", "profile"),
     ("emotion_response", "emotion-response"),
 )
+
+
 def resolve_path(value: str | Path) -> Path:
     path = Path(value).expanduser()
     return (path if path.is_absolute() else ROOT / path).resolve()
@@ -49,30 +51,29 @@ def read_test_samples(path: Path) -> list[dict[str, Any]]:
                 row = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"{path}:{line_number}: invalid JSON") from exc
-            if not isinstance(row, dict) or "id" not in row or "history" not in row:
-                raise ValueError(f"{path}:{line_number}: each row must provide id and history")
-            sample_id = row["id"]
+            if not isinstance(row, dict):
+                raise ValueError(f"{path}:{line_number}: each row must be a JSON object")
+            sample_id = row.get("id")
             if not isinstance(sample_id, str):
                 raise ValueError(f"{path}:{line_number}: id must be a string")
 
-            raw_history = row["history"]
+            raw_history = row.get("history")
             if not isinstance(raw_history, list):
-                history: list[dict[str, Any]] = []
-            else:
-                history = []
-                for message in raw_history:
-                    if not isinstance(message, dict):
-                        history.append({})
-                        continue
-                    clean_message = {
-                        key: message[key]
-                        for key in ("role", "content")
-                        if key in message
-                    }
-                    turn_id = message.get("turn_id")
-                    if type(turn_id) is int and turn_id >= 0:
-                        clean_message["turn_id"] = turn_id
-                    history.append(clean_message)
+                raise ValueError(f"{path}:{line_number}: history must be an array")
+            history: list[dict[str, Any]] = []
+            for message in raw_history:
+                if not isinstance(message, dict):
+                    history.append({})
+                    continue
+                clean_message = {
+                    key: message[key]
+                    for key in ("role", "content")
+                    if key in message
+                }
+                turn_id = message.get("turn_id")
+                if type(turn_id) is int and turn_id >= 0:
+                    clean_message["turn_id"] = turn_id
+                history.append(clean_message)
             samples.append({"id": sample_id, "history": history})
     if not samples:
         raise ValueError(f"TEST_FILE contains no JSON records: {path}")
@@ -281,34 +282,49 @@ def main() -> int:
                         if prompt is None:
                             continue
                         max_new_tokens = int(generation_config[route]["max_new_tokens"])
-                        if backend == "vllm":
-                            if service is None:
-                                raise RuntimeError("vLLM service is not initialized")
-                            response = service.chat_completion(
-                                model_alias=model_alias,
-                                messages=prompt["messages"],
-                                max_tokens=max_new_tokens,
+                        try:
+                            if backend == "vllm":
+                                if service is None:
+                                    raise RuntimeError("vLLM service is not initialized")
+                                response = service.chat_completion(
+                                    model_alias=model_alias,
+                                    messages=prompt["messages"],
+                                    max_tokens=max_new_tokens,
+                                )
+                            else:
+                                if runtime is None:
+                                    raise RuntimeError("Transformers runtime is not initialized")
+                                adapter_name = "profile" if route == "profile" else "emotion-response"
+                                response = runtime.generate(
+                                    adapter_name,
+                                    prompt["prompt_ids"],
+                                    max_new_tokens=max_new_tokens,
+                                    eos_token_id=eos_token_id,
+                                    pad_token_id=pad_token_id,
+                                )
+                            text = response.get("text") if isinstance(response, dict) else None
+                            generated[route] = text if isinstance(text, str) else ""
+                        except Exception as exc:
+                            print(
+                                f"WARNING: {sample['id']} {route} request failed; using field fallback: "
+                                f"{type(exc).__name__}: {exc}",
+                                file=sys.stderr,
+                                flush=True,
                             )
-                        else:
-                            if runtime is None:
-                                raise RuntimeError("Transformers runtime is not initialized")
-                            adapter_name = "profile" if route == "profile" else "emotion-response"
-                            response = runtime.generate(
-                                adapter_name,
-                                prompt["prompt_ids"],
-                                max_new_tokens=max_new_tokens,
-                                eos_token_id=eos_token_id,
-                                pad_token_id=pad_token_id,
-                            )
-                        text = response.get("text") if isinstance(response, dict) else None
-                        generated[route] = text if isinstance(text, str) else ""
+                            generated[route] = None
+                            if backend == "vllm":
+                                if service is None or not service.is_alive():
+                                    raise RuntimeError("vLLM service became unavailable during inference") from exc
+                                try:
+                                    service.list_models(timeout=5)
+                                except Exception as health_exc:
+                                    raise RuntimeError("vLLM service became unavailable during inference") from health_exc
 
                     submission, diagnostics = assemble_submission(
                         sample["id"],
                         generated["profile"],
                         generated["emotion_response"],
                         schema,
-                        validate_schema=False,
                     )
                     row_errors = {
                         "profile": diagnostics.get("profile_parse_error"),

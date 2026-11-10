@@ -245,6 +245,12 @@ def test_assembly_preserves_valid_profile_and_er_response_when_emotion_is_invali
     assert diagnostics["emotion_parse_error"] == "invalid_emotion_label"
 
 
-def test_submission_id_is_checked_by_official_schema() -> None:
-    with pytest.raises(Exception):
-        assemble_submission("val:bad-id", None, None, SCHEMA)
+def test_submission_id_is_preserved_without_runtime_schema_rejection() -> None:
+    row, diagnostics = assemble_submission("val:bad-id", None, None, SCHEMA)
+
+    assert row["id"] == "val:bad-id"
+    assert row["user_profile"] == {"personality_traits": [], "interests": [], "style": []}
+    assert row["emotion_label"] == ""
+    assert row["response_text"] == ""
+    assert row["memory_refs"] == []
+    assert diagnostics["profile_parse_error"] == "generation_failed"

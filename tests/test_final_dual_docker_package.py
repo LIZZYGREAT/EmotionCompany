@@ -39,6 +39,7 @@ def test_dockerfile_pins_validated_build_images_and_minimal_runtime_entrypoint()
     assert 'exec bash /root/participant/start.sh "$TEST_FILE" "$RESULT_DIR"' in entrypoint
     assert "participant/run_inference.py" not in dockerfile
     assert "scripts/e02_vllm_probe.py" not in dockerfile
+    assert "COPY report/main.pdf /root/report/main.pdf" in dockerfile
 
 
 def test_static_package_preflight_accepts_simplified_runtime_contract() -> None:
@@ -46,6 +47,20 @@ def test_static_package_preflight_accepts_simplified_runtime_contract() -> None:
 
     assert result["status"] == "ready_for_asset_packaging"
     assert result["package_preflight"]["status"] == "passed"
+    assert result["report_pdf"]["size_bytes"] > 0
+    assert len(result["report_pdf"]["sha256"]) == 64
+
+
+@pytest.mark.parametrize(
+    ("content", "error"),
+    [(b"", "non-empty"), (b"not a pdf", "begin with %PDF-")],
+)
+def test_pdf_asset_requires_nonempty_pdf_header(tmp_path: Path, content: bytes, error: str) -> None:
+    path = tmp_path / "main.pdf"
+    path.write_bytes(content)
+
+    with pytest.raises(ValueError, match=error):
+        package.pdf_asset_facts(path)
 
 
 def test_read_jsonl_requires_id_and_history_but_ignores_additional_metadata(tmp_path: Path) -> None:
@@ -143,37 +158,36 @@ def _verify_fixture(tmp_path: Path) -> tuple[Path, Path, Path, list[dict[str, An
     return repo, test_file, result_dir, input_rows, outputs
 
 
-def test_verify_output_checks_only_official_files_ids_order_and_schema(tmp_path: Path) -> None:
+def test_verify_output_checks_only_official_files_ids_and_order(tmp_path: Path) -> None:
     repo, test_file, result_dir, _input_rows, _outputs = _verify_fixture(tmp_path)
 
     result = package.verify_output(
         test_file=test_file,
         result_dir=result_dir,
-        repo_root=repo,
-        expected_rows=3,
     )
 
     assert result["status"] == "passed_interface_output"
     assert result["input_rows"] == result["submission_rows"] == 3
-    assert result["schema_valid_rows"] == 3
-    assert result["performance_measured_samples"] == 3
+    assert result["ids_preserved_in_order"] is True
 
 
-@pytest.mark.parametrize("failure", ["id_order", "schema", "missing_report"])
+@pytest.mark.parametrize("failure", ["id_order", "missing_id", "missing_report", "invalid_report"])
 def test_verify_output_rejects_broken_official_contract(tmp_path: Path, failure: str) -> None:
     repo, test_file, result_dir, _input_rows, outputs = _verify_fixture(tmp_path)
     if failure == "id_order":
         _write_jsonl(result_dir / "submission.jsonl", list(reversed(outputs)))
-    elif failure == "schema":
-        invalid = {**outputs[0], "extra": "not allowed"}
+    elif failure == "missing_id":
+        invalid = {**outputs[0]}
+        invalid.pop("id")
         _write_jsonl(result_dir / "submission.jsonl", [invalid, *outputs[1:]])
     else:
-        (result_dir / "performance_report.json").unlink()
+        if failure == "missing_report":
+            (result_dir / "performance_report.json").unlink()
+        else:
+            (result_dir / "performance_report.json").write_text("not-json", encoding="utf-8")
 
     with pytest.raises((ValueError, FileNotFoundError)):
         package.verify_output(
             test_file=test_file,
             result_dir=result_dir,
-            repo_root=repo,
-            expected_rows=3,
         )

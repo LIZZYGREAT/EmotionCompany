@@ -45,6 +45,7 @@ COPY participant/final_dual_inference.py /root/participant/final_dual_inference.
 COPY participant/templates/submission_schema.json /root/participant/templates/submission_schema.json
 COPY participant/model /root/participant/model
 COPY participant/adapters /root/participant/adapters
+COPY report/main.pdf /root/report/main.pdf
 COPY model_lock.json /root/model_lock.json
 COPY configs/deployment/final_dual_docker.json /root/configs/deployment/final_dual_docker.json
 COPY configs/prompts/p0.txt /root/configs/prompts/p0.txt

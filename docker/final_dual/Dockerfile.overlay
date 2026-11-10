@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+ARG BASE_IMAGE_ID
+LABEL org.emotionalcompany.base-image-id=${BASE_IMAGE_ID}
+
+WORKDIR /root
+
+COPY participant/final_dual_inference.py /root/participant/final_dual_inference.py
+COPY src/inference/final_dual_protocol.py /root/src/inference/final_dual_protocol.py
+COPY src/inference/final_dual_vllm.py /root/src/inference/final_dual_vllm.py
+COPY report/main.pdf /root/report/main.pdf
+
+RUN test -s /root/report/main.pdf \
+    && test -x /opt/conda/envs/conda_env/bin/python \
+    && test -x /opt/conda/envs/conda_env/bin/vllm \
+    && test -f /root/participant/model/config.json \
+    && test -s /root/participant/adapters/profile/adapter_model.safetensors \
+    && test -s /root/participant/adapters/emotion-response/adapter_model.safetensors
